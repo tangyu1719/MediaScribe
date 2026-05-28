@@ -33,6 +33,9 @@ venv/
 *.swp
 *.swo
 
+# ── 后端进程运行时 ──
+backend/.run/
+
 # ── 临时文件 ──
 *.tmp
 *.log
