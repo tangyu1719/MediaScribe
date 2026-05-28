@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>SuperBizAgent · 登录</title>
+<link rel="stylesheet" href="/assets/css/app.css">
+<style>
+  .login-page {
+    display:flex; align-items:center; justify-content:center;
+    min-height:100vh; padding:24px;
+  }
+  .login-card {
+    width:100%; max-width:420px;
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:28px;
+    padding:36px 32px 32px;
+    box-shadow:0 24px 64px rgba(15,23,42,.09),0 8px 24px rgba(15,23,42,.05),0 0 0 1px rgba(255,255,255,.55) inset;
+  }
+  .login-card .brand {
+    text-align:center; margin-bottom:28px;
+  }
+  .login-card .brand h1 {
+    font-size:20px; font-weight:700; color:var(--t1);
+    letter-spacing:-.02em; margin-bottom:4px;
+  }
+  .login-card .brand .sub {
+    font-size:11px; color:var(--t3); letter-spacing:.04em;
+  }
+  .login-tabs {
+    display:flex; gap:4px; margin-bottom:24px;
+    background:var(--bg3); border-radius:var(--pill);
+    padding:4px;
+  }
+  .login-tab {
+    flex:1; text-align:center; padding:9px 0;
+    border-radius:var(--pill); font-size:13px; font-weight:500;
+    cursor:pointer; border:none; background:transparent;
+    color:var(--t2); transition:all .18s ease;
+  }
+  .login-tab.on {
+    background:var(--surface); color:var(--a1); font-weight:600;
+    box-shadow:0 2px 8px rgba(15,23,42,.08);
+  }
+  .login-tab:hover:not(.on) { color:var(--t1); }
+  .login-field {
+    margin-bottom:16px;
+  }
+  .login-field label {
+    display:block; font-size:12px; font-weight:600; color:var(--t2);
+    margin-bottom:6px;
+  }
+  .login-field input {
+    width:100%; padding:10px 14px;
+    background:var(--bg3); border:1px solid var(--border);
+    border-radius:var(--r2); font-size:13px; font-family:var(--ff);
+    outline:none; color:var(--t1); transition:border-color .15s,box-shadow .15s;
+  }
+  .login-field input:focus {
+    border-color:var(--a1); box-shadow:0 0 0 3px var(--a-glow); background:var(--bg2);
+  }
+  .login-field input::placeholder { color:var(--t3); }
+  .login-field-row {
+    display:flex; gap:10px; align-items:flex-end;
+  }
+  .login-field-row .login-field { flex:1; margin-bottom:0; }
+  .login-code-btn {
+    flex-shrink:0; white-space:nowrap;
+    padding:10px 14px; border-radius:var(--pill); font-size:12px; font-weight:600;
+    cursor:pointer; border:1px solid var(--a1);
+    background:var(--a-light); color:var(--a1);
+    transition:all .15s; margin-bottom:0; min-height:42px;
+  }
+  .login-code-btn:hover:not(:disabled) {
+    background:var(--a1); color:#fff;
+  }
+  .login-code-btn:disabled { opacity:.5; cursor:not-allowed; }
+  .login-submit {
+    width:100%; padding:11px; margin-top:8px;
+    border-radius:var(--pill); font-size:14px; font-weight:600;
+    cursor:pointer; border:none;
+    background:var(--a1); color:#fff;
+    box-shadow:0 4px 16px rgba(37,99,235,.25);
+    transition:all .15s;
+  }
+  .login-submit:hover:not(:disabled) {
+    background:var(--a3); box-shadow:0 8px 24px rgba(37,99,235,.32);
+    transform:translateY(-1px);
+  }
+  .login-submit:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  .login-submit:active { transform:scale(.98); }
+  .login-hint {
+    font-size:11px; color:var(--t3); text-align:center; margin-top:12px;
+    line-height:1.5;
+  }
+  .login-hint.warn { color:var(--warn); }
+  .login-error {
+    background:#fef2f2; border:1px solid #fecaca; color:var(--err);
+    padding:8px 14px; border-radius:var(--r3); font-size:12px;
+    margin-bottom:16px; display:none;
+  }
+  .login-error.show { display:block; }
+  .login-success {
+    background:#f0fdf4; border:1px solid #bbf7d0; color:var(--ok);
+    padding:8px 14px; border-radius:var(--r3); font-size:12px;
+    margin-bottom:16px; display:none;
+  }
+  .login-success.show { display:block; }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+</style>
+</head>
+<body>
+<div class="login-page">
+  <div class="login-card">
+    <div class="brand">
+      <h1>SuperBizAgent</h1>
+      <div class="sub">多模态文档化助手平台</div>
+    </div>
+
+    <!-- Tab 切换 -->
+    <div class="login-tabs" id="loginTabs">
+      <button class="login-tab" data-tab="sms">手机验证码</button>
+      <button class="login-tab on" data-tab="pwd">账号登录</button>
+      <button class="login-tab" data-tab="reg">邮箱注册</button>
+    </div>
+
+    <!-- 错误/成功提示 -->
+    <div class="login-error" id="loginError"></div>
+    <div class="login-success" id="loginSuccess"></div>
+
+    <!-- Tab 1: 手机验证码登录 -->
+    <div class="tab-panel" id="panelSms">
+      <div class="login-field">
+        <label>手机号</label>
+        <input id="smsPhone" placeholder="请输入手机号" maxlength="11">
+      </div>
+      <div class="login-field">
+        <label>验证码</label>
+        <div class="login-field-row">
+          <div class="login-field">
+            <input id="smsCode" placeholder="6 位验证码" maxlength="6">
+          </div>
+          <button class="login-code-btn" id="smsCodeBtn">获取验证码</button>
+        </div>
+      </div>
+      <div class="login-hint warn">短信服务暂未开通，验证码将输出至服务端控制台日志</div>
+      <button class="login-submit" id="smsSubmit">登 录</button>
+    </div>
+
+    <!-- Tab 2: 账号密码登录（默认） -->
+    <div class="tab-panel active" id="panelPwd">
+      <div class="login-field">
+        <label>用户名 / 手机号 / 邮箱</label>
+        <input id="pwdIdentifier" placeholder="请输入用户名、手机号或邮箱">
+      </div>
+      <div class="login-field">
+        <label>密码</label>
+        <input id="pwdPassword" type="password" placeholder="请输入密码">
+      </div>
+      <p class="login-hint" style="margin-top:4px">首次部署：管理员 <code style="font-size:11px;background:var(--bg3);padding:2px 6px;border-radius:4px">admin</code> / 密码 <code style="font-size:11px;background:var(--bg3);padding:2px 6px;border-radius:4px">admin</code>（生产环境请尽快修改；可选设置 <code style="font-size:10px">SBA_JWT_SECRET</code> 固定 JWT）。</p>
+      <button class="login-submit" id="pwdSubmit">登 录</button>
+    </div>
+
+    <!-- Tab 3: 邮箱注册 -->
+    <div class="tab-panel" id="panelReg">
+      <div class="login-field">
+        <label>邮箱地址</label>
+        <input id="regEmail" placeholder="请输入邮箱地址">
+      </div>
+      <div class="login-field">
+        <label>验证码</label>
+        <div class="login-field-row">
+          <div class="login-field">
+            <input id="regCode" placeholder="6 位验证码" maxlength="6">
+          </div>
+          <button class="login-code-btn" id="regCodeBtn">获取验证码</button>
+        </div>
+      </div>
+      <div class="login-field">
+        <label>设置密码（至少 6 位）</label>
+        <input id="regPassword" type="password" placeholder="请输入密码">
+      </div>
+      <div class="login-field">
+        <label>确认密码</label>
+        <input id="regConfirm" type="password" placeholder="请再次输入密码">
+      </div>
+      <button class="login-submit" id="regSubmit">注 册</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var API = '';
+
+  function fmtErr(j, r){
+    var d = j && j.detail;
+    if(Array.isArray(d)) return d.map(function(x){ return (x && x.msg) || String(x); }).join('; ');
+    if(d && typeof d === 'object') return JSON.stringify(d);
+    if(typeof d === 'string') return d;
+    return (r && r.statusText) || '请求失败';
+  }
+
+  function parseJsonBody(txt){
+    if(!txt || !String(txt).trim()) return {};
+    try{ return JSON.parse(txt); }catch(e){ throw new Error(String(txt).slice(0, 240) || '响应非 JSON'); }
+  }
+
+  function post(url, data){
+    return fetch(API + url, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(data)
+    }).then(function(r){
+      return r.text().then(function(txt){
+        var j = parseJsonBody(txt);
+        if(!r.ok) throw new Error(fmtErr(j, r));
+        return j;
+      });
+    });
+  }
+
+  function get(url){
+    var headers = {};
+    var t = localStorage.getItem('sba_token');
+    if(t) headers['Authorization'] = 'Bearer ' + t;
+    return fetch(API + url, {headers:headers}).then(function(r){
+      return r.text().then(function(txt){
+        var j = parseJsonBody(txt);
+        if(!r.ok) throw new Error(fmtErr(j, r));
+        return j;
+      });
+    });
+  }
+
+  // ── DOM refs ──
+  var $ = function(id){ return document.getElementById(id); };
+  var elError = $('loginError'), elSuccess = $('loginSuccess');
+
+  function showErr(msg){ elError.textContent = msg; elError.classList.add('show'); elSuccess.classList.remove('show'); }
+  function showOk(msg){ elSuccess.textContent = msg; elSuccess.classList.add('show'); elError.classList.remove('show'); }
+  function clearMsgs(){ elError.classList.remove('show'); elSuccess.classList.remove('show'); }
+
+  function saveToken(token, user){
+    localStorage.setItem('sba_token', token);
+    localStorage.setItem('sba_user', JSON.stringify(user));
+  }
+  function goHome(){ window.location.href = '/'; }
+
+  // ── Tab 切换 ──
+  var tabNames = ['sms','pwd','reg'];
+  function switchTab(name){
+    tabNames.forEach(function(t){
+      $('panel' + t[0].toUpperCase() + t.slice(1)).classList.toggle('active', t === name);
+    });
+    var tabs = document.querySelectorAll('#loginTabs .login-tab');
+    tabs.forEach(function(btn){
+      btn.classList.toggle('on', btn.getAttribute('data-tab') === name);
+    });
+  }
+  $('loginTabs').addEventListener('click', function(e){
+    var tab = e.target.getAttribute('data-tab');
+    if(tab && tabNames.indexOf(tab) >= 0) switchTab(tab);
+  });
+
+  // ── 倒计时 ──
+  var timers = {};
+  function startCountdown(btnEl, key){
+    var sec = 60;
+    timers[key] = setInterval(function(){
+      sec--;
+      btnEl.textContent = sec + 's 后重发';
+      if(sec <= 0){
+        clearInterval(timers[key]);
+        timers[key] = null;
+        btnEl.textContent = '获取验证码';
+        btnEl.disabled = false;
+      }
+    }, 1000);
+    btnEl.textContent = '60s 后重发';
+    btnEl.disabled = true;
+  }
+
+  // ── 短信验证码 ──
+  function sendSmsCode(){
+    clearMsgs();
+    var phone = $('smsPhone').value.trim();
+    if(!phone || !/^1\d{10}$/.test(phone)){ showErr('请输入有效的手机号'); return; }
+    post('/api/auth/send-code', {target:phone, code_type:'sms', purpose:'login'}).then(function(){
+      showOk('验证码已生成（请查看服务端日志）');
+      startCountdown($('smsCodeBtn'), 'sms');
+    }).catch(function(e){ showErr(e.message); });
+  }
+  function doSmsLogin(){
+    clearMsgs();
+    var phone = $('smsPhone').value.trim(), code = $('smsCode').value.trim();
+    if(!phone){ showErr('请输入手机号'); return; }
+    if(!code){ showErr('请输入验证码'); return; }
+    var btn = $('smsSubmit');
+    btn.textContent = '登录中...'; btn.disabled = true;
+    post('/api/auth/login', {login_type:'sms', identifier:phone, credential:code}).then(function(res){
+      saveToken(res.access_token, res.user); goHome();
+    }).catch(function(e){ showErr(e.message); }).finally(function(){
+      btn.textContent = '登 录'; btn.disabled = false;
+    });
+  }
+
+  // ── 密码登录 ──
+  function doPwdLogin(){
+    clearMsgs();
+    var id = $('pwdIdentifier').value.trim(), pw = $('pwdPassword').value.trim();
+    if(!id){ showErr('请输入用户名、手机号或邮箱'); return; }
+    if(!pw){ showErr('请输入密码'); return; }
+    var btn = $('pwdSubmit');
+    btn.textContent = '登录中...'; btn.disabled = true;
+    post('/api/auth/login', {login_type:'password', identifier:id, credential:pw}).then(function(res){
+      saveToken(res.access_token, res.user); goHome();
+    }).catch(function(e){ showErr(e.message); }).finally(function(){
+      btn.textContent = '登 录'; btn.disabled = false;
+    });
+  }
+
+  // ── 邮箱注册 ──
+  function sendRegCode(){
+    clearMsgs();
+    var email = $('regEmail').value.trim().toLowerCase();
+    if(!email || email.indexOf('@') < 1){ showErr('请输入有效的邮箱地址'); return; }
+    post('/api/auth/send-code', {target:email, code_type:'email', purpose:'register'}).then(function(res){
+      showOk('验证码已发送' + (res.message||''));
+      startCountdown($('regCodeBtn'), 'reg');
+    }).catch(function(e){ showErr(e.message); });
+  }
+  function doRegister(){
+    clearMsgs();
+    var email = $('regEmail').value.trim().toLowerCase();
+    var code = $('regCode').value.trim();
+    var pw = $('regPassword').value.trim();
+    var cf = $('regConfirm').value.trim();
+    if(!email || email.indexOf('@') < 1){ showErr('请输入有效的邮箱地址'); return; }
+    if(!code){ showErr('请输入验证码'); return; }
+    if(!pw || pw.length < 6){ showErr('密码至少 6 位'); return; }
+    if(pw !== cf){ showErr('两次密码不一致'); return; }
+    var btn = $('regSubmit');
+    btn.textContent = '注册中...'; btn.disabled = true;
+    post('/api/auth/register', {email:email, password:pw, code:code}).then(function(res){
+      saveToken(res.access_token, res.user);
+      showOk('注册成功，即将跳转...');
+      setTimeout(goHome, 800);
+    }).catch(function(e){ showErr(e.message); }).finally(function(){
+      btn.textContent = '注 册'; btn.disabled = false;
+    });
+  }
+
+  // ── 事件绑定 ──
+  $('smsCodeBtn').addEventListener('click', sendSmsCode);
+  $('smsSubmit').addEventListener('click', doSmsLogin);
+  $('smsPhone').addEventListener('keyup', function(e){ if(e.key==='Enter') doSmsLogin(); });
+  $('smsCode').addEventListener('keyup', function(e){ if(e.key==='Enter') doSmsLogin(); });
+
+  $('pwdSubmit').addEventListener('click', doPwdLogin);
+  $('pwdIdentifier').addEventListener('keyup', function(e){ if(e.key==='Enter') doPwdLogin(); });
+  $('pwdPassword').addEventListener('keyup', function(e){ if(e.key==='Enter') doPwdLogin(); });
+
+  $('regCodeBtn').addEventListener('click', sendRegCode);
+  $('regSubmit').addEventListener('click', doRegister);
+  $('regEmail').addEventListener('keyup', function(e){ if(e.key==='Enter'){ $('regCode').focus(); }});
+  $('regCode').addEventListener('keyup', function(e){ if(e.key==='Enter') doRegister(); });
+  $('regPassword').addEventListener('keyup', function(e){ if(e.key==='Enter') doRegister(); });
+  $('regConfirm').addEventListener('keyup', function(e){ if(e.key==='Enter') doRegister(); });
+
+  // ── 初始化 ──
+  var savedToken = localStorage.getItem('sba_token');
+  if(savedToken){
+    get('/api/auth/me').then(function(res){
+      if(res.user){ goHome(); }
+    }).catch(function(){
+      localStorage.removeItem('sba_token');
+      localStorage.removeItem('sba_user');
+    });
+  }
+
+  // URL 参数切换 tab
+  var params = new URLSearchParams(window.location.search);
+  var t = params.get('tab');
+  if(t && tabNames.indexOf(t) >= 0) switchTab(t);
+
+})();
+</script>
+</body>
+</html>
