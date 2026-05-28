@@ -1,0 +1,14 @@
+{
+  "volcengine_api_key": "",
+  "volcengine_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "gateway_provider": "ark",
+  "gateway_route_mode": "priority",
+  "ai_chat_model": "",
+  "gateway_task_type_route": {
+    "summary": "",
+    "qa": "",
+    "ops": "",
+    "code": ""
+  },
+  "api_gateway_nodes": []
+}

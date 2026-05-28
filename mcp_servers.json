@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "comment-scraper": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "app.services.mcp_comment_server"],
+      "cwd": "backend",
+      "env": {
+        "PYTHONPATH": "backend;../src/agent"
+      }
+    }
+  }
+}

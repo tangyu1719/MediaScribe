@@ -1,0 +1,38 @@
+# SuperBizAgent Web — 应用栈
+#
+# Milvus 需先启动：docker compose -f docker-compose.milvus.yml up -d
+# 默认 Milvus 暴露在宿主机 19530；容器内用 host.docker.internal 访问
+#
+# 密钥在服务器 .env 或系统环境变量中配置，禁止 bake 进镜像。
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: web_rebuild_v2/Dockerfile
+    image: superbizagent-web:latest
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      VOLC_API_KEY: ${VOLC_API_KEY:-}
+      VOLC_BASE_URL: ${VOLC_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      LLM_MODEL_QA: ${LLM_MODEL_QA:-}
+      LLM_MODEL_REASON: ${LLM_MODEL_REASON:-}
+      SBA_DATABASE_URL: ${SBA_DATABASE_URL:-}
+      SBA_JWT_SECRET: ${SBA_JWT_SECRET:-}
+      MILVUS_HOST: ${MILVUS_HOST:-host.docker.internal}
+      MILVUS_PORT: ${MILVUS_PORT:-19530}
+      CHAT_USE_LANGGRAPH: ${CHAT_USE_LANGGRAPH:-1}
+    volumes:
+      - sba_output:/app/output
+      - sba_runtime_config:/app/runtime/agent
+    restart: unless-stopped
+
+volumes:
+  sba_output:
+  sba_runtime_config:
