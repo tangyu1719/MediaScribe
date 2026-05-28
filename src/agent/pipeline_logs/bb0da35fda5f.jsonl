@@ -1,0 +1,24 @@
+{"timestamp": "23:59:24", "level": "INFO", "message": "收到处理请求 [小红书] https://www.xiaohongshu.com/explore/6a157321000000003700ecdf?xsec_token=ABr80hhQx2AJhkQiC1varnlW6Aw3ZeAkUrzJEac6NWTDk=&xsec_source=pc_collect"}
+{"timestamp": "23:59:24", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "23:59:24", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "23:59:24", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "23:59:24", "level": "INFO", "message": "[路由] 小红书类型检测开始（LinkAnalyzer.analyze_link）…"}
+{"timestamp": "23:59:25", "level": "INFO", "message": "[路由] 小红书类型检测: xiaohongshu_video; is_graphic=False; elapsed_ms=694; timing={'http_fetch': 682, 'type_detect': 1}"}
+{"timestamp": "23:59:25", "level": "INFO", "message": "检测到小红书视频，继续视频处理链路..."}
+{"timestamp": "23:59:25", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|下载视频|Agent执行|开始] SPAN 下载视频(api_call) step_id=step_1779983965445_dd75 status=running; step_id=step_1779983965445_dd75; step_type=api_call; stage_id=download"}
+{"timestamp": "23:59:25", "level": "INFO", "message": "开始处理 小红书 链接: https://www.xiaohongshu.com/explore/6a157321000000003700ecdf?xsec_token=ABr80hhQx2AJhkQiC1varnlW6Aw3ZeAkUrzJEac6NWTDk=&xsec_source=pc_collect"}
+{"timestamp": "23:59:25", "level": "INFO", "message": "使用yt-dlp下载视频..."}
+{"timestamp": "23:59:25", "level": "INFO", "message": "正在获取视频时长信息..."}
+{"timestamp": "23:59:29", "level": "INFO", "message": "视频时长: 365.4秒 (6.1分钟)"}
+{"timestamp": "23:59:29", "level": "INFO", "message": "视频下载超时设置: 1030秒 (17.2分钟)"}
+{"timestamp": "23:59:29", "level": "INFO", "message": "基于视频时长 6.1分钟 计算得出"}
+{"timestamp": "23:59:29", "level": "INFO", "message": "执行yt-dlp命令（尝试 1/2）..."}
+{"timestamp": "23:59:29", "level": "DEBUG", "message": "yt-dlp命令: yt-dlp --user-agent Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 --referer https://www.xiaohongshu.com/ --no-check-certificate --quiet --no-warnings --format bestvideo*+bestaudio/best --merge-output-format mp4 --concurrent-fragments 3..."}
+{"timestamp": "23:59:38", "level": "INFO", "message": "视频下载成功: F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\1779983965452-822-05-28-6.mp4"}
+{"timestamp": "23:59:38", "level": "INFO", "message": "视频下载耗时: 13.49秒"}
+{"timestamp": "23:59:38", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|下载视频|Agent执行|结束] SPAN 下载视频(api_call) step_id=step_1779983965445_dd75 status=completed; step_id=step_1779983965445_dd75; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "23:59:38", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1779983978947_c382 status=running; step_id=step_1779983978947_c382; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "23:59:38", "level": "ERROR", "message": "处理异常: speech_to_text() got an unexpected keyword argument 'strict'"}
+{"timestamp": "23:59:38", "level": "ERROR", "message": "Traceback (most recent call last):\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 706, in process_video_pipeline\n    update_task(task_id, status=\"transcribing\", stage=\"步骤2: 语音转文字\", progress=40)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\python解释器\\Lib\\concurrent\\futures\\thread.py\", line 58, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 708, in <lambda>\n    transcript = await loop.run_in_executor(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: speech_to_text() got an unexpected keyword argument 'strict'\n"}
+{"timestamp": "23:59:38", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1779983978947_c382 status=failed; step_id=step_1779983978947_c382; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "23:59:38", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}

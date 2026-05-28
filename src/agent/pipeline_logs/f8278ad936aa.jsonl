@@ -1,0 +1,23 @@
+{"timestamp": "23:02:17", "level": "INFO", "message": "收到处理请求 [抖音] https://v.douyin.com/mUXkHOWXC_8/ r@e.OK 01/30 oQK:/ :0pm"}
+{"timestamp": "23:02:17", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "23:02:17", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "23:02:17", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "23:02:17", "level": "INFO", "message": "[首层标题] 开始从链接解析展示标题…"}
+{"timestamp": "23:02:19", "level": "INFO", "message": "[首层标题] 解析结束; ok=False; elapsed_ms=2012"}
+{"timestamp": "23:02:19", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|下载视频|Agent执行|开始] SPAN 下载视频(api_call) step_id=step_1779980539511_c664 status=running; step_id=step_1779980539511_c664; step_type=api_call; stage_id=download"}
+{"timestamp": "23:02:19", "level": "INFO", "message": "开始处理 抖音 链接: https://v.douyin.com/mUXkHOWXC_8/ r@e.OK 01/30 oQK:/ :0pm"}
+{"timestamp": "23:02:19", "level": "INFO", "message": "检测到抖音链接，使用专用解析器..."}
+{"timestamp": "23:02:19", "level": "INFO", "message": "使用抖音专用解析器下载视频..."}
+{"timestamp": "23:02:19", "level": "INFO", "message": "清理后的链接：https://v.douyin.com/mUXkHOWXC_8/"}
+{"timestamp": "23:02:19", "level": "INFO", "message": "解析抖音视频链接..."}
+{"timestamp": "23:02:20", "level": "INFO", "message": "视频ID: 7522305267925634356"}
+{"timestamp": "23:02:21", "level": "INFO", "message": "成功获取无水印视频链接"}
+{"timestamp": "23:02:21", "level": "INFO", "message": "下载视频中..."}
+{"timestamp": "23:02:51", "level": "INFO", "message": "视频下载成功: F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\001-05-28-douyin.mp4"}
+{"timestamp": "23:02:51", "level": "INFO", "message": "视频下载耗时: 31.80秒"}
+{"timestamp": "23:02:51", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|下载视频|Agent执行|结束] SPAN 下载视频(api_call) step_id=step_1779980539511_c664 status=completed; step_id=step_1779980539511_c664; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "23:02:51", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1779980571322_1de3 status=running; step_id=step_1779980571322_1de3; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "23:02:51", "level": "ERROR", "message": "处理异常: speech_to_text() got an unexpected keyword argument 'strict'"}
+{"timestamp": "23:02:51", "level": "ERROR", "message": "Traceback (most recent call last):\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 706, in process_video_pipeline\n    update_task(task_id, status=\"transcribing\", stage=\"步骤2: 语音转文字\", progress=40)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\python解释器\\Lib\\concurrent\\futures\\thread.py\", line 58, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 708, in <lambda>\n    transcript = await loop.run_in_executor(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: speech_to_text() got an unexpected keyword argument 'strict'\n"}
+{"timestamp": "23:02:51", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1779980571322_1de3 status=failed; step_id=step_1779980571322_1de3; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "23:02:51", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
