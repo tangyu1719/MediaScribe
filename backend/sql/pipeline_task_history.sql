@@ -1,0 +1,42 @@
+-- 链接沉淀流水线 — 任务历史表（MariaDB / MySQL 8+）
+-- 应用启动时也会通过 SQLAlchemy create_all 自动建表；本脚本供 DBA 手工执行或审计。
+
+CREATE TABLE IF NOT EXISTS pipeline_task_history (
+    task_id              VARCHAR(64)  NOT NULL COMMENT '任务 ID（主键）',
+    url_hash             VARCHAR(64)  NOT NULL COMMENT '链接稳定 hash（同链接唯一）',
+    link                 TEXT         NOT NULL COMMENT '原始链接',
+    normalized_link      TEXT         NULL COMMENT '规范化链接',
+    platform             VARCHAR(32)  NULL DEFAULT '' COMMENT '平台：小红书/抖音/B站等',
+    status               VARCHAR(32)  NULL DEFAULT '' COMMENT 'pending/processing/completed/failed',
+    stage                VARCHAR(64)  NULL DEFAULT '' COMMENT '当前阶段',
+    progress             INT          NOT NULL DEFAULT 0 COMMENT '进度 0-100',
+    title                VARCHAR(512) NULL DEFAULT '' COMMENT '展示标题',
+    link_title           VARCHAR(512) NULL DEFAULT '',
+    doc_title            VARCHAR(512) NULL DEFAULT '',
+    content_type         VARCHAR(64)  NULL DEFAULT '',
+    cover_url            VARCHAR(1024) NULL DEFAULT '',
+    route_type           VARCHAR(64)  NULL DEFAULT '',
+    pipeline_route       VARCHAR(64)  NULL DEFAULT '' COMMENT '流水线路由',
+    pipeline_stages_json LONGTEXT     NULL COMMENT '各阶段状态 JSON',
+    failed_stage         VARCHAR(64)  NULL DEFAULT '',
+    failed_stage_label   VARCHAR(128) NULL DEFAULT '',
+    resume_from          VARCHAR(64)  NULL DEFAULT '',
+    resume_context_json  LONGTEXT     NULL COMMENT '断点恢复上下文 JSON',
+    user_prompt          TEXT         NULL,
+    comments_json        LONGTEXT     NULL,
+    transcribe_error_code VARCHAR(64) NULL DEFAULT '',
+    doc_filename         VARCHAR(512) NULL,
+    doc_path             TEXT         NULL COMMENT 'MD 产物路径',
+    html_path            TEXT         NULL COMMENT '长页 HTML 路径',
+    html_status          VARCHAR(32)  NULL DEFAULT '',
+    html_message         VARCHAR(512) NULL DEFAULT '',
+    error                TEXT         NULL,
+    logs_json            LONGTEXT     NULL COMMENT '任务日志 JSON 数组',
+    created_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id),
+    UNIQUE KEY uk_pipeline_task_history_url_hash (url_hash),
+    KEY ix_pipeline_task_history_status (status),
+    KEY ix_pipeline_task_history_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='历史记录与任务队列（链接沉淀）';

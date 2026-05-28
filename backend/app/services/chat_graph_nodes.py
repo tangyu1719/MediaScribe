@@ -1,0 +1,1965 @@
+"""LangGraph 节点：编排段硬编码 + HITL interrupt；执行段 handoff 至 ai_chat。"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
+
+from . import ai_chat
+from .chat_graph_runtime import (
+    ChatGraphRuntime,
+    get_runtime_from_config,
+    restore_runtime_from_state,
+)
+from .orch_pipeline_config import orch_node_enabled
+from .orchestration_step_emit import emit_orchestration_step
+from .tool_output_schema import (
+    brief_from_payload,
+    build_flow_step_output,
+    build_llm_step_output,
+    clamp_result_brief_cn,
+    dumps_step_output,
+    format_intent_result_brief_cn,
+)
+from .chat_graph_state import (
+    PHASE_ABNORMAL,
+    PHASE_FINAL,
+    PHASE_INTENT,
+    PHASE_PAUSED,
+    PHASE_PLAN,
+    PHASE_DECOMPOSE,
+    PHASE_ENHANCE,
+    PHASE_RAG_DECISION,
+    PHASE_REACT,
+    PHASE_REWRITE_CONFIRM,
+    PHASE_REWRITE_PROPOSE,
+    PHASE_SIMPLE,
+    PHASE_SLOT_CONFIRM,
+    PHASE_SLOT_FILL,
+)
+from .task_states import (
+    PARENT_ABNORMAL,
+    PARENT_CREATED,
+    PARENT_EXECUTING,
+    PARENT_PLANNING,
+    PARENT_SUMMARIZING,
+    SUB_ACTING,
+    SUB_DONE,
+)
+
+_LOG = logging.getLogger(__name__)
+
+
+def _runtime_from_state_or_config(state: Dict[str, Any], config: RunnableConfig | None) -> ChatGraphRuntime:
+    runtime = state.get("runtime_obj")
+    if isinstance(runtime, ChatGraphRuntime):
+        return runtime
+    runtime_key = str(state.get("runtime_key") or state.get("session_id") or "").strip()
+    if runtime_key:
+        try:
+            from .chat_graph_runner import _RUNTIME_REGISTRY
+
+            runtime = _RUNTIME_REGISTRY.get(runtime_key)
+            if isinstance(runtime, ChatGraphRuntime):
+                return runtime
+        except Exception:
+            pass
+    restored = restore_runtime_from_state(state)
+    if isinstance(restored, ChatGraphRuntime):
+        return restored
+    if config is not None:
+        return get_runtime_from_config(config)
+    raise ValueError("缺少 LangGraph configurable.runtime")
+
+
+def _new_id(prefix: str) -> str:
+    return prefix + uuid.uuid4().hex[:12]
+
+
+_TERM_DICTIONARY: Dict[str, str] = {
+    "SSD": "固态硬盘",
+    "GPU": "图形处理器",
+    "CPU": "中央处理器",
+    "RAM": "内存",
+    "API": "应用程序接口",
+    "SDK": "软件开发工具包",
+    "内存条": "内存",
+    "显卡": "图形处理器",
+}
+
+_PRONOUNS = ("这个", "那个", "刚才说的", "之前提到的", "上文说的", "这种情况", "它")
+
+
+def _extract_history_entity(link_ctx: Dict[str, Any]) -> str:
+    history = link_ctx.get("history") or link_ctx.get("messages") or link_ctx.get("recent_messages") or []
+    texts: List[str] = []
+    if isinstance(history, list):
+        for item in history[-5:]:
+            if isinstance(item, dict):
+                text = str(item.get("content") or item.get("message") or item.get("text") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                texts.append(text)
+    elif isinstance(history, str):
+        texts.append(history)
+    for text in reversed(texts):
+        for suffix in ("问题", "错误", "故障", "功能", "模块", "系统", "任务", "接口", "文档"):
+            idx = text.find(suffix)
+            if idx > 0:
+                start = max(0, idx - 16)
+                return text[start : idx + len(suffix)].strip(" ，。；;：:")
+        if len(text) > 5:
+            return text[:30]
+    return ""
+
+
+def _infer_operation_type(text: str) -> str:
+    q = text or ""
+    if any(x in q for x in ("对比", "比较", "哪个好", "差异", "区别")):
+        return "对比"
+    if any(x in q for x in ("执行", "创建", "删除", "更新", "修改", "生成", "帮我", "打开", "调用")):
+        return "操作"
+    if any(x in q for x in ("为什么", "原因", "分析", "推理", "判断", "是否", "怎么处理", "怎么解决")):
+        return "推理"
+    return "查询"
+
+
+def _infer_domain_module(text: str, tools_meta: Optional[Dict[str, Any]] = None) -> tuple[str, str]:
+    q = text or ""
+    if any(x in q for x in ("知识库", "RAG", "召回", "检索", "向量", "Milvus", "Embedding")):
+        return "知识库", "检索问答"
+    if any(x in q for x in ("文档", "链接", "网页", "页面", "评论", "飞书")):
+        return "资料处理", "文档分析"
+    if any(x in q for x in ("接口", "API", "SDK", "代码", "报错", "异常", "日志")):
+        return "研发运维", "接口/代码问题"
+    if any(x in q for x in ("订单", "用户", "退款", "支付", "商品")):
+        return "业务系统", "交易/用户问题"
+    if any(x in q for x in ("小红书", "小红薯", "xhs", "笔记号")):
+        return "社媒分析", "小红书账号/内容"
+    return "通用", "未指定"
+
+
+def _extract_entities(text: str) -> List[str]:
+    q = (text or "").strip()
+    entities: List[str] = []
+    for marker in ("问题", "故障", "错误", "接口", "文档", "系统", "模块", "订单", "用户"):
+        idx = q.find(marker)
+        if idx > 0:
+            start = max(0, idx - 18)
+            ent = q[start : idx + len(marker)].strip(" ，。；;：:")
+            if ent and ent not in entities:
+                entities.append(ent)
+    for token in q.replace("，", " ").replace("。", " ").replace("/", " ").split():
+        token = token.strip(" ，。；;：:")
+        if 2 <= len(token) <= 32 and any(ch.isdigit() for ch in token) and token not in entities:
+            entities.append(token)
+    return entities[:8]
+
+
+def _extract_retrieval_terms(text: str, entities: Optional[List[str]] = None) -> List[str]:
+    q = text or ""
+    terms: List[str] = []
+    for ent in entities or []:
+        if ent and ent not in terms:
+            terms.append(ent)
+    normalized = q.replace("，", " ").replace("。", " ").replace("？", " ").replace("?", " ")
+    for token in normalized.split():
+        token = token.strip(" ，。；;：:")
+        if len(token) >= 2 and token not in terms:
+            terms.append(token)
+    for term in _TERM_DICTIONARY:
+        if term in q and term not in terms:
+            terms.append(term)
+    return terms[:10]
+
+
+def _align_business_slots(query: str, tools_meta: Optional[Dict[str, Any]] = None, snap: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    metadata = dict((snap or {}).get("metadata") or {})
+    text = (query or "").strip()
+    domain, module = _infer_domain_module(text, tools_meta)
+    operation_type = _infer_operation_type(text)
+    entities = _extract_entities(text)
+    retrieval_terms = _extract_retrieval_terms(text, entities)
+    needs_rag = bool((snap or {}).get("needs_rag")) or any(x in text for x in ("文档", "知识库", "资料", "检索", "RAG", "链接", "网页"))
+    slots = {
+        "query": text,
+        "has_entities": bool(entities),
+        "needs_rag": needs_rag,
+    }
+    return {
+        "domain": metadata.get("domain") or domain,
+        "module": metadata.get("module") or module,
+        "operation_type": metadata.get("operation_type") or operation_type,
+        "entities": metadata.get("entities") or entities,
+        "slots": metadata.get("slots") or slots,
+        "retrieval_terms": metadata.get("retrieval_terms") or retrieval_terms,
+        "needs_rag": needs_rag,
+        "rewritten_query": text,
+    }
+
+
+def _enhance_intent_by_rules(
+    query: str,
+    slot: Optional[Dict[str, Any]] = None,
+    decomposition: Optional[Dict[str, Any]] = None,
+    *,
+    web_search: bool = False,
+) -> Dict[str, Any]:
+    """生成检索提示、假设性答案占位、核验点与风险标记。"""
+    text = (query or "").strip()
+    slot = slot or {}
+    decomposition = decomposition or {}
+    terms = [str(x).strip() for x in (slot.get("retrieval_terms") or []) if str(x).strip()]
+    if not terms:
+        terms = _extract_retrieval_terms(text, slot.get("entities") or [])
+    sub_tasks = [task for task in (decomposition.get("sub_tasks") or []) if isinstance(task, dict)]
+    task_titles = [str(task.get("title") or "").strip() for task in sub_tasks if str(task.get("title") or "").strip()]
+    retrieval_hints = []
+    for item in terms + task_titles:
+        if item and item not in retrieval_hints:
+            retrieval_hints.append(item)
+    needs_rag = bool(slot.get("needs_rag"))
+    domain = str(slot.get("domain") or "").strip()
+    module = str(slot.get("module") or "").strip()
+    operation_type = str(slot.get("operation_type") or _infer_operation_type(text))
+    hypothetical_answer = ""
+    if needs_rag:
+        hypothetical_answer = f"假设资料中包含与{module or domain or '当前问题'}相关的原因、证据和处理建议。"
+    verification_points = [
+        "回答必须基于已检索或已读取资料",
+        "无法从资料确认的内容需要明确说明",
+    ]
+    if operation_type == "对比":
+        verification_points.append("对比结论需要分别覆盖每个对象")
+    if domain == "知识库":
+        verification_points.append("需要检查召回结果是否真正命中用户问题")
+    risk_flags = []
+    if hypothetical_answer:
+        risk_flags.append("hypothesis_not_final_answer")
+    if needs_rag:
+        risk_flags.append("needs_source_check")
+    if not retrieval_hints:
+        risk_flags.append("missing_retrieval_terms")
+
+    from .web_search_plan import build_rag_search_keyword_queries, _strip_conversational
+
+    search_keyword_queries = build_rag_search_keyword_queries(
+        text,
+        original_query=text,
+        slot_snapshot=slot,
+        enhancement_snapshot={"retrieval_hints": retrieval_hints},
+    )
+    return {
+        "hypothetical_answer": hypothetical_answer,
+        "retrieval_hints": retrieval_hints[:12],
+        "search_keyword_queries": search_keyword_queries,
+        "web_search_queries": [] if not web_search else [],
+        "search_objective": _strip_conversational(text)[:160] if text else "",
+        "verification_points": verification_points,
+        "risk_flags": risk_flags,
+    }
+
+
+def _decompose_task_by_rules(query: str, slot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """按业务对齐结果做基础任务分解：对比类并行，多跳/分析类阶段执行。"""
+    text = (query or "").strip()
+    slot = slot or {}
+    operation_type = str(slot.get("operation_type") or _infer_operation_type(text))
+    entities = [str(x).strip() for x in (slot.get("entities") or []) if str(x).strip()]
+    retrieval_terms = [str(x).strip() for x in (slot.get("retrieval_terms") or []) if str(x).strip()]
+    needs_rag = bool(slot.get("needs_rag"))
+
+    if operation_type == "对比":
+        decomp_type = "parallel"
+        compare_targets = entities[:4] or retrieval_terms[:4]
+        if len(compare_targets) < 2:
+            compare_targets = ["对象A", "对象B"]
+        sub_tasks = [
+            {"index": i, "title": f"核验{target}的关键信息", "task_type": "retrieval", "done": False}
+            for i, target in enumerate(compare_targets[:4], start=1)
+        ]
+        sub_tasks.append(
+            {
+                "index": len(sub_tasks) + 1,
+                "title": "汇总差异并给出对比结论",
+                "task_type": "synthesis",
+                "done": False,
+            }
+        )
+        dependencies = [{"from": i, "to": len(sub_tasks)} for i in range(1, len(sub_tasks))]
+    else:
+        decomp_type = "stage"
+        is_xhs = any(x in text for x in ("小红书", "小红薯", "笔记号"))
+        xhs_id = ""
+        for token in text.replace("：", ":").replace("，", " ").split():
+            t = token.strip(" ，。；;：:")
+            if t.isdigit() and 8 <= len(t) <= 15:
+                xhs_id = t
+                break
+        if is_xhs and xhs_id:
+            first_title = f"定位小红书账号/笔记（ID {xhs_id}）"
+            second_title = "检索知识库与账号相关资料" if needs_rag else "检索公开资料与账号相关信息"
+            third_title = "汇总信息并输出结构化分析"
+        else:
+            first_title = f"明确任务范围：{text[:80]}" if text else "明确任务范围"
+            second_title = "检索或读取相关资料" if needs_rag else "整理已有上下文与约束"
+            third_title = "核验资料并形成答复要点"
+        sub_tasks = [
+            {"index": 1, "title": first_title, "task_type": "scope", "done": False},
+            {"index": 2, "title": second_title, "task_type": "retrieval" if needs_rag or is_xhs else "context", "done": False},
+            {"index": 3, "title": third_title, "task_type": "verification", "done": False},
+        ]
+        dependencies = [{"from": 1, "to": 2}, {"from": 2, "to": 3}]
+
+    return {
+        "decomposition_type": decomp_type,
+        "sub_tasks": sub_tasks,
+        "dependencies": dependencies,
+    }
+
+
+def _rewrite_query_by_rules(query: str, link_ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """按改写需求文档实现基础规则层：术语标准化、指代消解、上下文补全。"""
+    original = (query or "").strip()
+    rewritten = original
+    actions: List[str] = []
+    link_ctx = link_ctx or {}
+
+    for term in sorted(_TERM_DICTIONARY, key=len, reverse=True):
+        full = _TERM_DICTIONARY[term]
+        if term in rewritten and f"{term}({full})" not in rewritten and full not in rewritten:
+            rewritten = rewritten.replace(term, f"{term}({full})")
+            actions.append("term_normalization")
+
+    history_entity = _extract_history_entity(link_ctx)
+    if history_entity and any(p in rewritten for p in _PRONOUNS):
+        for pronoun in _PRONOUNS:
+            rewritten = rewritten.replace(pronoun, history_entity)
+        actions.append("coreference_resolution")
+
+    current_product = str(link_ctx.get("product") or link_ctx.get("current_product") or "").strip()
+    current_issue = str(link_ctx.get("issue") or link_ctx.get("current_issue") or "").strip()
+    if current_product and rewritten.startswith("多少钱"):
+        rewritten = f"{current_product}{rewritten}"
+        actions.append("context_completion")
+    elif current_issue and (rewritten.startswith("怎么解决") or rewritten == "怎么弄"):
+        rewritten = f"{current_issue}{rewritten}"
+        actions.append("context_completion")
+
+    summary = rewritten[:120] if rewritten else original[:120]
+    if not actions:
+        actions.append("no_rewrite_needed")
+    return {
+        "original_query": original,
+        "rewritten_query": rewritten,
+        "query_summary": summary,
+        "rewrite_actions": actions,
+    }
+
+
+def _sse_events_from_runtime(runtime: ChatGraphRuntime) -> Dict[str, Any]:
+    return {"sse_events": runtime.drain_sse()}
+
+
+def _next_step_group(state: Dict[str, Any]) -> tuple[str, int]:
+    group_seq = int(state.get("group_seq") or 0) + 1
+    return _new_id("subplan_"), group_seq
+
+
+def _route_after_enhance_chain(
+    runtime: ChatGraphRuntime,
+    slot: Dict[str, Any],
+    framework: str,
+) -> str:
+    needs_rag = bool(slot.get("needs_rag") or runtime.rag_prefetch)
+    if framework == "plan_execute":
+        return "plan"
+    if needs_rag and _orch_enabled(runtime, "rag_filter_confirm"):
+        return "rag_filter_confirm"
+    if _orch_enabled(runtime, "rag_decision"):
+        return "rag_decision"
+    return "rag_decision"
+
+
+def _route_after_slot(runtime: ChatGraphRuntime, slot: Dict[str, Any], framework: str) -> str:
+    if _orch_enabled(runtime, "task_decompose"):
+        return "intent_decompose"
+    if _orch_enabled(runtime, "intent_enhance"):
+        return "intent_enhance"
+    return _route_after_enhance_chain(runtime, slot, framework)
+
+
+def _route_after_decompose(runtime: ChatGraphRuntime, slot: Dict[str, Any], framework: str) -> str:
+    if _orch_enabled(runtime, "intent_enhance"):
+        return "intent_enhance"
+    return _route_after_enhance_chain(runtime, slot, framework)
+
+
+def _orch_enabled(runtime: ChatGraphRuntime, node_id: str) -> bool:
+    return orch_node_enabled(getattr(runtime, "orch_pipeline_nodes", None), node_id)
+
+
+def _skip_orch_step(
+    runtime: ChatGraphRuntime,
+    state: Dict[str, Any],
+    *,
+    trace_id: str,
+    task_id: str,
+    step_name: str,
+    phase: str,
+    node_id: str,
+    graph_route: str,
+    passthrough: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """节点被禁用时：标记 skipped、不调用 LLM、原样传递 state。"""
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=trace_id,
+        task_id=task_id,
+        step_name=step_name,
+        phase=phase,
+        result_brief=f"已跳过（{step_name} 未启用）",
+        input_payload={"node_id": node_id, "enabled": False},
+        output_payload={"skipped": True, "node_id": node_id},
+        executed=False,
+        llm_powered=False,
+    )
+    out = dict(passthrough or {})
+    out.update(
+        {
+            "graph_route": graph_route,
+            "group_seq": seq.get("group_seq"),
+            "orch_chain": seq.get("orch_chain", []),
+        }
+    )
+    out.update(_sse_events_from_runtime(runtime))
+    return out
+
+
+def _merge_intent_llm_into_snapshot(
+    snap: Dict[str, Any],
+    intent_decision: Dict[str, Any],
+    *,
+    message: str,
+    rag_prefetch: bool,
+    web_search: bool,
+) -> Dict[str, Any]:
+    merged = dict(snap or {})
+    task_summary = str(intent_decision.get("task_summary") or "").strip()
+    qk = intent_decision.get("query_keywords")
+    if isinstance(qk, list):
+        qk = [str(x).strip() for x in qk if str(x).strip()]
+    else:
+        qk = []
+    if task_summary:
+        merged["task_summary"] = task_summary
+        merged["query_summary"] = task_summary[:120]
+    if qk:
+        merged["query_keywords"] = qk
+        merged["keywords"] = qk
+    llm_rag = intent_decision.get("needs_rag")
+    rule_rag = bool(merged.get("needs_rag"))
+    merged["needs_rag"] = bool(rule_rag or llm_rag or rag_prefetch)
+    merged["needs_web_search"] = bool(web_search and intent_decision.get("needs_web_search"))
+    if not merged.get("rewritten_query"):
+        merged["rewritten_query"] = message
+    return merged
+
+
+def _emit_orchestration_step(
+    runtime: ChatGraphRuntime,
+    state: Dict[str, Any],
+    *,
+    trace_id: str,
+    task_id: str,
+    step_name: str,
+    phase: str,
+    result_brief: str,
+    input_payload: Optional[Dict[str, Any]] = None,
+    output_payload: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    executed: bool = True,
+    think_text_override: Optional[str] = None,
+    llm_powered: bool = False,
+) -> Dict[str, Any]:
+    """编排节点：思考框 + 输入输出 + result_brief（PRD 5.1/5.10）。"""
+    out_body = dict(output_payload or extra or {})
+    inp = dict(input_payload or {"user_message": (runtime.message or "")[:500]})
+    return emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=trace_id,
+        task_id=task_id,
+        step_name=step_name,
+        phase=phase,
+        result_brief=result_brief,
+        input_payload=inp,
+        output_payload=out_body,
+        executed=executed,
+        think_text_override=think_text_override,
+        llm_powered=llm_powered,
+    )
+
+
+def _parse_llm_json(raw: str) -> Dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
+async def _orch_llm_invoke(
+    runtime: ChatGraphRuntime,
+    phase: str,
+    user_message: str,
+    *,
+    intent_snapshot: Optional[Dict[str, Any]] = None,
+    max_tokens: int = 520,
+) -> tuple[str, Dict[str, Any]]:
+    """编排固定节点 LLM 调用；返回 (原始文本, 解析 JSON)。"""
+    if not (runtime.api_key and runtime.model_resolved):
+        return "", {}
+    text = ""
+    t0 = time.perf_counter()
+    try:
+        async for piece in ai_chat._iter_react_llm_tokens(
+            phase=phase,
+            user_message=user_message,
+            provider=runtime.provider,
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.model_resolved,
+            tools_meta=runtime.tools_meta,
+            react_memory=[],
+            intent_snapshot=intent_snapshot,
+            max_tokens=max_tokens,
+        ):
+            text += piece
+    except Exception as ex:
+        _LOG.warning(
+            "[AI问答-LangGraph|chat_graph_nodes._orch_llm_invoke|%s|Agent执行|失败] "
+            "error_type=%s; error_message=%s; orch_llm_ms=%s",
+            phase,
+            type(ex).__name__,
+            ex,
+            int((time.perf_counter() - t0) * 1000),
+        )
+        return "", {}
+    raw = text.strip()
+    orch_ms = int((time.perf_counter() - t0) * 1000)
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes._orch_llm_invoke|session:%s|Agent执行|完成] "
+        "phase=%s; orch_llm_ms=%s; text_len=%s",
+        runtime.session_id,
+        phase,
+        orch_ms,
+        len(raw),
+    )
+    return raw, _parse_llm_json(raw)
+
+
+def _emit_thought_step(
+    runtime: ChatGraphRuntime,
+    *,
+    trace_id: str,
+    task_id: str,
+    step_id: str,
+    step_name: str,
+    phase: str,
+    sub_plan_id: str,
+    sub_index: int,
+    output_text: str,
+    use_llm: bool = False,
+    node_kind: str = "sub_task",
+    cost_ms: int = 0,
+    result_brief: str | None = None,
+) -> None:
+    """与 ai_chat Phase1 对齐的 thought_step SSE（规则/LLM 结果摘要，非任务说明模板）。"""
+    runtime.emit(
+        "thought_step_start",
+        {
+            "trace_id": trace_id,
+            "task_id": task_id or "",
+            "step_id": step_id,
+            "step_name": step_name,
+            "step_type": "llm_call" if use_llm else "reasoning",
+            "status": SUB_ACTING,
+            "status_text": "LLM 推理中…" if use_llm else "执行中…",
+            "sub_plan_id": sub_plan_id,
+            "sub_index": sub_index,
+            "node_kind": "llm_call" if use_llm else node_kind,
+            "operation": step_name,
+            "target": (runtime.message or "")[:40],
+        },
+    )
+    if not result_brief:
+        try:
+            payload_obj = json.loads(output_text) if isinstance(output_text, str) else output_text
+        except Exception:
+            payload_obj = {"result_msg": (output_text or "")[:120]}
+        result_brief = brief_from_payload(payload_obj if isinstance(payload_obj, dict) else {})
+    result_brief = clamp_result_brief_cn(result_brief or "")
+    runtime.emit(
+        "thought_step_end",
+        {
+            "trace_id": trace_id,
+            "task_id": task_id or "",
+            "step_id": step_id,
+            "step_name": step_name,
+            "status": SUB_DONE,
+            "elapsed_ms": cost_ms,
+            "status_text": "完成",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "description": result_brief,
+            "sub_plan_id": sub_plan_id,
+            "sub_index": sub_index,
+            "node_kind": "llm_call" if use_llm else node_kind,
+            "result_brief": result_brief,
+            "io_links": [],
+            "input_text": json.dumps(
+                {"query": (runtime.message or "")[:500], "phase": phase},
+                ensure_ascii=False,
+            ),
+            "output_text": output_text,
+            "phase": phase,
+            "success": True,
+            "confidence": 0.92,
+            "token_count": max(12, len(output_text) // 4),
+            "llm_powered": use_llm,
+        },
+    )
+
+
+async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
+    """意图识别：LLM 判定 简单直答 / 延续主任务 / 新开主任务（规则仅兜底）。"""
+    from .chat_context_memory import resolve_intent_mode, llm_resolve_intent_mode
+
+    runtime = _runtime_from_state_or_config(state, config)
+    message = state.get("message") or runtime.message
+    trace_id = state.get("trace_id") or runtime.trace_id
+    session_id = state.get("session_id") or runtime.session_id
+    cur_task = state.get("client_cur_task") if isinstance(state.get("client_cur_task"), dict) else None
+    main_hist = state.get("client_main_task_history") if isinstance(state.get("client_main_task_history"), list) else []
+
+    simple_heur = ai_chat._is_simple_intent(message)
+    if not cur_task and not simple_heur:
+        if any(k in (message or "") for k in ("分析", "排查", "为什么", "原因", "文档", "资料", "知识库", "RAG", "检索", "召回", "链接", "网页")):
+            simple_heur = False
+
+    intent_decision: Dict[str, Any] = {}
+    intent_llm_powered = False
+    if _orch_enabled(runtime, "intent_recognition"):
+        intent_decision = await llm_resolve_intent_mode(
+            message,
+            cur_task=cur_task,
+            main_task_history=main_hist,
+            provider=runtime.provider,
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.model_resolved,
+            tools_meta=runtime.tools_meta,
+            rag_prefetch=bool(runtime.rag_prefetch),
+            web_search=bool(runtime.web_search),
+        ) or {}
+        intent_llm_powered = bool(intent_decision and intent_decision.get("llm_powered"))
+    if not intent_decision:
+        intent_decision = resolve_intent_mode(
+            message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
+        )
+    mode = intent_decision.get("mode") or "new_main"
+    simple = mode == "simple"
+    continue_main = mode == "continue_main"
+    # 简单/复杂分流开关关闭时：禁止走 simple 捷径（续接主任务仍允许）
+    if not _orch_enabled(runtime, "simple_intent_gate"):
+        if simple and not continue_main:
+            simple = False
+            mode = "new_main"
+            intent_decision = {
+                **intent_decision,
+                "mode": "new_main",
+                "reason": (intent_decision.get("reason") or "") + "；已关闭简单/复杂分流",
+            }
+    # LLM 误判 simple 时：规则强制续接/主任务
+    from .chat_context_memory import (
+        _has_link_analysis_intent,
+        _looks_like_continuation,
+        _looks_like_task_recall,
+        _looks_like_task_status_inquiry,
+        _resolve_continue_task_id,
+    )
+
+    tid_fix = _resolve_continue_task_id(cur_task, main_hist)
+    if tid_fix and (
+        _looks_like_task_status_inquiry(message)
+        or _looks_like_task_recall(message)
+        or _looks_like_continuation(message, cur_task)
+    ):
+        simple = False
+        continue_main = True
+        mode = "continue_main"
+        intent_decision = {
+            **intent_decision,
+            "mode": "continue_main",
+            "task_id": tid_fix,
+            "reason": "规则覆盖：用户追问先前主任务",
+        }
+    elif _has_link_analysis_intent(message):
+        simple = False
+        continue_main = False
+        mode = "new_main"
+    if continue_main:
+        rid = str(intent_decision.get("task_id") or "").strip()
+        if not cur_task and rid:
+            cur_task = {"task_id": rid}
+            for h in reversed(main_hist):
+                if isinstance(h, dict) and str(h.get("task_id") or "") == rid:
+                    cur_task = {**h, **cur_task}
+                    break
+    use_main = mode in ("new_main", "continue_main")
+    task_kind = "simple" if simple else "main"
+    framework = "assistant" if simple else "react"
+    if isinstance(runtime.agent_profile, dict):
+        fw = str(runtime.agent_profile.get("framework") or "").strip().lower()
+        if fw in ("react", "plan_execute", "single_shot"):
+            framework = "assistant" if fw == "single_shot" else fw
+
+    snap = ai_chat._build_intent_rewrite_snapshot_for_message(
+        message, runtime.link_ctx
+    )
+    snap = _merge_intent_llm_into_snapshot(
+        snap,
+        intent_decision,
+        message=message,
+        rag_prefetch=bool(runtime.rag_prefetch),
+        web_search=bool(runtime.web_search),
+    )
+    rewrite_state = snap.get("rewrite_state") or "rewrite_confirm"
+    skip_confirm = rewrite_state == "rewrite_hold" or not _orch_enabled(runtime, "rewrite_confirm")
+
+    task_id = (state.get("task_id") or intent_decision.get("task_id") or "").strip() or None
+    if continue_main and cur_task:
+        task_id = str(cur_task.get("task_id") or task_id or "").strip() or task_id
+    step_idx = int(state.get("step_idx") or 0) + 1
+    sub_plan_id, group_seq = _next_step_group(state)
+    step_id = _new_id("step_")
+    t0 = time.perf_counter()
+    if continue_main:
+        intent_result_cn = intent_decision.get("reason") or "识别为当前主任务延续，跳过重复编排"
+    else:
+        ts = str(snap.get("task_summary") or snap.get("query_summary") or "").strip()
+        intent_result_cn = format_intent_result_brief_cn(
+            simple=simple,
+            needs_rag=bool(snap.get("needs_rag")),
+            keywords=snap.get("query_keywords") if isinstance(snap.get("query_keywords"), list) else None,
+        )
+        if ts and not simple:
+            intent_result_cn = clamp_result_brief_cn(f"{intent_result_cn}：{ts[:40]}")
+    intent_out = {
+        "intent_type": "simple_chat" if simple else ("task_continue" if continue_main else "task"),
+        "task_kind": task_kind,
+        "use_main_task": use_main,
+        "task_action": mode,
+        "needs_rag": bool(snap.get("needs_rag")),
+        "needs_web_search": bool(snap.get("needs_web_search")),
+        "needs_plan_execute": use_main and framework == "plan_execute",
+        "result_brief_cn": intent_result_cn,
+        "is_simple": simple,
+        "continue_main_task": continue_main,
+        "intent_reason": intent_decision.get("reason") or "",
+        "llm_powered": intent_llm_powered,
+        "task_summary": snap.get("task_summary") or snap.get("query_summary") or "",
+        "query_keywords": snap.get("query_keywords") or snap.get("keywords") or [],
+        "mode": mode,
+        "reason": intent_decision.get("reason") or "",
+    }
+    intent_inp = {
+        "user_message": (message or "")[:500],
+        "web_search": bool(runtime.web_search),
+        "rag_prefetch": bool(runtime.rag_prefetch),
+        "read_comments": bool(runtime.read_comments),
+        "orch_pipeline_nodes": dict(getattr(runtime, "orch_pipeline_nodes", None) or {}),
+    }
+    # 简单/续接主任务：不占用「步骤组」编排 UI，避免无 main task 仍显示步骤组 #N
+    if simple or continue_main:
+        from .chat_context_memory import resolve_preserved_task_queries
+
+        preserved_uq, preserved_qs = ("", "")
+        if continue_main and use_main:
+            preserved_uq, preserved_qs = resolve_preserved_task_queries(
+                task_id=str(task_id or ""),
+                cur_task=cur_task,
+                fallback_message="",
+            )
+        runtime.emit(
+            "intent_resolved",
+            {
+                "task_id": "" if simple else (task_id or ""),
+                "task_kind": task_kind,
+                "is_simple": simple,
+                "persist_main_task": use_main,
+                "task_action": mode,
+                "continue_main_task": continue_main,
+                "rewrite_snapshot": snap if use_main else None,
+                "user_query": (
+                    preserved_uq
+                    if continue_main and preserved_uq
+                    else (message if use_main else "")
+                ),
+                "query_summary": (
+                    preserved_qs
+                    if continue_main and preserved_qs
+                    else ((message or "")[:120] if use_main else "")
+                ),
+                "preserve_task_identity": bool(continue_main and preserved_uq),
+                "intent_reason": intent_decision.get("reason") or "",
+            },
+        )
+        orch_emit = {"group_seq": int(state.get("group_seq") or 0), "orch_chain": state.get("orch_chain") or []}
+    else:
+        orch_emit = emit_orchestration_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id or "",
+            step_name="意图识别",
+            phase="intent",
+            result_brief=intent_result_cn,
+            input_payload=intent_inp,
+            output_payload=intent_out,
+            prior=None,
+            think_text_override=(
+                str(intent_decision.get("llm_raw") or intent_decision.get("reason") or "")
+                if intent_llm_powered
+                else None
+            ),
+            llm_powered=intent_llm_powered,
+        )
+        group_seq = orch_emit.get("group_seq", group_seq)
+
+    if not task_id and not simple:
+        task_id = _new_id("task_")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        rewritten_q = (snap.get("rewritten_query") or message or "").strip()
+        ai_chat._span_task(session_id, message, task_id=task_id)
+        snap_json = {
+            "fixed": {"session_id": session_id, "task_id": task_id, "trace_id": trace_id},
+            "open": {
+                "objective": rewritten_q[:200] or (message or "")[:200],
+                "current_assessment": "意图识别完成",
+                "decision": "continue",
+                "metadata": snap.get("metadata", {}),
+                "needs_rag": snap.get("needs_rag", False),
+                "rewrite_state": rewrite_state,
+                "task_kind": task_kind,
+                "ephemeral": not use_main,
+            },
+        }
+        ai_chat._span_update(
+            task_id,
+            status=PARENT_CREATED,
+            started_at=now,
+            query_summary=(message or "")[:120],
+            rewritten_query=rewritten_q[:500],
+            snapshot_json=snap_json,
+        )
+        if use_main and not continue_main:
+            ai_chat._span_update(task_id, status=PARENT_SUMMARIZING)
+            ai_chat._span_update(task_id, status=PARENT_PLANNING)
+            runtime.emit(
+                "task_created",
+                {
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "user_query": message,
+                    "status": PARENT_PLANNING,
+                    "task_kind": "main",
+                    "persist_main_task": True,
+                    "stage": "分析任务中",
+                    "progress": 8,
+                    "rewrite_snapshot": snap,
+                    "query_summary": (message or "")[:120],
+                },
+            )
+            try:
+                from .chat_context_memory import upsert_session_main_task_history
+
+                upsert_session_main_task_history(
+                    session_id,
+                    task_id=task_id,
+                    user_query=message,
+                    query_summary=(message or "")[:120],
+                    status=PARENT_PLANNING,
+                )
+            except Exception:
+                pass
+        elif use_main and continue_main:
+            from .chat_context_memory import resolve_preserved_task_queries
+
+            cont_uq, cont_qs = resolve_preserved_task_queries(
+                task_id=str(task_id or ""),
+                cur_task=cur_task,
+                fallback_message="",
+            )
+            runtime.emit(
+                "task_created",
+                {
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "user_query": cont_uq,
+                    "status": PARENT_EXECUTING,
+                    "task_kind": "main",
+                    "persist_main_task": True,
+                    "stage": "延续主任务",
+                    "progress": 12,
+                    "rewrite_snapshot": snap,
+                    "query_summary": cont_qs,
+                    "task_action": "continue",
+                    "preserve_task_identity": True,
+                },
+            )
+        ai_chat._span_update(task_id, status=PARENT_EXECUTING)
+        from .span_orchestration import schedule_persist_reasoning_step
+
+        schedule_persist_reasoning_step(
+            task_id,
+            session_id,
+            step_name="意图识别",
+            phase="intent",
+            trace_id=trace_id,
+            input_payload=intent_inp,
+            output_payload=intent_out,
+            result_brief=intent_result_cn,
+        )
+
+    elif continue_main and task_id:
+        from .chat_context_memory import resolve_preserved_task_queries
+
+        cont_uq, cont_qs = resolve_preserved_task_queries(
+            task_id=str(task_id or ""),
+            cur_task=cur_task,
+            fallback_message="",
+        )
+        runtime.emit(
+            "task_created",
+            {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_query": cont_uq,
+                "status": PARENT_EXECUTING,
+                "task_kind": "main",
+                "persist_main_task": True,
+                "stage": "延续主任务",
+                "progress": 12,
+                "rewrite_snapshot": snap,
+                "query_summary": cont_qs,
+                "task_action": "continue",
+                "preserve_task_identity": True,
+            },
+        )
+        ai_chat._span_update(task_id, status=PARENT_EXECUTING)
+        from .span_orchestration import schedule_persist_reasoning_step
+
+        schedule_persist_reasoning_step(
+            task_id,
+            session_id,
+            step_name="意图识别",
+            phase="intent",
+            trace_id=trace_id,
+            input_payload=intent_inp,
+            output_payload=intent_out,
+            result_brief=intent_result_cn,
+        )
+
+    if not simple and not continue_main:
+        runtime.emit(
+            "intent_resolved",
+            {
+                "task_id": task_id or "",
+                "task_kind": task_kind,
+                "is_simple": simple,
+                "persist_main_task": use_main,
+                "task_action": mode,
+                "continue_main_task": continue_main,
+                "rewrite_snapshot": snap if use_main else None,
+                "user_query": message if use_main else "",
+                "query_summary": (message or "")[:120] if use_main else "",
+                "intent_reason": intent_decision.get("reason") or "",
+            },
+        )
+    elif simple:
+        runtime.emit(
+            "intent_resolved",
+            {
+                "task_id": "",
+                "task_kind": "simple",
+                "is_simple": True,
+                "persist_main_task": False,
+                "task_action": mode,
+                "continue_main_task": False,
+                "intent_reason": intent_decision.get("reason") or "",
+            },
+        )
+
+    if continue_main:
+        route = "continue_execute"
+    elif simple:
+        route = "simple"
+    elif not _orch_enabled(runtime, "query_rewrite"):
+        route = "slot_fill"
+    else:
+        route = "rewrite"
+
+    out = {
+        "orchestration_phase": PHASE_INTENT,
+        "task_kind": task_kind,
+        "use_main_task": use_main,
+        "framework": framework,
+        "intent_passed": True,
+        "intent_rewrite_snapshot": snap,
+        "rewrite_state": rewrite_state,
+        "skip_rewrite_confirm": skip_confirm,
+        "needs_rag": bool(snap.get("needs_rag")),
+        "query_summary": str(snap.get("query_summary") or snap.get("task_summary") or (message or "")[:120]),
+        "task_id": task_id,
+        "step_idx": step_idx,
+        "group_seq": orch_emit.get("group_seq", group_seq),
+        "continue_main_task": continue_main,
+        "orch_chain": orch_emit.get("orch_chain", []),
+        "graph_route": route,
+        "runtime_config": runtime.snapshot_config(),
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.node_intent_recognition|session:%s|硬编执行|完成] "
+        "route=%s; task_kind=%s",
+        session_id,
+        route,
+        task_kind,
+    )
+    return out
+
+
+async def node_simple_answer(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
+    """简单任务：仅 handoff 标记，直答 SSE 由 runner 流式推送（避免整节点阻塞）。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    trace_id = state.get("trace_id") or runtime.trace_id
+
+    runtime.emit("thinking_end", {"task_id": "", "ephemeral": True, "bundle": {"task_kind": "simple"}})
+
+    out = {
+        "orchestration_phase": PHASE_SIMPLE,
+        "task_kind": "simple",
+        "use_main_task": False,
+        "graph_route": "handoff_simple",
+        "execution_done": False,
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.node_simple_answer|trace:%s|硬编执行|handoff] "
+        "route=handoff_simple",
+        trace_id,
+    )
+    return out
+
+
+async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """query 改写摘要（编排段，可选 LLM 单次）。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    snap = dict(state.get("intent_rewrite_snapshot") or {})
+    message = state.get("message") or runtime.message
+    trace_id = state.get("trace_id") or runtime.trace_id
+    task_id = state.get("task_id") or ""
+
+    if not _orch_enabled(runtime, "query_rewrite"):
+        rewritten = str(snap.get("rewritten_query") or message or "").strip()
+        return _skip_orch_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="问题改写",
+            phase="rewrite",
+            node_id="query_rewrite",
+            graph_route="slot_fill",
+            passthrough={
+                "orchestration_phase": PHASE_REWRITE_PROPOSE,
+                "intent_rewrite_snapshot": snap,
+                "rewritten_query": rewritten,
+                "query_summary": str(snap.get("query_summary") or snap.get("task_summary") or rewritten[:120]),
+                "rewrite_actions": ["skipped"],
+            },
+        )
+
+    node_t0 = time.perf_counter()
+
+    rewrite_result = _rewrite_query_by_rules(message, runtime.link_ctx)
+    qk = snap.get("query_keywords") or snap.get("keywords") or []
+    if isinstance(qk, list) and qk:
+        rewrite_result["query_keywords"] = [str(x).strip() for x in qk if str(x).strip()]
+    rewritten = str(rewrite_result.get("rewritten_query") or snap.get("rewritten_query") or message or "").strip()
+    llm_rewrite_text = ""
+    if runtime.api_key and runtime.model_resolved:
+        text = ""
+        async for piece in ai_chat._iter_react_llm_tokens(
+            phase="rewrite",
+            user_message=rewritten,
+            provider=runtime.provider,
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.model_resolved,
+            tools_meta=runtime.tools_meta,
+            react_memory=[],
+            intent_snapshot=snap,
+            include_tools_catalog=False,
+        ):
+            text += piece
+        if text.strip():
+            llm_rewrite_text = text.strip()
+            llm_json = _parse_llm_json(llm_rewrite_text)
+            if llm_json.get("rewritten_query"):
+                rewritten = str(llm_json.get("rewritten_query") or rewritten).strip()[:800]
+                rewrite_result["rewritten_query"] = rewritten
+            elif not llm_json:
+                rewritten = llm_rewrite_text[:800]
+                rewrite_result["rewritten_query"] = rewritten
+            if llm_json.get("query_summary"):
+                rewrite_result["query_summary"] = str(llm_json.get("query_summary") or "")[:120]
+            rt = llm_json.get("retrieval_terms")
+            if isinstance(rt, list):
+                rt = [str(x).strip() for x in rt if str(x).strip()]
+                if rt:
+                    rewrite_result["retrieval_terms"] = rt
+                    snap["retrieval_terms"] = rt
+            lqk = llm_json.get("query_keywords")
+            if isinstance(lqk, list):
+                lqk = [str(x).strip() for x in lqk if str(x).strip()]
+                if lqk:
+                    rewrite_result["query_keywords"] = lqk
+                    snap["query_keywords"] = lqk
+                    snap["keywords"] = lqk
+            actions_from_llm = list(rewrite_result.get("rewrite_actions") or [])
+            if "llm_completion" not in actions_from_llm:
+                actions_from_llm.append("llm_completion")
+            rewrite_result["rewrite_actions"] = actions_from_llm
+    snap["rewritten_query"] = rewritten
+    query_summary = str(
+        rewrite_result.get("query_summary")
+        or snap.get("task_summary")
+        or snap.get("query_summary")
+        or rewritten[:120]
+        or (message or "")[:120]
+    )
+    actions = [str(x) for x in (rewrite_result.get("rewrite_actions") or ["no_rewrite_needed"])]
+    rewrite_out = {
+        "rewritten_query": rewritten[:500],
+        "query_summary": query_summary,
+        "original_query": rewrite_result.get("original_query"),
+        "rewrite_actions": actions,
+        "query_keywords": rewrite_result.get("query_keywords") or snap.get("query_keywords") or [],
+        "retrieval_terms": rewrite_result.get("retrieval_terms") or snap.get("retrieval_terms") or [],
+    }
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="问题改写",
+        phase="rewrite",
+        result_brief="已标准化问题表述，保留原始意图",
+        input_payload={
+            "original_query": str(rewrite_result.get("original_query") or message or "")[:500],
+            "intent_snapshot": snap,
+        },
+        output_payload=rewrite_out,
+        think_text_override=llm_rewrite_text or None,
+        llm_powered=bool(llm_rewrite_text),
+    )
+    out = {
+        "orchestration_phase": PHASE_REWRITE_PROPOSE,
+        "intent_rewrite_snapshot": snap,
+        "rewritten_query": rewritten,
+        "query_summary": query_summary,
+        "rewrite_actions": actions,
+        "graph_route": "slot_fill",
+        "group_seq": seq.get("group_seq"),
+        "orch_chain": seq.get("orch_chain", []),
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.node_rewrite_summary|session:%s|硬编执行|完成] "
+        "node_total_ms=%s; llm_rewrite=%s",
+        runtime.session_id,
+        int((time.perf_counter() - node_t0) * 1000),
+        bool(llm_rewrite_text),
+    )
+    return out
+
+
+async def node_intent_decompose(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
+    """意图分解：LLM 拆解 + 规则兜底。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    rewritten = (state.get("rewritten_query") or (state.get("intent_rewrite_snapshot") or {}).get("rewritten_query") or state.get("message") or runtime.message or "").strip()
+    slot = state.get("slot_snapshot") or {}
+    framework = state.get("framework") or "react"
+    trace_id = state.get("trace_id") or runtime.trace_id
+    task_id = state.get("task_id") or ""
+
+    if not _orch_enabled(runtime, "task_decompose"):
+        return _skip_orch_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="任务分解",
+            phase="decompose",
+            node_id="task_decompose",
+            graph_route=_route_after_decompose(runtime, slot, framework),
+            passthrough={
+                "orchestration_phase": PHASE_DECOMPOSE,
+                "decomposition_snapshot": state.get("decomposition_snapshot") or {},
+                "plan_steps": state.get("plan_steps") or [],
+            },
+        )
+
+    snapshot = _decompose_task_by_rules(rewritten, slot)
+    llm_text, llm_json = await _orch_llm_invoke(
+        runtime, "decompose", rewritten, intent_snapshot=slot, max_tokens=640,
+    )
+    if isinstance(llm_json.get("sub_tasks"), list) and llm_json.get("sub_tasks"):
+        snapshot = {
+            **snapshot,
+            "decomposition_type": str(llm_json.get("decomposition_type") or snapshot.get("decomposition_type") or "stage"),
+            "sub_tasks": llm_json.get("sub_tasks"),
+            "dependencies": llm_json.get("dependencies") if isinstance(llm_json.get("dependencies"), list) else snapshot.get("dependencies"),
+        }
+    decomp_type = str(snapshot.get("decomposition_type") or "stage")
+    sub_tasks = list(snapshot.get("sub_tasks") or [])
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="任务分解",
+        phase="decompose",
+        result_brief=f"已拆解为 {len(sub_tasks)} 个{'并行' if decomp_type == 'parallel' else '阶段'}任务",
+        input_payload={
+            "rewritten_query": rewritten[:500],
+            "slot_snapshot": slot,
+        },
+        output_payload=snapshot,
+        think_text_override=llm_text or None,
+        llm_powered=bool(llm_text),
+    )
+    out = {
+        "orchestration_phase": PHASE_DECOMPOSE,
+        "decomposition_snapshot": snapshot,
+        "plan_steps": sub_tasks,
+        "graph_route": _route_after_decompose(runtime, slot, framework),
+        "group_seq": seq.get("group_seq"),
+        "orch_chain": seq.get("orch_chain", []),
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    return out
+
+
+async def node_intent_enhance(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
+    """意图增强：LLM 生成检索提示 + 规则兜底。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    rewritten = (state.get("rewritten_query") or state.get("message") or runtime.message or "").strip()
+    slot = state.get("slot_snapshot") or {}
+    decomposition = state.get("decomposition_snapshot") or {}
+    framework = state.get("framework") or "react"
+    trace_id = state.get("trace_id") or runtime.trace_id
+    task_id = state.get("task_id") or ""
+
+    if not _orch_enabled(runtime, "intent_enhance"):
+        return _skip_orch_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="意图增强",
+            phase="enhance",
+            node_id="intent_enhance",
+            graph_route=_route_after_enhance_chain(runtime, slot, framework),
+            passthrough={
+                "orchestration_phase": PHASE_ENHANCE,
+                "enhancement_snapshot": state.get("enhancement_snapshot") or {},
+            },
+        )
+
+    snapshot = _enhance_intent_by_rules(rewritten, slot, decomposition, web_search=bool(runtime.web_search))
+    llm_text, llm_json = await _orch_llm_invoke(
+        runtime,
+        "enhance",
+        rewritten,
+        intent_snapshot={
+            **slot,
+            "decomposition": decomposition,
+            "web_search": bool(runtime.web_search),
+            "rag_prefetch": bool(runtime.rag_prefetch),
+            "needs_rag": bool(slot.get("needs_rag")),
+        },
+        max_tokens=640,
+    )
+    for key in ("retrieval_hints", "search_keyword_queries", "web_search_queries", "verification_points", "risk_flags", "hypothetical_answer", "search_objective"):
+        val = llm_json.get(key)
+        if val:
+            snapshot[key] = val
+    if not runtime.web_search:
+        snapshot["web_search_queries"] = []
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="意图增强",
+        phase="enhance",
+        result_brief="已生成检索提示和核验要点",
+        input_payload={
+            "rewritten_query": rewritten[:500],
+            "decomposition_snapshot": decomposition,
+            "slot_snapshot": slot,
+            "web_search": bool(runtime.web_search),
+            "rag_prefetch": bool(runtime.rag_prefetch),
+        },
+        output_payload=snapshot,
+        think_text_override=llm_text or None,
+        llm_powered=bool(llm_text),
+    )
+    framework = state.get("framework") or "react"
+    route = _route_after_enhance_chain(runtime, slot, framework)
+    out = {
+        "orchestration_phase": PHASE_ENHANCE,
+        "enhancement_snapshot": snapshot,
+        "graph_route": route,
+        "group_seq": seq.get("group_seq"),
+        "orch_chain": seq.get("orch_chain", []),
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    return out
+
+
+async def node_rewrite_confirm_ui(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """HITL：改写确认（自由对话）。interrupt 等待 resume。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    snap = state.get("intent_rewrite_snapshot") or {}
+    payload = {
+        "kind": "rewrite_confirm",
+        "rewrite_snapshot": snap,
+        "message": "请确认改写后的任务摘要，或输入修改意见。",
+        "ui": "free_dialog",
+    }
+    runtime.emit(
+        "hitl_required",
+        {
+            "task_id": state.get("task_id") or "",
+            "hitl_kind": "rewrite_confirm",
+            "payload": payload,
+            "parent_status": PARENT_EXECUTING,
+        },
+    )
+    user = interrupt(payload)
+    if not isinstance(user, dict):
+        user = {"action": "confirm"}
+
+    action = str(user.get("action") or "confirm").strip().lower()
+    if action == "pause":
+        return {
+            "orchestration_phase": PHASE_PAUSED,
+            "paused": True,
+            "graph_route": "paused",
+            "user_hitl": user,
+            **_sse_events_from_runtime(runtime),
+        }
+    if action in ("reintent", "re_identify", "restart"):
+        return {
+            "graph_route": "intent",
+            "user_hitl": user,
+            **_sse_events_from_runtime(runtime),
+        }
+    edited = str(user.get("rewritten_query") or "").strip()
+    if edited:
+        snap = dict(snap)
+        snap["rewritten_query"] = edited
+    return {
+        "orchestration_phase": PHASE_REWRITE_CONFIRM,
+        "intent_rewrite_snapshot": snap,
+        "user_hitl": user,
+        "graph_route": "slot_fill",
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_slot_fill(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """业务对齐/槽位填充：LLM 识别领域模块 + 规则兜底。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    snap = state.get("intent_rewrite_snapshot") or {}
+    rewritten = state.get("rewritten_query") or snap.get("rewritten_query") or state.get("message")
+    framework = state.get("framework") or "react"
+    trace_id = state.get("trace_id") or runtime.trace_id
+    task_id = state.get("task_id") or ""
+
+    if not _orch_enabled(runtime, "slot_fill"):
+        slot = _align_business_slots(str(rewritten or ""), runtime.tools_meta, snap)
+        rt = snap.get("retrieval_terms")
+        if isinstance(rt, list) and rt:
+            slot["retrieval_terms"] = [str(x).strip() for x in rt if str(x).strip()]
+        if snap.get("needs_rag") is not None:
+            slot["needs_rag"] = bool(snap.get("needs_rag"))
+        return _skip_orch_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="业务对齐",
+            phase="slot",
+            node_id="slot_fill",
+            graph_route=_route_after_slot(runtime, slot, framework),
+            passthrough={
+                "orchestration_phase": PHASE_SLOT_FILL,
+                "slot_snapshot": slot,
+            },
+        )
+
+    slot = _align_business_slots(str(rewritten or ""), runtime.tools_meta, snap)
+    llm_text, llm_json = await _orch_llm_invoke(
+        runtime, "slot", str(rewritten or ""), intent_snapshot=snap, max_tokens=520,
+    )
+    for key in ("domain", "module", "operation_type", "entities", "retrieval_terms", "needs_rag", "state"):
+        val = llm_json.get(key)
+        if val is not None and val != "":
+            slot[key] = val
+    qk = snap.get("query_keywords") or snap.get("keywords")
+    if isinstance(qk, list) and qk:
+        ents = [str(x).strip() for x in (slot.get("entities") or []) if str(x).strip()]
+        for x in qk:
+            s = str(x).strip()
+            if s and s not in ents:
+                ents.append(s)
+        if ents:
+            slot["entities"] = ents
+    if not slot.get("retrieval_terms"):
+        rt = snap.get("retrieval_terms")
+        if isinstance(rt, list) and rt:
+            slot["retrieval_terms"] = [str(x).strip() for x in rt if str(x).strip()]
+    if snap.get("needs_rag") is not None and slot.get("needs_rag") is None:
+        slot["needs_rag"] = bool(snap.get("needs_rag"))
+    result_brief = "已识别业务对象和查询范围"
+    if slot.get("needs_rag"):
+        result_brief = "已定位到资料分析任务，需按文档核验"
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="业务对齐",
+        phase="slot",
+        result_brief=result_brief,
+        input_payload={
+            "rewritten_query": str(rewritten or "")[:500],
+            "query_summary": state.get("query_summary") or snap.get("rewritten_query", "")[:120],
+        },
+        output_payload=slot,
+        think_text_override=llm_text or None,
+        llm_powered=bool(llm_text),
+    )
+    out = {
+        "orchestration_phase": PHASE_SLOT_FILL,
+        "slot_snapshot": slot,
+        "graph_route": _route_after_slot(runtime, slot, framework),
+        "group_seq": seq.get("group_seq"),
+        "orch_chain": seq.get("orch_chain", []),
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    return out
+
+
+async def node_slot_confirm_ui(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """HITL：槽位表单确认。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    slot = state.get("slot_snapshot") or {}
+    payload = {
+        "kind": "slot_confirm",
+        "slot_snapshot": slot,
+        "message": "请确认业务领域、模块和检索意图。",
+        "ui": "form",
+    }
+    runtime.emit(
+        "hitl_required",
+        {
+            "task_id": state.get("task_id") or "",
+            "hitl_kind": "slot_confirm",
+            "payload": payload,
+        },
+    )
+    user = interrupt(payload)
+    if not isinstance(user, dict):
+        user = {"action": "confirm"}
+    action = str(user.get("action") or "confirm").strip().lower()
+    if action == "pause":
+        return {
+            "paused": True,
+            "graph_route": "paused",
+            "orchestration_phase": PHASE_PAUSED,
+            **_sse_events_from_runtime(runtime),
+        }
+    merged = dict(slot)
+    if isinstance(user.get("slot_snapshot"), dict):
+        merged.update(user["slot_snapshot"])
+    return {
+        "slot_snapshot": merged,
+        "slot_confirmed": True,
+        "orchestration_phase": PHASE_SLOT_CONFIRM,
+        "graph_route": "rag_filter_confirm",
+        "user_hitl": user,
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_rag_filter_confirm_ui(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """HITL：RAG 元数据硬筛表单（意图/术语映射后、检索前暂停，非终止链路）。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    slot = state.get("slot_snapshot") or {}
+    needs = bool(slot.get("needs_rag") or runtime.rag_prefetch)
+    if not needs:
+        return {
+            "rag_metadata_filter": {},
+            "rag_filter_confirmed": True,
+            "graph_route": "rag_decision",
+            **_sse_events_from_runtime(runtime),
+        }
+
+    from .rag_recall_filter import propose_rag_filter_form
+
+    query = (
+        slot.get("rewritten_query")
+        or state.get("rewritten_query")
+        or state.get("message")
+        or runtime.message
+        or ""
+    )
+    proposal = propose_rag_filter_form(
+        str(query),
+        slot_snapshot=slot,
+        enhancement_snapshot=state.get("enhancement_snapshot") or {},
+    )
+    payload = {
+        "kind": "rag_filter_confirm",
+        "query": query,
+        "filter_form": proposal.get("filter") or {},
+        "vocabulary": proposal.get("vocabulary") or {},
+        "extracted_terms": proposal.get("extracted_terms") or [],
+        "term_mapping_notes": proposal.get("term_mapping_notes") or [],
+        "match_mode": proposal.get("match_mode") or {},
+        "message": "请确认知识库元数据筛选条件（空=不筛）；确认后继续检索。",
+        "ui": "form",
+    }
+    runtime.emit(
+        "hitl_required",
+        {
+            "task_id": state.get("task_id") or "",
+            "hitl_kind": "rag_filter_confirm",
+            "payload": payload,
+        },
+    )
+    user = interrupt(payload)
+    if not isinstance(user, dict):
+        user = {"action": "confirm"}
+    action = str(user.get("action") or "confirm").strip().lower()
+    if action == "pause":
+        return {
+            "paused": True,
+            "graph_route": "paused",
+            "orchestration_phase": PHASE_PAUSED,
+            **_sse_events_from_runtime(runtime),
+        }
+    filt = dict(proposal.get("filter") or {})
+    if isinstance(user.get("rag_metadata_filter"), dict):
+        filt.update({k: str(v or "").strip() for k, v in user["rag_metadata_filter"].items()})
+    if isinstance(user.get("filter_form"), dict):
+        filt.update({k: str(v or "").strip() for k, v in user["filter_form"].items()})
+
+    return {
+        "rag_metadata_filter": filt,
+        "rag_filter_confirmed": True,
+        "orchestration_phase": PHASE_SLOT_CONFIRM,
+        "graph_route": "rag_decision",
+        "user_hitl": user,
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+_RAG_PREFETCH_TIMEOUT_SEC = float(
+    __import__("os").environ.get("CHAT_RAG_PREFETCH_TIMEOUT_SEC", "8") or "8"
+)
+
+
+async def _safe_kb_search(
+    query: str,
+    *,
+    top_k: int = 5,
+    span_ctx: Optional[Dict[str, Any]] = None,
+    timeout_sec: float = _RAG_PREFETCH_TIMEOUT_SEC,
+    metadata_filter: Optional[Dict[str, str]] = None,
+) -> tuple[List[Dict[str, Any]], str]:
+    """带超时与 Milvus 探测的 kb_search，避免编排 SSE 在 RAG 预取处长时间挂起。"""
+    q = str(query or "").strip()
+    if not q:
+        return [], ""
+    try:
+        from .milvus_health import check_milvus
+
+        probe = check_milvus()
+        if not probe.get("milvus_ok"):
+            return [], str(probe.get("error") or "Milvus 不可用")[:300]
+    except Exception as ex:
+        return [], str(ex)[:300]
+
+    def _run() -> List[Dict[str, Any]]:
+        from .kb_rag import kb_search
+
+        return list(
+            kb_search(q, top_k=top_k, span_ctx=span_ctx, metadata_filter=metadata_filter) or []
+        )
+
+    try:
+        hits = await asyncio.wait_for(asyncio.to_thread(_run), timeout=max(1.0, timeout_sec))
+        return hits, ""
+    except asyncio.TimeoutError:
+        return [], f"知识库预取超时（>{timeout_sec}s）"
+    except Exception as ex:
+        return [], str(ex)[:300]
+
+
+async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """RAG 决策：需要时 HITL 确认检索词。"""
+    from .rag_recall_filter import active_filter_fields
+
+    runtime = _runtime_from_state_or_config(state, config)
+    slot = state.get("slot_snapshot") or {}
+    meta_filt = active_filter_fields(state.get("rag_metadata_filter") or {})
+    needs = bool(slot.get("needs_rag") or runtime.rag_prefetch)
+    task_id = state.get("task_id") or ""
+    session_id = state.get("session_id") or runtime.session_id
+    trace_id = state.get("trace_id") or runtime.trace_id
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|进入] "
+        "needs_rag=%s; rag_prefetch=%s; task_id=%s",
+        session_id,
+        needs,
+        runtime.rag_prefetch,
+        (task_id or "")[:16],
+    )
+
+    enhance = state.get("enhancement_snapshot") or {}
+    preset_kw: List[str] = []
+    for src in (
+        enhance.get("search_keyword_queries"),
+        slot.get("retrieval_terms"),
+        (state.get("intent_rewrite_snapshot") or {}).get("keywords"),
+    ):
+        if isinstance(src, list):
+            for x in src:
+                s = str(x or "").strip()
+                if s and s not in preset_kw:
+                    preset_kw.append(s)
+
+    # 意图增强已产出检索词时自动确认，避免 LangGraph interrupt 无前端 resume 导致卡在「意图增强」后
+    if needs and preset_kw:
+        slot = dict(slot)
+        slot["retrieval_terms"] = preset_kw[:12]
+        _LOG.info(
+            "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|跳过HITL] "
+            "auto_rag_confirm; keyword_count=%s",
+            session_id,
+            len(preset_kw),
+        )
+    elif needs:
+        payload = {
+            "kind": "rag_confirm",
+            "query": slot.get("rewritten_query") or state.get("message"),
+            "keywords": slot.get("retrieval_terms") or [],
+            "ui": "form",
+        }
+        runtime.emit(
+            "hitl_required",
+            {
+                "task_id": state.get("task_id") or "",
+                "hitl_kind": "rag_confirm",
+                "payload": payload,
+            },
+        )
+        user = interrupt(payload)
+        if isinstance(user, dict) and str(user.get("action")).lower() == "pause":
+            return {"paused": True, "graph_route": "paused", **_sse_events_from_runtime(runtime)}
+        if isinstance(user, dict) and user.get("keywords"):
+            slot = dict(slot)
+            slot["retrieval_terms"] = user["keywords"]
+
+    framework = state.get("framework") or "react"
+    route = "plan" if framework == "plan_execute" else "execute"
+    rag_hits: List[Dict[str, Any]] = []
+    rag_err = ""
+    rag_query = ""
+    if needs and task_id:
+        from .web_search_plan import build_rag_retrieve_query
+
+        rag_query = build_rag_retrieve_query(
+            rewritten_query=(
+                slot.get("rewritten_query")
+                or state.get("rewritten_query")
+                or state.get("message")
+                or runtime.message
+                or ""
+            ),
+            original_query=state.get("message") or runtime.message or "",
+            slot_snapshot=slot,
+            enhancement_snapshot=enhance,
+        ).strip()
+    if needs and task_id and rag_query:
+        runtime.emit(
+            "pipeline_progress",
+            {
+                "trace_id": trace_id,
+                "task_id": task_id,
+                "stage": "知识库预检索中…",
+                "detail": "rag_prefetch",
+            },
+        )
+        t0 = time.perf_counter()
+        rag_hits, rag_err = await _safe_kb_search(
+            str(rag_query).strip(),
+            top_k=5,
+            span_ctx={
+                "session_id": session_id,
+                "task_id": task_id,
+                "trace_id": trace_id,
+            },
+            metadata_filter=meta_filt or None,
+        )
+        _LOG.info(
+            "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|预取] "
+            "ok=%s; hit_count=%s; cost_ms=%s; error=%s",
+            session_id,
+            not rag_err,
+            len(rag_hits),
+            int((time.perf_counter() - t0) * 1000),
+            (rag_err or "")[:120],
+        )
+
+    rag_out = {
+        "needs_rag": needs,
+        "rag_query": str(rag_query)[:300],
+        "prefetch_count": len(rag_hits),
+        "prefetch_error": rag_err[:300] if rag_err else "",
+        "metadata_filter": meta_filt if needs else {},
+    }
+    seq: Dict[str, Any] = {}
+    # 无需知识库检索时不向前端推送「RAG 决策」步骤组（避免空 IO / 误导性绿点）
+    if needs:
+        seq = _emit_orchestration_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="RAG 决策",
+            phase="rag_decision",
+            result_brief=(
+                f"需要检索，已预取 {len(rag_hits)} 条"
+                if not rag_err
+                else "需要检索（预取失败）"
+            ),
+            input_payload={
+                "slot_snapshot": slot,
+                "enhancement_snapshot": state.get("enhancement_snapshot") or {},
+                "needs_rag": needs,
+            },
+            output_payload=rag_out,
+            executed=True,
+        )
+    rag_block: Optional[str] = None
+    if rag_hits:
+        lines = ["编排段知识库预检索（供执行段参考）："]
+        for idx, hit in enumerate(rag_hits[:5], start=1):
+            if isinstance(hit, dict):
+                title = hit.get("title") or hit.get("file") or hit.get("source") or f"片段{idx}"
+                snippet = hit.get("snippet") or hit.get("content") or hit.get("text") or ""
+                lines.append(f"{idx}. {title}")
+                if snippet:
+                    lines.append(f"   {str(snippet)[:400]}")
+        rag_block = "\n".join(lines)
+
+    return {
+        "orchestration_phase": PHASE_RAG_DECISION,
+        "needs_rag": needs,
+        "rag_confirmed": True,
+        "slot_snapshot": slot,
+        "rag_context_block": rag_block or state.get("rag_context_block"),
+        "graph_route": route,
+        "group_seq": seq.get("group_seq"),
+        "orch_chain": seq.get("orch_chain", []),
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_plan_detect(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """Plan-Execute：生成计划表（单次 LLM）。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    message = state.get("message") or runtime.message
+    steps: List[Dict[str, Any]] = []
+    if runtime.api_key and runtime.model_resolved:
+        text = ""
+        async for piece in ai_chat._iter_react_llm_tokens(
+            phase="plan",
+            user_message=message,
+            provider=runtime.provider,
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.model_resolved,
+            tools_meta=runtime.tools_meta,
+            react_memory=state.get("react_memory") or [],
+            intent_snapshot=state.get("intent_rewrite_snapshot"),
+        ):
+            text += piece
+        for i, line in enumerate([ln.strip() for ln in text.splitlines() if ln.strip()][:8], start=1):
+            steps.append({"index": i, "title": line[:200], "done": False})
+    if not steps:
+        steps = state.get("plan_steps") or [
+            {"index": 1, "title": "读取并核验相关资料", "done": False},
+            {"index": 2, "title": "整理可引用依据", "done": False},
+            {"index": 3, "title": "形成答复要点", "done": False},
+        ]
+    titles = " → ".join(str(s.get("title") or "")[:36] for s in steps[:4] if s.get("title"))
+    seq = _emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="任务分解",
+        phase="plan",
+        result_brief=f"共 {len(steps)} 步：{titles}" if titles else f"共 {len(steps)} 步待办",
+        extra={"plan_steps": steps},
+    )
+    return {
+        "orchestration_phase": PHASE_PLAN,
+        "plan_steps": steps,
+        "plan_cursor": 0,
+        "graph_route": "execute",
+        "group_seq": seq.get("group_seq"),
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_react_entry(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    """进入执行段：编排收尾思考 + handoff（执行段再加载 MCP 并调用工具）。"""
+    runtime = _runtime_from_state_or_config(state, config)
+    # 延续主任务：跳过「执行准备」步骤组，避免无意义步骤组 #1
+    if str(state.get("graph_route") or "").strip() == "continue_execute":
+        _LOG.info(
+            "[AI问答-LangGraph|chat_graph_nodes.node_react_entry|session:%s|硬编执行|handoff] "
+            "continue_main_skip_prep",
+            runtime.session_id,
+        )
+        return {
+            "orchestration_phase": PHASE_REACT,
+            "graph_route": "handoff_execute",
+            "execution_done": False,
+            "react_round": 0,
+            **_sse_events_from_runtime(runtime),
+        }
+    plan_steps = list(state.get("plan_steps") or [])
+    enhance = state.get("enhancement_snapshot") or {}
+    prep = emit_orchestration_step(
+        runtime,
+        state,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="执行准备",
+        phase="execute_prep",
+        result_brief="固定编排完成，handoff 至检索预取与 ReAct",
+        input_payload={
+            "plan_steps": plan_steps,
+            "enhancement_snapshot": enhance,
+            "web_search": bool(runtime.web_search),
+            "rag_prefetch": bool(runtime.rag_prefetch),
+            "read_comments": bool(runtime.read_comments),
+        },
+        output_payload={
+            "plan_steps": plan_steps,
+            "sub_task_count": len(plan_steps),
+            "verification_points": enhance.get("verification_points") or [],
+        },
+    )
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.node_react_entry|session:%s|硬编执行|handoff] "
+        "进入执行段",
+        runtime.session_id,
+    )
+    return {
+        "orchestration_phase": PHASE_REACT,
+        "graph_route": "handoff_execute",
+        "execution_done": False,
+        "react_round": 0,
+        "orch_chain": prep.get("orch_chain", []),
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_abnormal_finalize(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    runtime = _runtime_from_state_or_config(state, config)
+    msg = state.get("error_message") or "任务进入异常收敛态，请检查工具权限或重试。"
+    task_id = state.get("task_id") or ""
+    if task_id:
+        ai_chat._span_update(task_id, status=PARENT_ABNORMAL)
+    runtime.emit(
+        "task_completed",
+        {
+            "task_id": task_id,
+            "status": PARENT_ABNORMAL,
+            "persist_main_task": bool(state.get("use_main_task")),
+            "error_message": msg,
+        },
+    )
+    return {
+        "orchestration_phase": PHASE_ABNORMAL,
+        "abnormal": True,
+        "graph_route": "done",
+        "final_answer": msg,
+        **_sse_events_from_runtime(runtime),
+    }
+
+
+async def node_paused(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    runtime = _runtime_from_state_or_config(state, config)
+    runtime.emit(
+        "graph_paused",
+        {"task_id": state.get("task_id") or "", "message": "流程已暂停，可恢复或编辑状态后继续。"},
+    )
+    return {
+        "orchestration_phase": PHASE_PAUSED,
+        "paused": True,
+        "graph_route": "done",
+        **_sse_events_from_runtime(runtime),
+    }

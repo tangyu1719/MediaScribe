@@ -1,0 +1,20 @@
+fastapi
+uvicorn
+aiohttp
+pydantic
+pymilvus>=2.3.0,<2.4.0
+langchain-mcp-adapters>=0.1.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+langgraph-checkpoint>=2.0.0
+mcp>=1.0.0
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+pycasbin>=1.36.0
+casbin-sqlalchemy-adapter>=0.6.0
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.1.0
+apscheduler>=3.10.0
+uuid6>=2024.0.0
+chonkie>=0.6.0
+# Eval 评测运维层可选依赖见 requirements-eval.txt（langfuse/agentevals/ragas）

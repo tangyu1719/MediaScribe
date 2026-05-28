@@ -1,0 +1,21 @@
+{
+  "name": "工具调用后回答（strict 示例）",
+  "description": "用于 pytest / OPS 轨迹评测演示；须与 SPAN 中 tool_call → llm 顺序一致才通过 strict。",
+  "reference_outputs": [
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_demo",
+          "type": "function",
+          "function": {"name": "kb_search", "arguments": "{}"}
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "根据检索结果回答用户问题。"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+﻿.F..                                                                     [100%]
+================================== FAILURES ===================================
+_______________________ test_continue_main_with_history _______________________
+
+    def test_continue_main_with_history():
+        hist = [{"task_id": "task_abc", "status": "executing", "user_query": "分析主页"}]
+>       d = resolve_intent_mode(msg, cur_task=None, is_simple_heuristic=True, main_task_history=hist)
+                                ^^^
+E       NameError: name 'msg' is not defined
+
+backend\tests\test_intent_continuation.py:25: NameError
+============================== warnings summary ===============================
+D:\python解释器\Lib\site-packages\pymilvus\client\__init__.py:6
+  D:\python解释器\Lib\site-packages\pymilvus\client\__init__.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import DistributionNotFound, get_distribution
+
+D:\python解释器\Lib\site-packages\environs\__init__.py:58
+  D:\python解释器\Lib\site-packages\environs\__init__.py:58: DeprecationWarning: The '__version_info__' attribute is deprecated and will be removed in in a future version. Use feature detection or 'packaging.Version(importlib.metadata.version("marshmallow")).release' instead.
+    _SUPPORTS_LOAD_DEFAULT = ma.__version_info__ >= (3, 13)
+
+backend\app\main.py:260
+  F:\java\AIOPS\SuperBizAgent-release-2026-01-02\demo_wendanghua\SuperBizAgent-AgentFramework\web_rebuild_v2\backend\app\main.py:260: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+D:\python解释器\Lib\site-packages\fastapi\applications.py:4656
+D:\python解释器\Lib\site-packages\fastapi\applications.py:4656
+  D:\python解释器\Lib\site-packages\fastapi\applications.py:4656: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+backend\app\main.py:290
+  F:\java\AIOPS\SuperBizAgent-release-2026-01-02\demo_wendanghua\SuperBizAgent-AgentFramework\web_rebuild_v2\backend\app\main.py:290: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED backend\tests\test_intent_continuation.py::test_continue_main_with_history
+1 failed, 3 passed, 6 warnings in 0.45s
