@@ -1,0 +1,15 @@
+---
+description: 禁止假数据、假框架、假步骤（与本仓库 AI 问答/SSE 强相关）
+alwaysApply: true
+---
+
+# 禁止假 Agent 步骤（web_rebuild_v2）
+
+完整条文见仓库上级 `f:\java\AIOPS\.cursor\rules\no-fake-agent-steps-or-frameworks.mdc`。
+
+**本仓库硬性要求：**
+
+1. `backend/app/services/ai_chat.py` 中不得恢复「模板 + sleep」式 observe/act。
+2. ReAct 每步必须真实 LLM；工具必须来自 `chat_tool_registry` + MCP，禁止编造工具列表。
+3. 评论抓取仅用户勾选 `read_comments` 后挂载/调用。
+4. 改 SSE 时须保证 `llm_powered` 步骤与真实调用一致，否则视为违规。
