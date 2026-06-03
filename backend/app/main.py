@@ -345,6 +345,12 @@ def _startup_auth_and_db():
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("platform health startup: %s", e)
     try:
+        from .services.chat_warmup import schedule_chat_warmup_on_startup
+
+        schedule_chat_warmup_on_startup()
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("chat warmup startup: %s", e)
+    try:
         from .services.creator_scheduler import start_scheduler
 
         start_scheduler()
@@ -542,22 +548,30 @@ def route_process_queue():
         "feishu_message",
         "error",
         "priority",
+        "queue_seq",
         "created_at",
+        "updated_at",
         "pipeline_started_at",
+        "md_completed_at",
         "total_duration_ms",
         "total_token_count",
+        "article_char_count",
+        "summary_char_count",
     ]
     out = []
-    from .pipeline_finalize import apply_task_card_metrics
+    from .services.pipeline_finalize import apply_task_card_metrics
 
-    for t in rows:
+    for i, t in enumerate(rows):
         row = {k: t.get(k) for k in keys}
+        row["queue_pos"] = i + 1
         tid = row.get("task_id")
-        if tid and row.get("status") not in ("pending", "queued", "cancelled"):
+        if tid and row.get("status") == "completed":
             try:
                 live = apply_task_card_metrics(tid, persist=False)
                 row["total_duration_ms"] = live.get("total_duration_ms") or row.get("total_duration_ms") or 0
                 row["total_token_count"] = live.get("total_token_count") or row.get("total_token_count") or 0
+                row["article_char_count"] = live.get("article_char_count") or row.get("article_char_count") or 0
+                row["summary_char_count"] = live.get("summary_char_count") or row.get("summary_char_count") or 0
             except Exception:
                 pass
         if not row.get("pipeline_stages"):
@@ -774,26 +788,85 @@ async def route_stream_logs(task_id: str, request: Request):
                 sent += 1
             cs = f"{task.get('status', '')}:{task.get('progress', 0)}"
             if cs != last_status:
-                from .pipeline_finalize import apply_task_card_metrics
+                from .services.pipeline_finalize import apply_task_card_metrics
 
                 metrics = apply_task_card_metrics(task_id, persist=False)
-                yield f"event: progress\ndata: {json.dumps({'stage': task.get('stage', ''), 'progress': task.get('progress', 0), 'status': task.get('status', ''), 'total_duration_ms': metrics.get('total_duration_ms', 0), 'total_token_count': metrics.get('total_token_count', 0)}, ensure_ascii=False)}\n\n"
+                progress_payload = {
+                    "stage": task.get("stage", ""),
+                    "progress": task.get("progress", 0),
+                    "status": task.get("status", ""),
+                }
+                if task.get("status") == "completed":
+                    progress_payload.update(metrics)
+                yield f"event: progress\ndata: {json.dumps(progress_payload, ensure_ascii=False)}\n\n"
                 last_status = cs
             if task.get("status") == "completed":
-                from .pipeline_finalize import apply_task_card_metrics
+                from .services.pipeline_finalize import apply_task_card_metrics
 
                 metrics = apply_task_card_metrics(task_id, persist=False)
-                yield f"event: complete\ndata: {json.dumps({'ok': True, 'doc_filename': task.get('doc_filename'), 'task_id': task_id, 'html_status': task.get('html_status', ''), 'html_message': task.get('html_message', ''), 'total_duration_ms': metrics.get('total_duration_ms', 0), 'total_token_count': metrics.get('total_token_count', 0)}, ensure_ascii=False)}\n\n"
+                yield f"event: complete\ndata: {json.dumps({'ok': True, 'doc_filename': task.get('doc_filename'), 'task_id': task_id, 'html_status': task.get('html_status', ''), 'html_message': task.get('html_message', ''), **metrics}, ensure_ascii=False)}\n\n"
                 break
             if task.get("status") == "failed":
-                from .pipeline_finalize import apply_task_card_metrics
-
-                metrics = apply_task_card_metrics(task_id, persist=True)
-                yield f"event: error\ndata: {json.dumps({'ok': False, 'error': task.get('error'), 'total_duration_ms': metrics.get('total_duration_ms', 0), 'total_token_count': metrics.get('total_token_count', 0)}, ensure_ascii=False)}\n\n"
+                yield f"event: error\ndata: {json.dumps({'ok': False, 'error': task.get('error')}, ensure_ascii=False)}\n\n"
                 break
             await asyncio.sleep(0.5)
     return StreamingResponse(gen(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/tasks/query")
+def route_tasks_query(
+    session_id: str = Query("", description="按会话 ID 筛选"),
+    task_id: str = Query("", description="按任务 ID 子串筛选"),
+    status: str = Query("", description="按任务状态筛选"),
+    task_kind: str = Query("all", description="all|main|pipeline"),
+    name: str = Query("", description="按任务名/链接检索"),
+    sort: str = Query("time_desc", description="time_desc|time_asc|id_asc|id_desc|name_asc|name_desc"),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """任务中心：Redis 优先聚合，MySQL 补全。"""
+    from .services.task_registry_service import query_task_registry
+
+    return query_task_registry(
+        session_id=session_id,
+        task_id=task_id,
+        status=status,
+        task_kind=task_kind,
+        name=name,
+        sort=sort,
+        limit=limit,
+    )
+
+
+@app.get("/api/tasks/detail")
+def route_tasks_detail(
+    task_id: str = Query(..., description="任务 ID"),
+    task_kind: str = Query("", description="main|pipeline，空则自动推断"),
+):
+    """任务中心详情：双快照子表 + 工具链 + SPAN 步骤。"""
+    from .services.task_registry_service import get_task_registry_detail
+
+    result = get_task_registry_detail(task_id, task_kind=task_kind)
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error") or "任务不存在或无详情")
+    return result
+
+
+@app.post("/api/tasks/sync-mysql")
+async def route_tasks_sync_mysql(request: Request):
+    """手动将单条任务从 Redis/热缓存同步到 MySQL。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    tid = str(body.get("task_id") or "").strip()
+    kind = str(body.get("task_kind") or "").strip()
+    from .services.task_registry_service import sync_task_to_mysql
+
+    result = sync_task_to_mysql(tid, task_kind=kind)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "同步失败")
+    return result
 
 
 @app.get("/api/history")
@@ -806,7 +879,9 @@ def route_history():
     from .services.pipeline_stages import pipeline_summary
     running = {t["link"]: t for t in _list_running()}
     
-    for task in tasks:
+    from .services.pipeline_finalize import enrich_completed_task_metrics
+
+    for i, task in enumerate(tasks):
         link = task.get("link", "")
         rt = running.get(link)
         if rt:
@@ -818,7 +893,8 @@ def route_history():
                 "link_title", "doc_title", "doc_filename", "doc_path", "html_path", "html_status", "html_message",
                 "pipeline_route", "pipeline_stages", "failed_stage", "failed_stage_label",
                 "resume_from", "resume_context", "error", "transcribe_error_code",
-                "pipeline_started_at", "total_duration_ms", "total_token_count",
+                "pipeline_started_at", "md_completed_at", "total_duration_ms", "total_token_count",
+                "article_char_count", "summary_char_count",
             ):
                 if rt.get(_k) is not None:
                     task[_k] = rt.get(_k)
@@ -827,6 +903,7 @@ def route_history():
             task["current_stage"] = task.get("stage", "")
         route = task.get("pipeline_route") or task.get("route_type") or "video"
         task["pipeline_steps"] = pipeline_summary(task.get("pipeline_stages"), route)
+        tasks[i] = enrich_completed_task_metrics(task)
     
     return {"tasks": tasks, "total": len(tasks)}
 
@@ -1495,8 +1572,10 @@ def route_skills_diff(skill_id: str, from_ver: str = Query(..., alias="from"), t
 
 
 @app.get("/api/chat/slash-suggest")
-def route_chat_slash_suggest(prefix: str = Query("", alias="prefix")):
-    return {"suggestions": skill_slash_suggestions(prefix)}
+def route_chat_slash_suggest(prefix: str = Query("", alias="prefix"), limit: int = Query(12, ge=1, le=30)):
+    from app.services.skill_registry import slash_suggestions_with_total
+
+    return slash_suggestions_with_total(prefix, limit=limit)
 
 
 @app.post("/api/chat/complete-slash")
@@ -1504,7 +1583,11 @@ async def route_chat_complete_slash(request: Request):
     """SPEC API-S2：与 slash-suggest 同源，供 POST 客户端使用。"""
     body = await request.json()
     prefix = (body.get("prefix") or "").strip()
-    return {"ok": True, "suggestions": skill_slash_suggestions(prefix)}
+    lim = int(body.get("limit") or 12)
+    from app.services.skill_registry import slash_suggestions_with_total
+
+    out = slash_suggestions_with_total(prefix, limit=lim)
+    return {"ok": True, **out}
 
 
 @app.get("/api/tools/builtin")
@@ -1520,6 +1603,44 @@ async def route_chat_tools_catalog(read_comments: bool = False):
 
     _tools, meta = await load_all_chat_tools(read_comments=read_comments)
     return {"ok": True, **meta}
+
+
+@app.get("/api/chat/warmup")
+async def route_chat_warmup(
+    read_comments: bool = False,
+    include_rag: bool = True,
+    force: bool = False,
+    wait: bool = True,
+):
+    """
+    对话运行时预热：MCP 工具 + LangGraph 图 + 可选 RAG/Milvus。
+    前端进入 AI 问答页或发送前调用；后端启动时亦后台执行。
+    """
+    from .services.chat_warmup import get_warmup_status, run_chat_warmup
+
+    st = get_warmup_status()
+    if st.get("ready") and not force and st.get("tools_cached", {}).get(
+        "read_comments" if read_comments else "default"
+    ):
+        return {"ok": True, **st}
+    if st.get("warming") and not force:
+        return {"ok": True, **st}
+    if wait:
+        st = await run_chat_warmup(
+            read_comments=read_comments,
+            include_rag=include_rag,
+            force=force,
+        )
+    else:
+        asyncio.create_task(
+            run_chat_warmup(
+                read_comments=read_comments,
+                include_rag=include_rag,
+                force=force,
+            )
+        )
+        st = get_warmup_status()
+    return {"ok": True, **st}
 
 
 @app.get("/api/tools/mcp/config")
@@ -1699,17 +1820,102 @@ async def route_chat_stream(request: Request):
     client_main_task_history = body.get("main_task_history") if isinstance(body.get("main_task_history"), list) else None
     orch_pipeline_nodes = body.get("orch_pipeline_nodes") if isinstance(body.get("orch_pipeline_nodes"), dict) else None
 
-    from .services.chat_context_memory import prepare_session_memory
-
-    memory_prepared = await prepare_session_memory(
-        sid,
-        client_cur_task=client_cur_task,
-        client_history=client_main_task_history,
-        extra_tokens=max(32, len(msg) // 2),
+    from .services.chat_warmup import (
+        get_warmup_status,
+        refresh_or_prepare_session_memory,
+        run_chat_warmup,
+        wait_for_chat_warmup,
     )
 
     async def gen():
         try:
+            st = get_warmup_status()
+            warmup_task = None
+            if not st.get("ready"):
+                warmup_task = asyncio.create_task(
+                    wait_for_chat_warmup(
+                        read_comments=read_comments,
+                        include_rag=rag_prefetch,
+                        timeout_sec=45.0,
+                    )
+                )
+            elif not st.get("warming"):
+                asyncio.create_task(
+                    run_chat_warmup(read_comments=read_comments, include_rag=rag_prefetch)
+                )
+            # 首包立刻返回，避免前端长时间停在「正在连接…」（会话记忆在后台继续准备）
+            yield (
+                "event: stream_open\n"
+                + "data: "
+                + json.dumps(
+                    {
+                        "session_id": sid,
+                        "stage": "准备会话上下文",
+                        "progress": 0,
+                        "orchestration_engine": "pending",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            import time as _time
+
+            _mem_t0 = _time.perf_counter()
+            _tid_lite = ""
+            if isinstance(client_cur_task, dict):
+                _tid_lite = str(client_cur_task.get("task_id") or "").strip()
+            if _tid_lite:
+                yield (
+                    "event: pipeline_progress\n"
+                    + "data: "
+                    + json.dumps(
+                        {
+                            "session_id": sid,
+                            "stage": "延续主任务",
+                            "progress": 2,
+                            "detail": "检测到主任务续接，准备编排面板",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                yield (
+                    "event: orchestration_node_start\n"
+                    + "data: "
+                    + json.dumps(
+                        {
+                            "session_id": sid,
+                            "task_id": _tid_lite,
+                            "step_id": "step_boot",
+                            "step_name": "延续主任务",
+                            "phase": "execute_prep",
+                            "progress_hint": "正在执行：延续主任务",
+                            "sub_index": 0,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+            mem_task = asyncio.create_task(
+                refresh_or_prepare_session_memory(
+                    sid,
+                    client_cur_task=client_cur_task,
+                    client_history=client_main_task_history,
+                    extra_tokens=max(32, len(msg) // 2),
+                    lite=bool(_tid_lite),
+                )
+            )
+            if warmup_task is not None:
+                await warmup_task
+            memory_prepared = await mem_task
+            _mem_ms = int((_time.perf_counter() - _mem_t0) * 1000)
+            logging.getLogger("sba.main").info(
+                "[AI问答-流式|main.route_chat_stream|session:%s|硬编执行|会话记忆] "
+                "prepare_done; cost_ms=%s; pct=%s",
+                sid,
+                _mem_ms,
+                (memory_prepared.get("usage") or {}).get("pct"),
+            )
             if memory_prepared.get("force_new_session"):
                 yield (
                     "event: context_memory\n"
@@ -1739,18 +1945,15 @@ async def route_chat_stream(request: Request):
             ):
                 yield event
         except Exception as exc:
-            _LOG_CHAT.error(
-                "[AI问答-SSE流|main.route_chat_stream|session:%s|硬编执行|异常] SSE 生成中断; "
-                "error_type=%s; error_message=%s",
-                sid,
-                type(exc).__name__,
-                str(exc)[:500],
-            )
-            err_payload = json.dumps(
-                {"session_id": sid, "message": str(exc)[:500], "error_type": type(exc).__name__},
-                ensure_ascii=False,
-            )
-            yield f"event: stream_error\ndata: {err_payload}\n\n"
+            from .services.chat_error_handler import stream_user_error_sse
+
+            async for event in stream_user_error_sse(
+                exc,
+                session_id=sid,
+                stage="问答流",
+                user_message=msg,
+            ):
+                yield event
 
     return StreamingResponse(gen(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
@@ -1786,16 +1989,14 @@ async def route_chat_graph_resume(request: Request):
             ):
                 yield event
         except Exception as exc:
-            _LOG_CHAT.error(
-                "[AI问答-LangGraph-HITL|main.route_chat_graph_resume|session:%s|硬编执行|异常] %s",
-                sid,
+            from .services.chat_error_handler import stream_user_error_sse
+
+            async for event in stream_user_error_sse(
                 exc,
-            )
-            err_payload = json.dumps(
-                {"session_id": sid, "message": str(exc)[:500]},
-                ensure_ascii=False,
-            )
-            yield f"event: stream_error\ndata: {err_payload}\n\n"
+                session_id=sid,
+                stage="HITL 恢复",
+            ):
+                yield event
 
     return StreamingResponse(
         gen(),
@@ -2212,6 +2413,28 @@ async def route_doc_process(request: Request):
         }
 
 
+@app.post("/api/doc/flowchart/score")
+async def route_doc_flowchart_score(request: Request):
+    """多模态 Web：PDF/图片 → 流程图 CV 分块 + 泳道横切 + 几何得分 + 叠图。"""
+    body = await request.json()
+    path_raw = (body.get("path") or "").strip()
+    if not path_raw:
+        raise HTTPException(400, "缺少 path")
+    from .services.flowchart_scoring_service import run_flowchart_score
+
+    return run_flowchart_score(
+        path_raw,
+        page=int(body.get("page") or 1),
+        zoom=float(body.get("zoom") or 2.0),
+        mineru_json=(body.get("mineru_json") or "").strip(),
+        column_band_split=bool(body.get("column_band_split", True)),
+        column_bands=int(body.get("column_bands") if body.get("column_bands") is not None else 0),
+        min_band_h=int(body.get("min_band_h") or 48),
+        skip_arrows=bool(body.get("skip_arrows", True)),
+        artifact_subdir=(body.get("job_id") or "").strip(),
+    )
+
+
 @app.post("/api/doc/upload")
 async def route_doc_upload(file: UploadFile = File(...)):
     """浏览器上传文件到服务端 output/mm_uploads，返回绝对路径供 /api/doc/process 使用。"""
@@ -2535,6 +2758,21 @@ async def route_settings_ai_save(request: Request):
     body = await request.json()
     _AI_CHAT_CFG_PATH.write_text(json.dumps(body.get("config", {}), ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True}
+
+
+@app.get("/api/settings/link-pipeline-prefs")
+def route_settings_link_pipeline_prefs_get():
+    from .services.config import get_link_pipeline_prefs
+
+    return get_link_pipeline_prefs()
+
+
+@app.post("/api/settings/link-pipeline-prefs")
+async def route_settings_link_pipeline_prefs_save(request: Request):
+    from .services.config import save_link_pipeline_prefs
+
+    body = await request.json()
+    return save_link_pipeline_prefs(body if isinstance(body, dict) else {})
 
 
 @app.get("/api/settings/feishu")
@@ -2896,6 +3134,101 @@ async def route_ops_rollback(request: Request):
     except Exception:
         pass
     return ops_route_action("rollback-last", body)
+
+
+# ─── WebReplay 浏览器自动化（脚本库 / 扩展桥接）───
+from .services.webreplay_store import (
+    append_run as webreplay_append_run,
+    delete_script as webreplay_delete_script,
+    export_scripts as webreplay_export_scripts,
+    get_bridge as webreplay_get_bridge,
+    get_script as webreplay_get_script,
+    import_scripts as webreplay_import_scripts,
+    list_scripts as webreplay_list_scripts,
+    save_bridge as webreplay_save_bridge,
+    upsert_script as webreplay_upsert_script,
+)
+
+
+def _webreplay_user_id(request: Request) -> str:
+    uid = getattr(request.state, "user_id", None)
+    return str(uid) if uid else "anonymous"
+
+
+@app.get("/api/webreplay/health")
+def route_webreplay_health():
+    return {"ok": True, "service": "webreplay", "storage": "local-json"}
+
+
+@app.get("/api/webreplay/scripts")
+def route_webreplay_list(request: Request):
+    return {"scripts": webreplay_list_scripts(_webreplay_user_id(request))}
+
+
+@app.get("/api/webreplay/scripts/{script_id}")
+def route_webreplay_get(script_id: str, request: Request):
+    row = webreplay_get_script(_webreplay_user_id(request), script_id)
+    if not row:
+        raise HTTPException(404, "脚本不存在")
+    return {"script": row}
+
+
+@app.post("/api/webreplay/scripts")
+async def route_webreplay_create(request: Request):
+    body = await request.json()
+    row = webreplay_upsert_script(_webreplay_user_id(request), body)
+    return {"ok": True, "script": row}
+
+
+@app.put("/api/webreplay/scripts/{script_id}")
+async def route_webreplay_update(script_id: str, request: Request):
+    body = await request.json()
+    body["id"] = script_id
+    row = webreplay_upsert_script(_webreplay_user_id(request), body)
+    return {"ok": True, "script": row}
+
+
+@app.delete("/api/webreplay/scripts/{script_id}")
+def route_webreplay_delete(script_id: str, request: Request):
+    ok = webreplay_delete_script(_webreplay_user_id(request), script_id)
+    if not ok:
+        raise HTTPException(404, "脚本不存在")
+    return {"ok": True}
+
+
+@app.post("/api/webreplay/scripts/import")
+async def route_webreplay_import(request: Request):
+    body = await request.json()
+    try:
+        return webreplay_import_scripts(_webreplay_user_id(request), body)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.get("/api/webreplay/scripts/export/all")
+def route_webreplay_export(request: Request):
+    return webreplay_export_scripts(_webreplay_user_id(request))
+
+
+@app.get("/api/webreplay/bridge")
+def route_webreplay_bridge_get(request: Request):
+    return webreplay_get_bridge(_webreplay_user_id(request))
+
+
+@app.post("/api/webreplay/bridge")
+async def route_webreplay_bridge_save(request: Request):
+    body = await request.json()
+    return webreplay_save_bridge(_webreplay_user_id(request), body)
+
+
+@app.post("/api/webreplay/runs")
+async def route_webreplay_run_log(request: Request):
+    body = await request.json()
+    script_id = str(body.get("scriptId") or "")
+    if not script_id:
+        raise HTTPException(400, "缺少 scriptId")
+    webreplay_append_run(_webreplay_user_id(request), script_id, body)
+    return {"ok": True}
 
 
 # SPA Frontend Routes (must be after all API routes)

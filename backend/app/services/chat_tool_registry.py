@@ -23,16 +23,31 @@ _BUILTIN_ID_TO_FN = {
 
 def is_tools_inventory_query(message: str) -> bool:
     """用户询问「有哪些工具 / 内置 tool call」等元问题。"""
-    q = (message or "").strip().lower()
+    q = (message or "").strip()
+    ql = q.lower()
     if not q:
         return False
+    # 知识库检索/总结类主任务：含 MCP 等词但不是工具清单问询
+    kb_task_hints = (
+        "知识库", "检索", "召回", "总结", "文档", "资料", "rag", "milvus", "向量",
+        "搜索知识", "查知识", "总结反馈",
+    )
+    tool_list_must = (
+        "有哪些工具", "什么工具", "哪些工具", "工具列表", "工具清单", "能使用哪些",
+        "可以用什么工具", "内置工具", "内置 tool", "内置tool", "挂载", "注册",
+        "你到底能使用",
+    )
+    if any(h in q or h in ql for h in kb_task_hints):
+        if not any(h in q for h in tool_list_must):
+            return False
     hints = (
         "有哪些工具", "什么工具", "哪些工具", "工具列表", "工具清单", "能使用哪些",
         "可以用什么工具", "内置工具", "tool call", "toolcall", "tool_call",
-        "mcp", "skill", "function calling", "函数调用", "挂载", "注册",
+        "skill", "function calling", "函数调用", "挂载", "注册",
         "你到底能使用", "内置tool", "内置 tool",
+        "mcp 工具", "mcp工具", "有哪些mcp", "有哪些 mcp",
     )
-    return any(h in q or h in (message or "") for h in hints)
+    return any(h in ql or h in q for h in hints)
 
 
 def format_tools_catalog_markdown(meta: Dict[str, Any]) -> str:
@@ -122,6 +137,8 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         platform: str = "",
         user_prompt: str = "",
         read_comments_flag: bool = False,
+        comment_count: int = 10,
+        comment_sort: str = "hot",
     ) -> str:
         from .task_manager import reuse_or_enqueue_task, add_log
         from .video_pipeline import process_video_pipeline
@@ -145,8 +162,12 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
             if guarded is not None:
                 return _json_result(guarded)
         plat = (platform or "").strip() or platform_from_url(url) or _platform_from_link(url)
+        from .pipeline_comments import normalize_comments_count
+
         rc = bool(read_comments_flag or read_comments)
-        comments_cfg = {"enabled": rc, "count": 10, "sort": "hot"}
+        count = normalize_comments_count(comment_count, default=10) if rc else 10
+        sort = (comment_sort or "hot").strip() or "hot"
+        comments_cfg = {"enabled": rc, "count": count, "sort": sort}
         tid, reused = reuse_or_enqueue_task(
             plat, url, user_prompt=user_prompt[:500], comments=comments_cfg, action="start",
         )
@@ -174,7 +195,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
             "提交链接文档化流水线（转写/图文/MD/HTML）。"
             "仅当当前主任务尚无同链接流水线时调用；"
             "用户追问进度/缓存/「好了吗」时禁止调用，应改用 cache_query。"
-            "read_comments_flag 仅在为 true 时读取评论。"
+            "read_comments_flag 仅在为 true 时读取评论；comment_count 可选 10/20/50/0(全量)，默认 10。"
         ),
     ))
 
@@ -430,6 +451,19 @@ async def ensure_execution_tools(
     """执行段前补全 MCP 工具（若编排段仅加载了内置目录）。"""
     if runtime_meta.get("discovery_stage") == "full" and not runtime_meta.get("mcp_pending"):
         return runtime_tools, runtime_meta
+    try:
+        from .chat_warmup import get_cached_tools
+
+        cached = get_cached_tools(read_comments=read_comments)
+        if cached:
+            full_tools, full_meta = cached
+            full_meta = dict(full_meta)
+            full_meta["discovery_stage"] = "full"
+            full_meta["mcp_pending"] = False
+            full_meta["warmup_cache"] = True
+            return full_tools, full_meta
+    except Exception:
+        pass
     full_tools, full_meta = await load_all_chat_tools(read_comments=read_comments)
     full_meta["discovery_stage"] = "full"
     full_meta["mcp_pending"] = False
@@ -441,6 +475,20 @@ async def load_all_chat_tools(*, read_comments: bool = False) -> Tuple[List[Any]
     加载 AI 对话页全部工具（不按 agent_id / tools_scope 过滤）。
     返回 (langchain_tools, discovery_meta)。
     """
+    try:
+        from .chat_warmup import get_cached_tools
+
+        cached = get_cached_tools(read_comments=read_comments)
+        if cached:
+            tools, meta = cached
+            out_meta = dict(meta)
+            out_meta.setdefault("discovery_stage", "full")
+            out_meta["mcp_pending"] = False
+            out_meta["warmup_cache"] = True
+            return list(tools), out_meta
+    except Exception:
+        pass
+
     internal = build_internal_chat_tools(read_comments=read_comments)
     skills = build_skill_chat_tools()
     mcp_tools: List[Any] = []

@@ -1,6 +1,7 @@
 """LangGraph 运行器：SSE 刷出、HITL 中断恢复、执行段 handoff。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -106,6 +107,74 @@ def _yield_sse_batches(state_update: Dict[str, Any]) -> List[str]:
     return list(events)
 
 
+async def _iter_graph_astream_with_live_sse(
+    graph: Any,
+    input_state: Any,
+    *,
+    config: RunnableConfig,
+    runtime: ChatGraphRuntime,
+    final_state: Dict[str, Any],
+    session_id: str,
+    trace_id: str,
+) -> AsyncIterator[str]:
+    """
+    LangGraph astream + runtime 实时 emit。
+    节点执行期间 pipeline_progress / orchestration_node_start 等可立即到达前端。
+    """
+    live_q: asyncio.Queue[str] = asyncio.Queue()
+    chunk_q: asyncio.Queue[Any] = asyncio.Queue()
+    worker_err: List[BaseException] = []
+
+    def _live_sink(line: str) -> None:
+        try:
+            live_q.put_nowait(line)
+        except Exception:
+            pass
+
+    runtime.set_live_sse_sink(_live_sink)
+
+    async def _worker() -> None:
+        try:
+            async for chunk in graph.astream(input_state, config=config, stream_mode="updates"):
+                await chunk_q.put(chunk)
+        except BaseException as ex:
+            worker_err.append(ex)
+        finally:
+            await chunk_q.put(None)
+
+    worker = asyncio.create_task(_worker())
+    try:
+        while True:
+            while not live_q.empty():
+                yield live_q.get_nowait()
+            if worker.done() and chunk_q.empty() and live_q.empty():
+                break
+            try:
+                chunk = await asyncio.wait_for(chunk_q.get(), timeout=0.05)
+            except asyncio.TimeoutError:
+                continue
+            if chunk is None:
+                break
+            merged = _merge_node_updates(chunk)
+            if merged:
+                final_state.update(merged)
+                if final_state.get("task_id"):
+                    _sync_span_context(session_id, trace_id, final_state)
+            # live_sink 已实时刷出节点 emit；sse_events 仅审计落库，勿 replay
+            while not live_q.empty():
+                yield live_q.get_nowait()
+        if worker_err:
+            raise worker_err[0]
+    finally:
+        runtime.set_live_sse_sink(None)
+        if not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+
+
 def _merge_node_updates(chunk: Any) -> Dict[str, Any]:
     """astream updates 模式：{node_name: partial_state}."""
     merged: Dict[str, Any] = {}
@@ -139,6 +208,7 @@ async def _prepare_runtime(
     chat_tool_max_retry: Optional[int],
     chat_distinct_tool_fail_limit: Optional[int],
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    tools_cache_only: bool = False,
 ) -> ChatGraphRuntime:
     cfg = ai_chat.load_chat_llm_config()
     from .orch_pipeline_config import merge_orch_pipeline_nodes
@@ -158,8 +228,28 @@ async def _prepare_runtime(
     from .chat_tool_registry import load_orchestration_tools_catalog
 
     link_ctx = analyze_link_doc_intent(message, read_comments=read_comments)
+    chat_lc_tools: List[Any] = []
+    tools_meta: Dict[str, Any] = {}
     try:
-        chat_lc_tools, tools_meta = load_orchestration_tools_catalog(read_comments=read_comments)
+        from .chat_warmup import get_cached_tools
+
+        cached = get_cached_tools(read_comments=read_comments)
+        if cached:
+            chat_lc_tools, tools_meta = cached
+            tools_meta = dict(tools_meta)
+            tools_meta.setdefault("discovery_stage", "full")
+            tools_meta["mcp_pending"] = False
+            tools_meta["warmup_cache"] = True
+        elif tools_cache_only:
+            chat_lc_tools, tools_meta = [], {
+                "total": 0,
+                "tools": [],
+                "mcp_pending": True,
+                "warmup_cache": False,
+                "discovery_stage": "deferred",
+            }
+        else:
+            chat_lc_tools, tools_meta = load_orchestration_tools_catalog(read_comments=read_comments)
     except Exception as ex:
         chat_lc_tools, tools_meta = [], {"total": 0, "tools": [], "mcp_error": str(ex), "mcp_pending": True}
 
@@ -231,6 +321,34 @@ def _initial_state(
     }
 
 
+async def _memory_for_handoff(
+    session_id: str,
+    final_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """执行段 handoff 用会话记忆；resume 路径须单独加载（无 stream_langgraph_chat 的 mem 变量）。"""
+    mem = final_state.get("memory_prepared")
+    if isinstance(mem, dict) and mem:
+        return mem
+    from .chat_context_memory import prepare_session_memory
+
+    cur = final_state.get("client_cur_task")
+    hist = final_state.get("client_main_task_history")
+    try:
+        return await prepare_session_memory(
+            session_id,
+            client_cur_task=cur if isinstance(cur, dict) else None,
+            client_history=hist if isinstance(hist, list) else None,
+        )
+    except Exception as ex:
+        _LOG.warning(
+            "[AI问答-LangGraph|chat_graph_runner._memory_for_handoff|session:%s|硬编执行|降级] "
+            "prepare_session_memory_failed; error_message=%s",
+            session_id,
+            str(ex)[:200],
+        )
+        return {}
+
+
 def _bootstrap_from_graph_state(state: Dict[str, Any], runtime: ChatGraphRuntime) -> Dict[str, Any]:
     """供 ai_chat 执行段使用的快照。"""
     return {
@@ -271,6 +389,11 @@ def _bootstrap_from_graph_state(state: Dict[str, Any], runtime: ChatGraphRuntime
         "orchestration_phase": state.get("orchestration_phase"),
         "group_seq": int(state.get("group_seq") or 0),
         "continue_main_task": bool(state.get("continue_main_task")),
+        "rag_context_block": state.get("rag_context_block") or "",
+        "rag_slices": state.get("rag_slices") if isinstance(state.get("rag_slices"), list) else [],
+        "rag_citation_instruction": state.get("rag_citation_instruction") or "",
+        "rag_prefetch_done": bool(state.get("rag_prefetch_done")),
+        "needs_rag": bool(state.get("needs_rag")),
     }
 
 
@@ -286,6 +409,35 @@ async def _handoff_load_execution_tools(
     说明：MCP 发现是运行时基础设施，不是 LangGraph 编排节点（标准图为 agent↔tools 循环）。
     """
     from .chat_tool_registry import ensure_execution_tools
+
+    # 进入对话页 / 启动预热已完成 MCP 发现时，直接复用缓存，禁止重复 list_tools
+    if (
+        runtime.tools_meta.get("warmup_cache")
+        and runtime.tools_meta.get("discovery_stage") == "full"
+        and not runtime.tools_meta.get("mcp_pending")
+        and runtime.chat_lc_tools
+    ):
+        meta = dict(runtime.tools_meta)
+        meta["handoff_from"] = "warmup_cache"
+        runtime.emit(
+            "tools_discovered",
+            {
+                "trace_id": trace_id,
+                "task_id": task_id,
+                "total": meta.get("total", 0),
+                "builtin_count": meta.get("builtin_count", 0),
+                "mcp_count": meta.get("mcp_count", 0),
+                "skill_count": meta.get("skill_count", 0),
+                "read_comments": read_comments,
+                "discovery_stage": "full",
+                "mcp_pending": False,
+                "warmup_cache": True,
+                "stage": "execution",
+                "silent": True,
+                "hint": "复用页面预热缓存，跳过 MCP list_tools",
+            },
+        )
+        return runtime.chat_lc_tools, meta
 
     runtime.emit(
         "tools_discovered",
@@ -487,6 +639,42 @@ async def stream_langgraph_chat(
 
     trace_id = _new_trace()
     mem = memory_prepared or {}
+    from .chat_context_memory import (
+        hydrate_client_task_context,
+        peek_continue_main_intent,
+        resolve_task_group_seq,
+        _resolve_continue_task_id,
+    )
+
+    _cur_early, _hist_early = hydrate_client_task_context(
+        session_id,
+        client_cur_task=client_cur_task if isinstance(client_cur_task, dict) else mem.get("cur_task"),
+        client_main_task_history=(
+            client_main_task_history
+            if isinstance(client_main_task_history, list) and client_main_task_history
+            else mem.get("main_task_history")
+        ),
+    )
+    _tid_early = str((_cur_early or {}).get("task_id") or "").strip()
+    _continue_early = peek_continue_main_intent(
+        message, cur_task=_cur_early, main_task_history=_hist_early
+    )
+    if _continue_early and not _tid_early:
+        _tid_early = str(_resolve_continue_task_id(_cur_early, _hist_early) or "").strip()
+    if _continue_early and _tid_early:
+        yield (
+            "event: task_created\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'session_id': session_id, 'user_query': str((client_cur_task or mem.get('cur_task') or {}).get('user_query') or message or '')[:200], 'query_summary': str((client_cur_task or mem.get('cur_task') or {}).get('query_summary') or message or '')[:120], 'status': 'executing', 'task_kind': 'main', 'persist_main_task': True, 'stage': '延续主任务', 'progress': 4, 'task_action': 'continue', 'preserve_task_identity': True}, ensure_ascii=False)}\n\n"
+        )
+        yield (
+            "event: pipeline_progress\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'stage': '延续主任务', 'progress': 4, 'detail': '检测到主任务续接，展开编排面板'}, ensure_ascii=False)}\n\n"
+        )
+        yield (
+            "event: orchestration_node_start\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'step_id': 'step_early', 'step_name': '延续主任务', 'phase': 'execute_prep', 'progress_hint': '正在执行：延续主任务', 'sub_index': int(mem.get('task_group_seq') or 0)}, ensure_ascii=False)}\n\n"
+        )
+
     ctx_appendix = ""
     try:
         from .chat_context_memory import build_context_system_appendix
@@ -516,6 +704,7 @@ async def stream_langgraph_chat(
         chat_tool_max_retry=chat_tool_max_retry,
         chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
         orch_pipeline_nodes=orch_pipeline_nodes,
+        tools_cache_only=bool(_continue_early and _tid_early),
     )
     if ctx_appendix:
         runtime.system_prompt = (runtime.system_prompt or "").rstrip() + "\n\n---\n\n" + ctx_appendix
@@ -555,29 +744,31 @@ async def stream_langgraph_chat(
     for line in runtime.drain_sse():
         yield line
 
-    yield (
-        "event: pipeline_progress\n"
-        + f"data: {json.dumps({'trace_id': trace_id, 'stage': '正在编排任务', 'progress': 3, 'detail': '固定编排节点启动'}, ensure_ascii=False)}\n\n"
-    )
-
-    # 新用户消息走全新编排：清掉同 thread 上未 resume 的 HITL 中断，避免 checkpoint 缺 runtime_key
-    clear_session_checkpointer(session_id)
-    checkpointer = get_session_checkpointer(session_id)
-    graph = get_compiled_chat_graph(checkpointer=checkpointer)
-    config = _graph_config(session_id, runtime)
     initial = _initial_state(message=message, session_id=session_id, trace_id=trace_id, runtime=runtime)
-    from .chat_context_memory import peek_continue_main_intent, resolve_task_group_seq
-
-    _cur = client_cur_task if isinstance(client_cur_task, dict) else mem.get("cur_task")
-    _hist = (
-        client_main_task_history
-        if isinstance(client_main_task_history, list) and client_main_task_history
-        else mem.get("main_task_history")
+    from .chat_context_memory import (
+        hydrate_client_task_context,
+        peek_continue_main_intent,
+        resolve_task_affiliation,
+        resolve_task_group_seq,
     )
-    if not isinstance(_hist, list):
-        _hist = []
+
+    _cur, _hist = hydrate_client_task_context(
+        session_id,
+        client_cur_task=client_cur_task if isinstance(client_cur_task, dict) else mem.get("cur_task"),
+        client_main_task_history=(
+            client_main_task_history
+            if isinstance(client_main_task_history, list) and client_main_task_history
+            else mem.get("main_task_history")
+        ),
+    )
     _tid = str((_cur or {}).get("task_id") or "").strip()
     _continue = peek_continue_main_intent(message, cur_task=_cur, main_task_history=_hist)
+    if _continue and not _tid:
+        from .chat_context_memory import _resolve_continue_task_id
+
+        _tid = str(_resolve_continue_task_id(_cur, _hist) or "").strip()
+        if _tid and isinstance(_cur, dict):
+            _cur = {**_cur, "task_id": _tid}
     if _continue and _tid:
         initial["group_seq"] = int(mem.get("task_group_seq") or resolve_task_group_seq(_tid))
     else:
@@ -599,86 +790,177 @@ async def stream_langgraph_chat(
 
     final_state: Dict[str, Any] = dict(initial)
     interrupted = False
+    snap = None
+    used_fast_continue = bool(_continue and _tid)
 
     from .span_orchestration import clear_active_span_context
 
     _sync_span_context(session_id, trace_id, final_state)
 
-    try:
-        async for chunk in graph.astream(
-            initial,
-            config=config,
-            stream_mode="updates",
-        ):
-            merged = _merge_node_updates(chunk)
-            if merged:
-                final_state.update(merged)
-                if final_state.get("task_id"):
-                    _sync_span_context(session_id, trace_id, final_state)
-            for line in _yield_sse_batches(merged):
-                yield line
+    if used_fast_continue:
+        t_fast = time.perf_counter()
+        live_q: asyncio.Queue[str] = asyncio.Queue()
+        fast_result: List[Dict[str, Any]] = []
+        fast_err: List[BaseException] = []
 
-        snap = graph.get_state(config)
-        _sync_final_state_from_snap(final_state, snap)
-        interrupted = _hitl_pending(snap)
-
-        if interrupted and _auto_hitl_enabled():
-            for _attempt in range(8):
-                if not _hitl_pending(snap):
-                    break
-                _LOG.info(
-                    "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_chat|session:%s|硬编执行|HITL] "
-                    "auto_resume; hitl_kind=%s; attempt=%s",
-                    session_id,
-                    _infer_hitl_kind(snap),
-                    _attempt + 1,
-                )
-                config = _graph_config(session_id, runtime)
-                async for chunk in graph.astream(
-                    Command(resume={"action": "confirm"}),
-                    config=config,
-                    stream_mode="updates",
-                ):
-                    merged = _merge_node_updates(chunk)
-                    if merged:
-                        final_state.update(merged)
-                    for line in _yield_sse_batches(merged):
-                        yield line
-                snap = graph.get_state(config)
-                _sync_final_state_from_snap(final_state, snap)
-            interrupted = _hitl_pending(snap)
-    except Exception as ex:
-        from langgraph.errors import GraphInterrupt
-
-        if isinstance(ex, GraphInterrupt):
-            interrupted = True
+        def _live_sink(line: str) -> None:
             try:
-                snap = graph.get_state(config)
-                _sync_final_state_from_snap(final_state, snap)
+                live_q.put_nowait(line)
             except Exception:
                 pass
-        else:
-            _LOG.exception(
-                "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_chat|session:%s|硬编执行|异常] "
-                "graph_astream_failed; error_type=%s; error_message=%s",
-                session_id,
-                type(ex).__name__,
-                str(ex)[:300],
-            )
-            err = json.dumps(
-                {
-                    "session_id": session_id,
-                    "trace_id": trace_id,
-                    "message": str(ex)[:500],
-                    "error_type": type(ex).__name__,
-                },
-                ensure_ascii=False,
-            )
-            yield f"event: stream_error\ndata: {err}\n\n"
-            clear_active_span_context()
-            return
 
-    if interrupted or final_state.get("graph_route") in ("paused",) or _hitl_pending(snap):
+        runtime.set_live_sse_sink(_live_sink)
+
+        async def _run_fast() -> None:
+            from .chat_graph_nodes import fast_continue_main_to_handoff
+
+            try:
+                fast_result.append(
+                    await fast_continue_main_to_handoff(
+                        initial,
+                        runtime=runtime,
+                        message=message,
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        task_id=_tid,
+                        cur_task=_cur if isinstance(_cur, dict) else None,
+                        main_hist=_hist if isinstance(_hist, list) else None,
+                    )
+                )
+            except BaseException as ex:
+                fast_err.append(ex)
+
+        fast_task = asyncio.create_task(_run_fast())
+        try:
+            while not fast_task.done() or not live_q.empty():
+                while not live_q.empty():
+                    yield live_q.get_nowait()
+                if fast_task.done():
+                    break
+                await asyncio.sleep(0.03)
+        finally:
+            runtime.set_live_sse_sink(None)
+        if fast_err:
+            raise fast_err[0]
+        fast_upd = fast_result[0] if fast_result else {}
+        final_state.update(fast_upd)
+        _sync_span_context(session_id, trace_id, final_state)
+        # live_q 已实时刷出编排 SSE；sse_events 仅落库，勿 replay 避免「知识库检索」等步骤双份
+        for line in runtime.drain_sse():
+            yield line
+        _LOG.info(
+            "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_chat|session:%s|硬编执行|快径] "
+            "continue_main_fast; cost_ms=%s; task_id=%s",
+            session_id,
+            int((time.perf_counter() - t_fast) * 1000),
+            _tid[:16],
+        )
+    else:
+        yield (
+            "event: pipeline_progress\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'stage': '意图识别', 'progress': 5, 'detail': 'LangGraph 进入首节点'}, ensure_ascii=False)}\n\n"
+        )
+        pre_step_id = "step_" + uuid.uuid4().hex[:12]
+        runtime.emit(
+            "orchestration_node_start",
+            {
+                "task_id": _tid or "",
+                "step_id": pre_step_id,
+                "step_name": "意图识别",
+                "phase": "intent",
+                "progress_hint": "正在执行：意图识别",
+            },
+        )
+        runtime.emit(
+            "thought_step_start",
+            {
+                "trace_id": trace_id,
+                "task_id": _tid or "",
+                "step_id": pre_step_id,
+                "step_name": "意图识别",
+                "phase": "intent",
+                "node_kind": "orchestration",
+                "step_lane": "orchestration",
+                "status": "running",
+            },
+        )
+        for line in runtime.drain_sse():
+            yield line
+        # 新用户消息走全新编排：清掉同 thread 上未 resume 的 HITL 中断，避免 checkpoint 缺 runtime_key
+        clear_session_checkpointer(session_id)
+        checkpointer = get_session_checkpointer(session_id)
+        graph = get_compiled_chat_graph(checkpointer=checkpointer)
+        config = _graph_config(session_id, runtime)
+
+        try:
+            async for line in _iter_graph_astream_with_live_sse(
+                graph,
+                initial,
+                config=config,
+                runtime=runtime,
+                final_state=final_state,
+                session_id=session_id,
+                trace_id=trace_id,
+            ):
+                yield line
+
+            snap = graph.get_state(config)
+            _sync_final_state_from_snap(final_state, snap)
+            interrupted = _hitl_pending(snap)
+
+            if interrupted and _auto_hitl_enabled():
+                for _attempt in range(8):
+                    if not _hitl_pending(snap):
+                        break
+                    _LOG.info(
+                        "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_chat|session:%s|硬编执行|HITL] "
+                        "auto_resume; hitl_kind=%s; attempt=%s",
+                        session_id,
+                        _infer_hitl_kind(snap),
+                        _attempt + 1,
+                    )
+                    config = _graph_config(session_id, runtime)
+                    async for chunk in graph.astream(
+                        Command(resume={"action": "confirm"}),
+                        config=config,
+                        stream_mode="updates",
+                    ):
+                        merged = _merge_node_updates(chunk)
+                        if merged:
+                            final_state.update(merged)
+                        for line in _yield_sse_batches(merged):
+                            yield line
+                    snap = graph.get_state(config)
+                    _sync_final_state_from_snap(final_state, snap)
+                interrupted = _hitl_pending(snap)
+        except Exception as ex:
+            from langgraph.errors import GraphInterrupt
+
+            if isinstance(ex, GraphInterrupt):
+                interrupted = True
+                try:
+                    snap = graph.get_state(config)
+                    _sync_final_state_from_snap(final_state, snap)
+                except Exception:
+                    pass
+            else:
+                from .chat_error_handler import stream_user_error_sse
+
+                async for line in stream_user_error_sse(
+                    ex,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    task_id=str(final_state.get("task_id") or ""),
+                    stage="LangGraph 编排",
+                    user_message=message,
+                ):
+                    yield line
+                clear_active_span_context()
+                return
+
+    if not used_fast_continue and (
+        interrupted or final_state.get("graph_route") in ("paused",) or _hitl_pending(snap)
+    ):
         payload = _build_graph_interrupt_payload(
             session_id=session_id,
             trace_id=trace_id,
@@ -691,10 +973,30 @@ async def stream_langgraph_chat(
         return
 
     route = str(final_state.get("graph_route") or "")
+    _aff_guard = resolve_task_affiliation(message, cur_task=_cur, main_task_history=_hist)
+    _must_continue = bool(_aff_guard) or peek_continue_main_intent(
+        message, cur_task=_cur, main_task_history=_hist
+    )
+    if _must_continue and route in ("handoff_simple", "simple"):
+        route = "handoff_execute"
+        final_state["graph_route"] = "continue_execute"
+        final_state["task_kind"] = "main"
+        final_state["continue_main_task"] = True
+        final_state["use_main_task"] = True
+        if _aff_guard and _aff_guard.get("task_id"):
+            final_state["task_id"] = str(_aff_guard["task_id"])
+        _LOG.warning(
+            "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_chat|session:%s|硬编执行|纠偏] "
+            "simple_route_blocked; reason=%s; task_id=%s",
+            session_id,
+            (_aff_guard or {}).get("reason") or "continue_main",
+            final_state.get("task_id") or "",
+        )
     if route == "handoff_simple" or (
         final_state.get("task_kind") == "simple"
         and not final_state.get("execution_done")
         and route not in ("handoff_execute", "done")
+        and not _must_continue
     ):
         async for line in _stream_simple_answer_events(
             runtime,
@@ -725,29 +1027,43 @@ async def stream_langgraph_chat(
         for line in runtime.drain_sse():
             yield line
         final_state["tools_meta"] = meta_full
+        handoff_mem = await _memory_for_handoff(session_id, final_state)
         bootstrap = _bootstrap_from_graph_state(final_state, runtime)
-        bootstrap["memory_prepared"] = mem
+        bootstrap["memory_prepared"] = handoff_mem
         _sync_span_context(session_id, trace_id, final_state)
-        async for ev in ai_chat.chat_stream_v2(
-            message,
-            session_id,
-            model=model,
-            agent_id=agent_id,
-            agent_profile=agent_profile,
-            user_id=user_id,
-            rag_prefetch=rag_prefetch,
-            web_search=web_search,
-            read_comments=read_comments,
-            deep_think=deep_think,
-            chat_max_tool_rounds=chat_max_tool_rounds,
-            chat_tool_timeout_sec=chat_tool_timeout_sec,
-            chat_tool_max_retry=chat_tool_max_retry,
-            chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
-            graph_execution_boot=bootstrap,
-            _langgraph_orchestration_done=True,
-            memory_prepared=mem,
-        ):
-            yield ev
+        try:
+            async for ev in ai_chat.chat_stream_v2(
+                message,
+                session_id,
+                model=model,
+                agent_id=agent_id,
+                agent_profile=agent_profile,
+                user_id=user_id,
+                rag_prefetch=rag_prefetch,
+                web_search=web_search,
+                read_comments=read_comments,
+                deep_think=deep_think,
+                chat_max_tool_rounds=chat_max_tool_rounds,
+                chat_tool_timeout_sec=chat_tool_timeout_sec,
+                chat_tool_max_retry=chat_tool_max_retry,
+                chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
+                graph_execution_boot=bootstrap,
+                _langgraph_orchestration_done=True,
+                memory_prepared=handoff_mem,
+            ):
+                yield ev
+        except Exception as ex:
+            from .chat_error_handler import stream_user_error_sse
+
+            async for line in stream_user_error_sse(
+                ex,
+                session_id=session_id,
+                trace_id=trace_id,
+                task_id=str(final_state.get("task_id") or ""),
+                stage="任务执行",
+                user_message=message,
+            ):
+                yield line
         clear_active_span_context()
         return
 
@@ -956,14 +1272,17 @@ async def stream_langgraph_resume(
             except Exception:
                 pass
         else:
-            _LOG.exception(
-                "[AI问答-LangGraph|chat_graph_runner.stream_langgraph_resume|session:%s|硬编执行|异常] "
-                "resume_failed; error_message=%s",
-                session_id,
-                str(ex)[:300],
-            )
-            err = json.dumps({"session_id": session_id, "message": str(ex)[:500]}, ensure_ascii=False)
-            yield f"event: stream_error\ndata: {err}\n\n"
+            from .chat_error_handler import stream_user_error_sse
+
+            async for line in stream_user_error_sse(
+                ex,
+                session_id=session_id,
+                trace_id=trace_id or runtime.trace_id,
+                task_id=str(final_state.get("task_id") or ""),
+                stage="HITL 恢复",
+                user_message=message,
+            ):
+                yield line
             clear_active_span_context()
             return
 
@@ -981,6 +1300,7 @@ async def stream_langgraph_resume(
 
     route = str(final_state.get("graph_route") or "")
     if route == "handoff_execute":
+        mem = await _memory_for_handoff(session_id, final_state)
         tools_full, meta_full = await _handoff_load_execution_tools(
             runtime,
             trace_id=trace_id,

@@ -725,16 +725,17 @@ _REACT_STEP_SYSTEM: Dict[str, str] = {
         "禁止 Markdown。"
     ),
     "intent": (
-        "你是 SuperBizAgent 编排段【意图识别】节点。结合用户当前句、上一主任务摘要与用户开关，"
-        "判断本轮属于 simple（仅限寒暄/自我介绍/与业务无关的短句）、"
-        "continue_main（延续已有主任务：含「现在呢」「怎么回事」「上面的任务」「分析结果呢」等追问）、"
-        "或 new_main（含小红书链接/用户画像/链接文档化/明确新分析课题/查知识库文档等）。"
-        "硬规则：含 xiaohongshu.com 或「画像」「链接分析」→ 必须 new_main；"
-        "用户追问先前任务而历史存在 task_id → 必须 continue_main，禁止 simple；"
+        "你是 SuperBizAgent 编排段【意图识别】节点。判定顺序必须遵守："
+        "① 任务归属：消息含 task_ 前缀 id、或「任务恢复/重新启动/之前执行」等 → 有历史则 continue_main 并填 task_id；"
+        "无进行中任务时，仍须对照【最近主任务】（含已结案）判断是否续接，禁止因句长或含 RAG/MCP 词就 new_main；"
+        "② 仅当明确新课题且用户显式开新话题时 new_main；"
+        "③ 最后才判 simple（仅限寒暄/自我介绍/与业务无关短句）。"
+        "硬规则：含 xiaohongshu.com 或「画像」「链接分析」且无续接 task_id → new_main；"
+        "用户追问或恢复先前 task_id → 必须 continue_main，禁止 simple；"
         "用户明确要求查知识库/Milvus/内部文档 → needs_rag=true，needs_web_search=false；"
         "查工具清单/SKILL/MCP 说明 → needs_rag=false，needs_web_search=false（走工具目录，非联网）。"
         "needs_web_search 仅当用户已开启联网开关且任务确实需要公开网页资料时为 true。"
-        "本步不做内部术语映射（retrieval_terms 留给 Query 改写/业务对齐）。"
+        "禁止在正文输出 <|FunctionCallBegin|> 或编造工具调用；本步不做内部术语映射。"
         "仅输出一行 JSON："
         '{"mode":"simple|continue_main|new_main","task_id":"续接时填","reason":"中文短句",'
         '"confidence":0.0-1.0,"task_summary":"最精简但涵盖细节的任务摘要",'
@@ -970,7 +971,22 @@ def _is_simple_intent(q: str) -> bool:
     m = (q or "").strip()
     if not m:
         return True
-    from .chat_context_memory import _has_link_analysis_intent, _looks_like_task_recall
+    from .chat_context_memory import (
+        _CONTINUE_HINTS,
+        _has_link_analysis_intent,
+        _looks_like_continuation,
+        _looks_like_task_recall,
+        _looks_like_task_resume,
+        _looks_like_task_status_inquiry,
+    )
+
+    # 续接/恢复/进度追问：不得在未判归属前标 simple（如「继续」「那你继续做啊」）
+    if _looks_like_task_resume(m) or _looks_like_task_status_inquiry(m):
+        return False
+    if any(h in m for h in _CONTINUE_HINTS):
+        return False
+    if _looks_like_continuation(m, None):
+        return False
 
     if _has_link_analysis_intent(m) or _looks_like_task_recall(m):
         return False
@@ -992,8 +1008,11 @@ def _is_simple_intent(q: str) -> bool:
     if "?" in m or "？" in m:
         if len(m) <= 32:
             return False
+    # 短句仅在为明确寒暄/自我介绍时标 simple；「继续」等已在上方排除
     if len(m) <= 18 and "?" not in m and "？" not in m:
-        return True
+        if any(h in m or h in low for h in simple_hints):
+            return True
+        return False
     complex_hints = (
         "帮我", "请帮", "执行", "查询", "分析", "生成", "创建", "导出", "上传",
         "调用", "配置", "排查", "修复", "部署", "文档", "图例", "长页", "飞书",
@@ -1125,6 +1144,8 @@ async def chat_stream_v2(
     mem_ctx: Dict[str, Any] = dict(memory_prepared or {})
     if graph_boot and isinstance(graph_boot.get("memory_prepared"), dict):
         mem_ctx = {**mem_ctx, **graph_boot["memory_prepared"]}
+    rag_context_block: Optional[str] = None
+    rag_citation_instruction: str = ""
 
     if session_id not in _sessions:
         ensure_session(session_id, message[:30] or "新对话")
@@ -1180,15 +1201,16 @@ async def chat_stream_v2(
                     "[AI问答-LangGraph|降级|chat_stream_v2|session:%s] CHAT_USE_LANGGRAPH=0，禁止走旧版单步意图",
                     session_id,
                 )
-                yield _sse(
-                    "stream_error",
-                    {
-                        "session_id": session_id,
-                        "trace_id": trace_id,
-                        "message": "LangGraph 编排未启用：请设置 CHAT_USE_LANGGRAPH=1 并重启后端",
-                        "orchestration_engine": "legacy_disabled",
-                    },
-                )
+                from .chat_error_handler import stream_user_error_sse
+
+                async for line in stream_user_error_sse(
+                    "LangGraph 编排未启用：请在环境变量中设置 CHAT_USE_LANGGRAPH=1 并重启后端",
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    stage="编排配置",
+                    user_message=message,
+                ):
+                    yield line
                 return
             async for _lg_ev in stream_langgraph_chat(
                 message, session_id, model=model, agent_id=agent_id, agent_profile=agent_profile,
@@ -1207,15 +1229,16 @@ async def chat_stream_v2(
         except ImportError:
             import logging as _lg_log
             _lg_log.getLogger(__name__).warning('[AI问答-LangGraph|降级] langgraph 未安装 session=%s', session_id)
-            yield _sse(
-                "stream_error",
-                {
-                    "session_id": session_id,
-                    "trace_id": trace_id,
-                    "message": "LangGraph 未安装，无法执行固定编排链路",
-                    "orchestration_engine": "import_error",
-                },
-            )
+            from .chat_error_handler import stream_user_error_sse
+
+            async for line in stream_user_error_sse(
+                "LangGraph 未安装，无法执行固定编排链路",
+                session_id=session_id,
+                trace_id=trace_id,
+                stage="编排依赖",
+                user_message=message,
+            ):
+                yield line
             return
         except Exception as ex:
             import logging as _lg_log
@@ -1223,16 +1246,16 @@ async def chat_stream_v2(
                 "[AI问答-LangGraph|异常|chat_stream_v2|session:%s] graph_stream_failed",
                 session_id,
             )
-            yield _sse(
-                "stream_error",
-                {
-                    "session_id": session_id,
-                    "trace_id": trace_id,
-                    "message": str(ex)[:500],
-                    "error_type": type(ex).__name__,
-                    "orchestration_engine": "langgraph_error",
-                },
-            )
+            from .chat_error_handler import stream_user_error_sse
+
+            async for line in stream_user_error_sse(
+                ex,
+                session_id=session_id,
+                trace_id=trace_id,
+                stage="LangGraph 编排",
+                user_message=message,
+            ):
+                yield line
             return
 
     yield _sse("stream_open", {"session_id": session_id, "stage": "准备中", "progress": 1})
@@ -1245,6 +1268,17 @@ async def chat_stream_v2(
     )
 
     link_ctx = analyze_link_doc_intent(message, read_comments=read_comments)
+    if link_ctx.get("run_link_pipeline") and link_ctx.get("urls"):
+        from .link_doc_routing import enqueue_link_pipeline_from_chat
+
+        auto_pipe = await enqueue_link_pipeline_from_chat(
+            link_ctx,
+            user_prompt=message,
+            read_comments=read_comments,
+            session_id=session_id,
+        )
+        if auto_pipe.get("ok"):
+            yield _sse("link_pipeline_auto_start", {**auto_pipe, "trace_id": trace_id, "session_id": session_id})
     tools_inventory_query = is_tools_inventory_query(message)
 
     chat_lc_tools_pre: List[Any] = []
@@ -1254,7 +1288,15 @@ async def chat_stream_v2(
         tools_meta_pre = dict(graph_boot.get("tools_meta") or {})
         if not chat_lc_tools_pre:
             try:
-                chat_lc_tools_pre, tools_meta_pre = await load_all_chat_tools(read_comments=read_comments)
+                from .chat_warmup import get_cached_tools
+
+                cached = get_cached_tools(read_comments=read_comments)
+                if cached:
+                    chat_lc_tools_pre, tools_meta_pre = cached
+                else:
+                    chat_lc_tools_pre, tools_meta_pre = await load_all_chat_tools(
+                        read_comments=read_comments
+                    )
             except Exception as _te:
                 tools_meta_pre = dict(tools_meta_pre or {})
                 tools_meta_pre.setdefault("mcp_error", str(_te))
@@ -1404,6 +1446,12 @@ async def chat_stream_v2(
                 ),
             })
         group_seq = int((graph_boot or {}).get("group_seq") or group_seq)
+        _boot_rag_ctx = str(boot.get("rag_context_block") or "").strip()
+        if _boot_rag_ctx:
+            rag_context_block = _boot_rag_ctx
+        _boot_cite = str(boot.get("rag_citation_instruction") or "").strip()
+        if _boot_cite:
+            rag_citation_instruction = _boot_cite
     else:
         # ── Phase 1: 必做意图识别；通过后才建主任务并执行后续步骤 ──
         thinking_steps: List[tuple[str, str, str]] = [
@@ -1602,10 +1650,19 @@ async def chat_stream_v2(
                             "content": piece, "llm_powered": True,
                         })
                 except Exception as ex:
-                    llm_step_text = f"[ReAct LLM 调用失败] {ex}"
+                    from .chat_error_handler import llm_analyze_error_for_user
+
+                    llm_step_text = await llm_analyze_error_for_user(
+                        error_type=type(ex).__name__,
+                        error_message=str(ex)[:400],
+                        stage="ReAct 推理",
+                        user_message=message,
+                    )
                     yield _sse("step_think_delta", {
                         "trace_id": trace_id, "step_id": span_step["step_id"],
                         "content": llm_step_text,
+                        "llm_powered": True,
+                        "error_analyzed": True,
                     })
                 yield _sse("step_think_end", {
                     "trace_id": trace_id, "step_id": span_step["step_id"], "llm_powered": True,
@@ -1621,8 +1678,27 @@ async def chat_stream_v2(
             # 非 LLM 步骤（如意图识别）不伪造「思考」流式文案，结果见 thought_step_end.result_brief
 
             if step_id_code == "intent":
-                intent_task_kind = "simple" if _is_simple_intent(message) else "main"
-                use_main_task = intent_task_kind != "simple"
+                from .chat_context_memory import hydrate_client_task_context, resolve_intent_mode
+
+                _icur, _ihist = hydrate_client_task_context(
+                    session_id,
+                    client_cur_task=client_cur_task if isinstance(client_cur_task, dict) else None,
+                    client_main_task_history=client_main_task_history
+                    if isinstance(client_main_task_history, list)
+                    else None,
+                )
+                _intent_dec = resolve_intent_mode(
+                    message,
+                    cur_task=_icur,
+                    is_simple_heuristic=_is_simple_intent(message),
+                    main_task_history=_ihist,
+                )
+                _imode = str(_intent_dec.get("mode") or "new_main")
+                intent_task_kind = "simple" if _imode == "simple" else "main"
+                use_main_task = _imode in ("new_main", "continue_main")
+                continue_main_task = _imode == "continue_main"
+                if continue_main_task and _intent_dec.get("task_id"):
+                    task_id = str(_intent_dec["task_id"])
                 intent_rewrite_snapshot = _build_intent_rewrite_snapshot()
                 if intent_rewrite_snapshot.get("rewritten_query") != intent_rewrite_snapshot.get("query"):
                     yield _sse("thinking_delta", {
@@ -1637,14 +1713,20 @@ async def chat_stream_v2(
             flow_extra: Dict[str, Any] = {}
             result_brief = ""
             if step_id_code == "intent":
-                result_brief = format_intent_result_brief_cn(
-                    simple=intent_task_kind == "simple",
-                    needs_rag=bool(intent_rewrite_snapshot.get("needs_rag")),
-                )
+                if continue_main_task:
+                    result_brief = (_intent_dec.get("reason") or "续接当前/最近主任务")[:120]
+                else:
+                    result_brief = format_intent_result_brief_cn(
+                        simple=intent_task_kind == "simple",
+                        needs_rag=bool(intent_rewrite_snapshot.get("needs_rag")),
+                    )
                 flow_extra = {
-                    "intent_type": "simple_chat" if intent_task_kind == "simple" else "task",
+                    "intent_type": "simple_chat"
+                    if intent_task_kind == "simple"
+                    else ("task_continue" if continue_main_task else "task"),
                     "task_kind": intent_task_kind,
                     "use_main_task": use_main_task,
+                    "continue_main_task": continue_main_task,
                     "needs_rag": bool(intent_rewrite_snapshot.get("needs_rag")),
                     "needs_plan_execute": use_main_task and framework == "plan_execute",
                     "result_brief_cn": result_brief,
@@ -1683,8 +1765,8 @@ async def chat_stream_v2(
             })
 
             if step_id_code == "intent":
-                # 复杂任务：意图通过后必须创建主任务（此前 task_id 一直为 None，导致从未发出 task_created）
-                if use_main_task and not task_id:
+                # 复杂任务：意图通过后必须创建主任务（续接已有 task_id 时不新建）
+                if use_main_task and not task_id and not continue_main_task:
                     task_id = _new_id("task_")
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                     rewritten_q = (intent_rewrite_snapshot.get("rewritten_query") or message or "").strip()
@@ -1736,9 +1818,13 @@ async def chat_stream_v2(
                     "sub_plan_id": sub_plan_id,
                     "is_simple": intent_task_kind == "simple",
                     "persist_main_task": use_main_task,
+                    "continue_main_task": continue_main_task,
+                    "task_action": _imode,
+                    "preserve_task_identity": bool(continue_main_task and task_id),
                     "rewrite_snapshot": intent_rewrite_snapshot if use_main_task else None,
                     "user_query": message if use_main_task else "",
                     "query_summary": (message or "")[:120] if use_main_task else "",
+                    "intent_reason": str(_intent_dec.get("reason") or ""),
                 })
                 thinking_steps.extend(_build_post_intent_steps())
                 if task_id and intent_rewrite_snapshot:
@@ -1798,16 +1884,29 @@ async def chat_stream_v2(
         react_memory = hydrate_react_memory_from_repo(str(task_id), react_memory)
         react_context_block = _format_react_memory(react_memory)
 
-    rag_context_block: Optional[str] = None
     prefetch_sub_plan_id: Optional[str] = None
     prefetch_sub_index: int = 0
-    # LangGraph handoff / 延续主任务 / MCP 真 ReAct：禁止固定预取，工具须先 Observe+Act 再执行
+    # LangGraph handoff：常规编排已在 rag_decision 预取；延续主任务跳过编排须在执行段补 RAG
     _mcp_react_loop = _mcp_react_loop_enabled(
         framework, chat_lc_tools_pre, provider, base_url
     )
-    skip_react_prefetch = bool(skip_phase1 or continue_main_task or _mcp_react_loop)
+    _graph_boot = graph_boot if isinstance(graph_boot, dict) else {}
+    _boot_has_rag = bool(
+        (_graph_boot.get("rag_slices") or [])
+        or str(_graph_boot.get("rag_context_block") or "").strip()
+    )
+    # LangGraph 编排段（含延续主任务快径）已做过 RAG 预取时，执行段勿再 rag_retrieve
+    _boot_rag_already = bool(
+        _boot_has_rag or bool(_graph_boot.get("rag_prefetch_done"))
+    )
+    skip_react_prefetch = bool(
+        (skip_phase1 and not continue_main_task)
+        or (_mcp_react_loop and not continue_main_task)
+        or _boot_has_rag
+        or bool(_graph_boot.get("rag_prefetch_done"))
+    )
     will_prefetch_rag = bool(
-        rag_prefetch and use_main_task and task_id and not skip_react_prefetch
+        rag_prefetch and use_main_task and task_id and not _boot_rag_already
     )
     will_prefetch_web = bool(
         web_search
@@ -1832,8 +1931,8 @@ async def chat_stream_v2(
     if (rag_prefetch or web_search) and use_main_task and task_id:
         prefetch_sub_plan_id, prefetch_sub_index = _alloc_step_group()
 
-    if rag_prefetch and use_main_task and task_id:
-        from .kb_rag import kb_search
+    if will_prefetch_rag:
+        from .chat_graph_nodes import _safe_kb_search
         from .web_search_plan import build_rag_retrieve_query
 
         rag_sub_plan_id, rag_sub_index = prefetch_sub_plan_id, prefetch_sub_index
@@ -1866,9 +1965,14 @@ async def chat_stream_v2(
         rag_err: Optional[str] = None
         rag_hits: List[Any] = []
         try:
-            loop_rag = asyncio.get_running_loop()
-            rag_hits = await loop_rag.run_in_executor(_executor, lambda: kb_search(rag_query, top_k=5))
-            rag_raw = {"ok": True, "query": rag_query, "hits": rag_hits, "count": len(rag_hits or [])}
+            rag_hits, rag_err = await _safe_kb_search(rag_query, top_k=5)
+            rag_raw = {
+                "ok": not rag_err,
+                "query": rag_query,
+                "hits": rag_hits,
+                "count": len(rag_hits or []),
+                "error": rag_err or None,
+            }
         except Exception as ex:
             rag_raw = {"ok": False, "query": rag_query, "hits": [], "error": str(ex)}
             rag_err = str(ex)
@@ -2183,8 +2287,17 @@ async def chat_stream_v2(
             ]
             if react_context_block:
                 extra_blocks.append(react_context_block)
+            if rag_citation_instruction:
+                extra_blocks.append(rag_citation_instruction)
             if rag_context_block:
                 extra_blocks.append(rag_context_block)
+            if rag_context_block and re.search(r"MCP|知识库|mcp", message or "", re.I):
+                extra_blocks.append(
+                    "【MCP 知识库总结 · 硬性要求】须基于上方 RAG 切片作答；"
+                    "正文须明确写出至少 2 个来自文档的术语，例如："
+                    "「Model Context Protocol（模型上下文协议）」「MCP 服务器」「MCP 客户端」。"
+                    "禁止在正文输出 FunctionCallBegin、```json 工具参数或伪工具调用。"
+                )
             if link_guidance_block:
                 extra_blocks.append(
                     "【链接文档化助手 · 路由说明】\n"
@@ -2359,9 +2472,14 @@ async def chat_stream_v2(
                     try:
                         data = await loop.run_in_executor(_executor, _call_raw)
                     except Exception as e:
-                        import traceback
+                        from .chat_error_handler import llm_analyze_error_for_user
 
-                        full_answer = f"MCP 工具链 LLM 调用失败: {e}\n{traceback.format_exc()[-400:]}"
+                        full_answer = await llm_analyze_error_for_user(
+                            error_type=type(e).__name__,
+                            error_message=str(e)[:500],
+                            stage="MCP 工具链",
+                            user_message=message,
+                        )
                         break
 
                     msg_o = _extract_openai_message_dict(data)
@@ -2863,9 +2981,14 @@ async def chat_stream_v2(
         except ImportError:
             full_answer = "provider_adapters 模块不可用，请检查 src/agent 路径"
         except Exception as e:
-            import traceback
+            from .chat_error_handler import llm_analyze_error_for_user
 
-            full_answer = f"LLM 调用失败: {e}\n{traceback.format_exc()[-200:]}"
+            full_answer = await llm_analyze_error_for_user(
+                error_type=type(e).__name__,
+                error_message=str(e)[:500],
+                stage="LLM 调用",
+                user_message=message,
+            )
     else:
         missing = []
         if not api_key:

@@ -74,6 +74,82 @@ function revealRuntimeFault(title,detail){
   );
 }
 
+// ==================== 任务注册表 UI 辅助（须在 setup 外，供模板稳定引用） ====================
+function taskRegistryKindLabel(h){
+  const kind=String(h&&h.task_kind||"main").toLowerCase();
+  if(kind==="pipeline")return"链接流水线";
+  if(kind==="main")return"AI 主任务";
+  return kind||"任务";
+}
+function taskRegistryKindClass(h){
+  const kind=String(h&&h.task_kind||"main").toLowerCase();
+  return kind==="pipeline"?"kind-pipeline":"kind-main";
+}
+
+/** 任务中心字段中文映射（展示：中文（english_key）） */
+const TASK_FIELD_LABELS={
+  task_id:"任务 ID",session_id:"会话 ID",user_query:"用户目标",rewritten_query:"改写后目标",
+  query_summary:"任务摘要",intent:"意图分类",status:"状态",group_seq:"组序号",
+  total_duration_ms:"总耗时",total_token_count:"Token 总量",total_steps:"步骤总数",
+  completed_steps:"已完成步骤",failed_steps:"失败步骤",sub_plans_count:"子计划数量",
+  tool_outputs_count:"工具调用次数",snapshot_fixed_count:"固定层字段数",snapshot_open_count:"开放层字段数",
+  started_at:"开始时间",ended_at:"结束时间",created_at:"创建时间",updated_at:"更新时间",
+  link:"链接地址",platform:"平台",title:"标题",progress:"进度",log_count:"日志条数",source:"数据来源",
+  task_kind:"任务类型",needs_multi_path:"多路径需求",needs_rag:"需要 RAG",async_pipeline_pending:"异步流水线待处理",
+  pipeline_task_ids:"关联流水线 ID",result_msg_index:"结果消息索引",result_status:"结果状态",
+  objective:"当前目标",current_assessment:"现状评估",progress_percent:"进度百分比",
+  next_actions:"下一步动作",risk_flags:"风险标记",context_summary:"上下文摘要",
+  tool_result_analysis:"工具结果分析",decision:"决策",confidence:"置信度",stop_reason:"停止原因",
+  metadata:"元数据",keywords:"关键词",rewrite_state:"改写状态",rewrite_confidence:"改写置信度",
+  tool_io_brief:"工具 IO 摘要",tool_name:"工具名称",tool_args:"工具参数",tool_result:"工具结果",
+  react_round:"ReAct 轮次",sub_plan_id:"子计划 ID",input_preview:"输入预览",output_preview:"输出预览",
+  brief:"结果摘要",at:"调用时间",step_id:"步骤 ID",step_name:"阶段名称",step_type:"步骤类型",
+  duration_ms:"耗时",token_count:"Token",error_code:"错误码",error_message:"错误信息",
+  input_payload:"输入载荷",output_payload:"输出载荷",parent_step_id:"父步骤 ID",
+  schema_version:"Schema 版本",cost_ms:"耗时",timestamp:"时间戳",value:"值",key:"字段",
+  fixed:"固定层",open:"开放层",tool_outputs:"工具链",steps:"步骤",sub_plans:"子计划",
+  redis_present:"Redis 热缓存",mysql_synced:"MySQL 已同步",mysql_table:"MySQL 表",
+  domain:"领域",module:"模块",doc_type:"文档类型",keyword1:"关键词1",keyword2:"关键词2",
+  rewrite_snapshot:"改写快照",query:"查询",task_summary:"任务摘要",query_keywords:"查询关键词",
+};
+const TASK_STEP_TYPE_LABELS={
+  retrieval:"检索",llm_call:"LLM 调用",llm:"LLM",tool_call:"工具调用",tool:"工具",
+  api_call:"API 调用",summary:"摘要",reasoning:"推理",intent:"意图识别",rewrite:"问题改写",
+  slot:"业务槽位",decompose:"任务分解",enhance:"意图增强",execute_prep:"执行准备",
+  react_round:"ReAct 轮",rag_decision:"RAG 判定",plan:"规划",observe:"观察",act:"执行",
+  orchestration:"编排",created:"已创建",running:"运行中",completed:"已完成",failed:"已失败",
+};
+function taskFieldLabel(key){
+  const k=String(key||"").trim();
+  if(!k)return "—";
+  if(TASK_FIELD_LABELS[k])return TASK_FIELD_LABELS[k]+"（"+k+"）";
+  const leaf=k.includes(".")?k.split(".").pop():k;
+  if(leaf&&TASK_FIELD_LABELS[leaf])return TASK_FIELD_LABELS[leaf]+"（"+k+"）";
+  return k;
+}
+function taskStepTypeLabel(t){
+  const k=String(t||"").trim().toLowerCase();
+  if(!k)return "—";
+  const cn=TASK_STEP_TYPE_LABELS[k];
+  return cn?cn+"（"+k+"）":taskFieldLabel(k);
+}
+function taskFieldDisplayValue(key,val){
+  if(val===null||val===undefined||val==="")return "—";
+  const k=String(key||"").toLowerCase();
+  if(k==="status"||k.endsWith(".status")){
+    const s=String(val).toLowerCase();
+    const m={
+      executing:"执行中",running:"运行中",pending:"待处理",completed:"已完成",failed:"已失败",
+      cancelled:"已取消",closed:"已结案",resolved:"已解决",created:"已创建",summarizing:"摘要中",
+      planning:"计划中",paused:"暂停中",abnormal:"异常中",ok:"成功",error:"错误",timeout:"超时",
+    };
+    return(m[s]||val)+"（"+val+"）";
+  }
+  if(typeof val==="boolean")return val?"是（true）":"否（false）";
+  if(typeof val==="object"){try{return JSON.stringify(val,null,2);}catch(_){return String(val);}}
+  return String(val);
+}
+
 // ==================== Vue 应用初始化 ====================
 const{createApp,ref,reactive,nextTick,computed,onMounted,watch}=Vue;
 
@@ -94,7 +170,7 @@ AuthManager.state.subscribe(function(state){
 const page=ref("video");
 
 // 需要登录的页面
-const REQUIRES_AUTH_PAGES=['video','orch','chat','agpz','rag','multimodal','cache','ops','profile','settings'];
+const REQUIRES_AUTH_PAGES=['video','orch','chat','tasks','agpz','rag','multimodal','cache','ops','webreplay','profile','settings'];
 // 管理员页面
 const ADMIN_PAGES=['iag'];
 
@@ -294,6 +370,7 @@ function closeUserDd(ev){
 }
 const menuMainBase=[
   {key:"video",label:"链接文档化"},{key:"orch",label:"工具"},{key:"chat",label:"AI 问答"},
+  {key:"tasks",label:"任务中心"},
   {key:"agpz",label:"Agent 个性化设置"},
   {key:"rag",label:"RAG 知识库"},{key:"multimodal",label:"多模态文档"},{key:"cache",label:"Redis 缓存"},
   {key:"ops",label:"OPS 运维"}
@@ -309,6 +386,26 @@ function updateMenuMain(){
 }
 watch(isAdmin, updateMenuMain, {immediate: true});
 const settingsOpen=ref((()=>{try{return localStorage.getItem("sba_settings_open")==="1"}catch(_){return false}})());
+const webreplayOpen=ref((()=>{try{return localStorage.getItem("sba_webreplay_open")==="1"}catch(_){return true}})());
+const wr=reactive({
+  sec:(()=>{try{return localStorage.getItem("sba_webreplay_sec")||"scripts"}catch(_){return "scripts"}})(),
+  scripts:[],
+  selId:"",
+  selDetail:null,
+  loading:false,
+  err:"",
+  bridge:{extensionId:"",origin:""},
+});
+const wrMcpSnippet=computed(()=>{
+  const id=(wr.bridge.extensionId||"").trim()||"<扩展ID>";
+  const origin=(typeof location!=="undefined"&&location.origin)?location.origin:"http://127.0.0.1:8000";
+  return [
+    "// 在允许 externally_connectable 的页面控制台或本地脚本中：",
+    "chrome.runtime.sendMessage('"+id+"', { method: 'list_scripts' }, console.log);",
+    "chrome.runtime.sendMessage('"+id+"', { method: 'run_script', params: { name: '脚本名' } }, console.log);",
+    "// 本站点 API（需登录）： "+origin+"/api/webreplay/scripts",
+  ].join("\n");
+});
 const navCollapsed=ref((()=>{try{return localStorage.getItem("sba_nav_collapsed")==="1"}catch(_){return false}})());
 function toggleNav(){
   requestAnimationFrame(()=>{
@@ -423,6 +520,7 @@ function closeAllPageOverlays(opts){
   if(except!=="modalArtifact")modalArtifact.show=false;
   if(except!=="hist")showHist.value=false;
   if(except!=="chatExpand")chatExpandOpen.value=false;
+  if(except!=="taskHistModal"){c.taskHistModalOpen=false;c.taskHistModalRow=null;}
 }
 function openPageOverlay(kind,openFn){
   closeAllPageOverlays({except:kind});
@@ -433,13 +531,48 @@ const modalOut=reactive({show:false,path:"",files:[],newAbs:""});
 let toastT=null;let procEs=null;let queueTimer=null;let vecTimer=null;
 function showToastMsg(msg){toast.msg=msg;toast.show=true;clearTimeout(toastT);toastT=setTimeout(()=>{toast.show=false},2400)}
 async function ldVec(){try{const r=await fetch("/api/vector/health");const d=await r.json();vec.ok=!!d.milvus_ok;vec.ver=d.version||"-";vec.lat=d.latency_ms||0;vec.err=d.error||""}catch(e){vec.ok=false;vec.err=String(e)}}
+async function fetchJsonSafe(url, opts){
+  const r=await fetch(url, opts);
+  const text=await r.text();
+  let data={};
+  if(text){
+    try{data=JSON.parse(text)}catch(_){
+      const brief=text.replace(/\s+/g," ").slice(0,120);
+      throw new Error(r.ok?("响应非 JSON："+brief):("HTTP "+r.status+"："+brief));
+    }
+  }
+  if(!r.ok){
+    const detail=data.detail||data.message||data.error||("HTTP "+r.status);
+    throw new Error(typeof detail==="string"?detail:JSON.stringify(detail));
+  }
+  return data;
+}
 async function pollQueue(){
   try{
-    const r=await fetch("/api/process/queue");
-    if(!r.ok)return;
-    const d=await r.json();
-    taskQueue.value=d.tasks||[];
-  }catch(_){}
+    const d=await fetchJsonSafe("/api/process/queue");
+    taskQueue.value=sortTaskQueueFifo(d.tasks||[]);
+  }catch(e){console.warn("[pollQueue]",e.message||e)}
+}
+/** 链接分析队列：最近提交/重新执行在最左（queue_seq / updated_at 降序） */
+function sortTaskQueueFifo(tasks){
+  return (Array.isArray(tasks)?tasks:[]).slice().sort((a,b)=>{
+    const sa=Number(a.queue_seq??a.priority??0);
+    const sb=Number(b.queue_seq??b.priority??0);
+    if(sa!==sb)return sb-sa;
+    const ua=String(a.updated_at||a.created_at||"");
+    const ub=String(b.updated_at||b.created_at||"");
+    return ub.localeCompare(ua);
+  });
+}
+function pendingQueueIndex(taskId){
+  const pending=taskQueue.value.filter(x=>(x.status||"")==="pending");
+  return pending.findIndex(x=>x.task_id===taskId);
+}
+function isFirstPendingTask(taskId){return pendingQueueIndex(taskId)===0;}
+function isLastPendingTask(taskId){
+  const pending=taskQueue.value.filter(x=>(x.status||"")==="pending");
+  const i=pendingQueueIndex(taskId);
+  return i>=0&&i===pending.length-1;
 }
 async function moveQueueTask(taskId, direction){
   try{
@@ -556,17 +689,19 @@ function taskCardSubTitle(t){return taskCardDocSubTitle(t)}
 function taskCardMetricsLine(t){
   if(!t)return"";
   const st=String(t.status||"").toLowerCase();
-  const active=procActive.has(st);
-  let dur=Number(t.total_duration_ms||0);
-  if(!dur&&active){
-    const t0=Date.parse(t.pipeline_started_at||t.created_at||"");
-    if(t0>0)dur=Math.max(0,Date.now()-t0);
-  }
+  if(st!=="completed")return"";
+  const dur=Number(t.total_duration_ms||0);
   const tok=Number(t.total_token_count||0);
-  if(!dur&&!tok&&!active)return"";
+  const article=Number(t.article_char_count||0);
+  const summary=Number(t.summary_char_count||0);
+  if(!dur&&!tok)return"";
   const parts=[];
   if(dur>0)parts.push("耗时 "+formatDuration(dur));
-  if(tok>0)parts.push("Token "+tok.toLocaleString("zh-CN"));
+  if(tok>0){
+    let tokLine="Token "+tok.toLocaleString("zh-CN");
+    if(article>0||summary>0)tokLine+="（"+article.toLocaleString("zh-CN")+"+"+summary.toLocaleString("zh-CN")+"）";
+    parts.push(tokLine);
+  }
   return parts.join(" · ");
 }
 function patchQueueTaskMetrics(tid,patch){
@@ -622,6 +757,17 @@ function outputHttpUrl(path){
   // 产物直链走 /output 白名单，禁止附带 sba_token（旧后端会进 Casbin 报 403）
   return "/output/"+encodeURIComponent(b);
 }
+function outputMdPreviewUrl(path){
+  const b=pathBasename(path);
+  if(!b)return"";
+  const low=b.toLowerCase();
+  if(low.endsWith(".md")||low.endsWith(".txt")||low.endsWith(".markdown")||low.endsWith(".mdx"))
+    return "/preview/md.html?file="+encodeURIComponent(b);
+  return outputHttpUrl(path);
+}
+function artifactBrowserUrl(path){
+  return outputMdPreviewUrl(path)||outputHttpUrl(path);
+}
 const modalArtifact=reactive({show:false,label:"",items:[]});
 async function openLocalOutput(path,action){
   const p=(path||"").trim();
@@ -650,7 +796,7 @@ async function openTaskArtifactsLocation(t){
   const html=(t.html_path||"").trim();
   if(!md&&!html){showToastMsg("尚无 MD/HTML 产物");return}
   const items=[];
-  if(md)items.push({label:"MD",path:md,url:outputHttpUrl(md)});
+  if(md)items.push({label:"MD",path:md,url:artifactBrowserUrl(md)});
   if(html)items.push({label:"HTML",path:html,url:outputHttpUrl(html)});
   modalArtifact.items=items;
   modalArtifact.label="任务产物";
@@ -659,15 +805,15 @@ async function openTaskArtifactsLocation(t){
 }
 function showArtifactModal(path,label){
   const p=(path||"").trim();
-  modalArtifact.items=[{label:label||"产物",path:p,url:outputHttpUrl(p)}];
+  modalArtifact.items=[{label:label||"产物",path:p,url:artifactBrowserUrl(p)}];
   modalArtifact.label=label||"产物";
   openPageOverlay("modalArtifact",()=>{modalArtifact.show=true;});
 }
 async function openTaskMd(t){
   const path=(t.doc_path||t.doc_filename||"").trim();
   if(!path){showToastMsg("MD 尚未生成");return}
-  const url=outputHttpUrl(path);
-  if(url){window.open(url,"_blank");return}
+  const url=outputMdPreviewUrl(path);
+  if(url){window.open(url,"_blank","noopener");return}
   await openLocalOutput(path,"file");
 }
 async function openTaskHtml(t){
@@ -697,13 +843,14 @@ function connectLogEs(tid){
   logs.value=[];
   var token = localStorage.getItem('sba_token');
   procEs=new EventSource("/api/process/logs/"+tid+(token?'?sba_token='+encodeURIComponent(token):''));
-  procEs.addEventListener("log",e=>{const d=JSON.parse(e.data);aLog(d.timestamp,d.level,d.message)});
+  procEs.addEventListener("log",e=>{try{const d=JSON.parse(e.data||"{}");aLog(d.timestamp,d.level,d.message)}catch(ex){aLog("","ERROR","日志解析失败："+(ex.message||String(ex)))}});
   procEs.addEventListener("progress",e=>{
     const d=JSON.parse(e.data);
     v.pg=d.progress||0;v.stage=d.stage||"";
     patchQueueTaskMetrics(logFocusId.value,{
       progress:d.progress,stage:d.stage,status:d.status,
       total_duration_ms:d.total_duration_ms,total_token_count:d.total_token_count,
+      article_char_count:d.article_char_count,summary_char_count:d.summary_char_count,
     });
   });
   procEs.addEventListener("complete",e=>{
@@ -711,6 +858,7 @@ function connectLogEs(tid){
     patchQueueTaskMetrics(d.task_id||logFocusId.value,{
       status:"completed",progress:100,stage:"完成",
       total_duration_ms:d.total_duration_ms,total_token_count:d.total_token_count,
+      article_char_count:d.article_char_count,summary_char_count:d.summary_char_count,
     });
     if(procEs){procEs.close();procEs=null}
     showToastMsg("任务已完成");pollQueue();
@@ -722,7 +870,6 @@ function connectLogEs(tid){
       const d=JSON.parse(e.data||"{}");
       patchQueueTaskMetrics(logFocusId.value,{
         status:"failed",
-        total_duration_ms:d.total_duration_ms,total_token_count:d.total_token_count,
       });
     }catch(_){}
     if(procEs){procEs.close();procEs=null}
@@ -736,17 +883,10 @@ async function startProc(){
   if(!linkTrim){alert("请输入链接");return}
   v.submitting=true;
   try{
-    const hr=await fetch("/api/link/url-hash?link="+encodeURIComponent(linkTrim));
-    if(!hr.ok){
-      let detail="未能识别有效链接";
-      try{const e=await hr.json();detail=(e.detail||e.error||detail)}catch(_){}
-      throw new Error(detail);
-    }
-    const hd=await hr.json();
+    const hd=await fetchJsonSafe("/api/link/url-hash?link="+encodeURIComponent(linkTrim));
     const cleanLink=hd.link||linkTrim;
     const platform=hd.platform||detectPlatform(cleanLink);
-    const qr=await fetch("/api/process/queue");
-    const qd=await qr.json();
+    const qd=await fetchJsonSafe("/api/process/queue");
     const sameHash=(qd.tasks||[]).filter(t=>t.url_hash===hd.url_hash);
     const running=sameHash.filter(t=>procActive.has(t.status||""));
     if(running.length){if(!confirm("该链接已有任务在执行中，仍要再提交？")){v.submitting=false;return}}
@@ -756,9 +896,7 @@ async function startProc(){
       user_prompt:v.pr||"",
       comments:v.comments||{enabled:false,count:10,sort:"hot"}
     };
-    const r=await fetch("/api/process/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-    if(!r.ok){let detail=r.statusText;try{const e=await r.json();detail=e.detail||detail}catch(_){ }throw new Error(detail)}
-    const d=await r.json();
+    const d=await fetchJsonSafe("/api/process/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     v.submitPulse=true;setTimeout(()=>{v.submitPulse=false},700);
     showToastMsg(d.reused?"同链接已复用原卡片继续处理":"已加入处理队列");
     v.link="";
@@ -769,6 +907,33 @@ async function startProc(){
   finally{v.submitting=false}
 }
 function clrV(){v.link="";v.pr="";logs.value=[];v.pg=0;v.stage="就绪";v.stxt="就绪";v.sd="i";v.rd=null;v.htmlStat="";v.htmlMsg="";if(procEs){procEs.close();procEs=null}}
+let linkPipelinePrefTimer=null;
+async function persistLinkPipelinePrefs(){
+  clearTimeout(linkPipelinePrefTimer);
+  linkPipelinePrefTimer=setTimeout(async()=>{
+    try{
+      await fetch("/api/settings/link-pipeline-prefs",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          feishu_sync_enabled:!!v.fs,
+          feishu_default_folder_path:v.fp||"",
+          longpage_html_enabled:!!v.html,
+        }),
+      });
+    }catch(_){}
+  },350);
+}
+async function ldLinkPipelinePrefs(){
+  try{
+    const r=await fetch("/api/settings/link-pipeline-prefs");
+    if(!r.ok)return;
+    const d=await r.json();
+    if(d.feishu_sync_enabled!=null)v.fs=!!d.feishu_sync_enabled;
+    if(d.feishu_default_folder_path!=null)v.fp=String(d.feishu_default_folder_path||"");
+    if(d.longpage_html_enabled!=null)v.html=!!d.longpage_html_enabled;
+  }catch(_){}
+}
 function pollHtmlStatus(taskId){let count=0;const timer=setInterval(async()=>{try{const r=await fetch("/api/process/status/"+taskId);const d=await r.json();v.htmlStat=d.html_status||"";v.htmlMsg=d.html_message||"";if(d.html_status&&d.html_status!=="async_pending"||++count>60){clearInterval(timer)}}catch(e){clearInterval(timer)}},3000)}
 async function openOut(){try{const r=await fetch("/api/output/path");const d=await r.json();openPageOverlay("modalOut",()=>{modalOut.path=d.path||"";modalOut.files=d.files||[];modalOut.newAbs=modalOut.path;modalOut.show=true;});}catch(e){showToastMsg("读取输出路径失败")}}
 async function copyOutPath(){try{await navigator.clipboard.writeText(modalOut.path);showToastMsg("路径已复制")}catch(_){alert(modalOut.path)}}
@@ -1014,14 +1179,15 @@ function mcpDiscKey(mt,i){
   return String((mt&&mt.server)||'')+'::'+String((mt&&mt.name)||'')+'::'+i;
 }
 const PAGE_CRUMB_LABELS={
-  video:"链接文档化",orch:"工具",chat:"AI 问答",agpz:"Agent 个性化设置",
+  video:"链接文档化",orch:"工具",chat:"AI 问答",tasks:"任务中心",agpz:"Agent 个性化设置",
   iag:"内部 Agent 配置",rag:"RAG 知识库",multimodal:"多模态文档",cache:"Redis 缓存",
-  ops:"OPS 运维",settings:"设置",profile:"个人信息"
+  ops:"OPS 运维",webreplay:"浏览器自动化",settings:"设置",profile:"个人信息"
 };
 // 顶栏标签定义（key → 展示元数据）；iag 仅管理员可见
 const ALL_TAB_DEFS={
   video:{key:"video",label:"链接文档化"},
   chat:{key:"chat",label:"AI 问答"},
+  tasks:{key:"tasks",label:"任务中心"},
   orch:{key:"orch",label:"工具"},
   rag:{key:"rag",label:"RAG 知识库"},
   agpz:{key:"agpz",label:"Agent 设置"},
@@ -1030,6 +1196,7 @@ const ALL_TAB_DEFS={
   multimodal:{key:"multimodal",label:"多模态文档"},
   cache:{key:"cache",label:"Redis 缓存"},
   ops:{key:"ops",label:"OPS 运维"},
+  webreplay:{key:"webreplay",label:"浏览器自动化"},
   profile:{key:"profile",label:"个人信息"}
 };
 const openTabs=ref(["video","chat"]);
@@ -1166,6 +1333,10 @@ watch(page,k=>{
   if(def.adminOnly&&!isAdmin.value)return;
   if(!openTabs.value.includes(k))openTabs.value=openTabs.value.concat([k]);
   closeAllPageOverlays();
+  if(k==="webreplay"){
+    if(wr.sec==="scripts")ldWrScripts();
+    if(wr.sec==="bridge")ldWrBridge();
+  }
 });
 // 右键菜单关闭其他标签
 function showTabContextMenu(key,event){
@@ -1943,7 +2114,7 @@ async function renderOrchMermaid(){
     if(window.SBA_DIAGRAM_STYLES){
       window.SBA_DIAGRAM_STYLES.applyMermaidInitialize(window.mermaid,diagramStyleFields.value);
     }else{
-      window.mermaid.initialize({startOnLoad:false,theme:"base",securityLevel:"loose"});
+      window.mermaid.initialize({startOnLoad:false,theme:"base",securityLevel:"strict"});
     }
     const id="mmd-"+String(orchRail.key).replace(/\W/g,"");
     const out=await window.mermaid.render(id,orchRail.flow.mermaid);
@@ -2226,7 +2397,7 @@ function mergeOrchPipelineNodes(src){
   }
   return m;
 }
-const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:true,readComments:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
+const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:true,readComments:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskHistFilterSession:"",taskHistFilterStatus:"",taskHistFilterKind:"all",taskHistLoading:false,taskHistRemoteList:[],taskHistTotal:0,taskHistStats:null,taskHistMysqlInfo:null,taskHistSyncingId:"",taskHistDetailCache:{},taskHistDetailLoading:"",taskHistModalOpen:false,taskHistModalRow:null,taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatWarmup:{loading:false,ready:false,warming:false,readCommentsCached:false,toolsTotal:0,elapsedMs:0,phases:{},error:''},chatConnect:{active:false,doneFlash:false},chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
 function switchChatPanel(tab){
   const t=tab==="config"?"config":"room";
   c.chatPanelTab=t;
@@ -2509,6 +2680,7 @@ async function loadPlatformHealth(refresh){
     };
   }finally{
     c.platformHealthLoading=false;
+    maybeFinishChatConnect();
   }
 }
 function goHealthSettings(href){
@@ -2630,9 +2802,30 @@ function formatOrchStepInputDisplay(s){
   }
   return formatStepInputDisplay(s);
 }
+function extractRagSlicesFromStep(s){
+  const j=parseStepJson(s&&s.output_text);
+  if(j&&Array.isArray(j.rag_slices)&&j.rag_slices.length)return j.rag_slices;
+  if(s&&Array.isArray(s.rag_slices)&&s.rag_slices.length)return s.rag_slices;
+  return[];
+}
+function isRagDecisionStep(s){
+  return String(s&&s.phase||"").toLowerCase()==="rag_decision";
+}
 function formatOrchStepOutputDisplay(s){
   if(!s)return"—";
   const j=parseStepJson(s.output_text);
+  if(isRagDecisionStep(s)&&j&&Array.isArray(j.rag_slices)&&j.rag_slices.length){
+    const cn=summarizeOrchJsonCn(j,s.phase);
+    const head=cn?cn+"\n\n":"";
+    const lines=j.rag_slices.map(sl=>{
+      const rid=sl.ref_id!=null?sl.ref_id:"?";
+      const title=String(sl.title||"片段").slice(0,120);
+      const src=String(sl.source_file||"").slice(0,200);
+      const body=String(sl.content||"").trim();
+      return `[${rid}] ${title}${src?"\n来源："+src:""}\n${body}`;
+    });
+    return head+lines.join("\n\n---\n\n");
+  }
   if(j&&j.summary_cn)return String(j.summary_cn)+"\n\n"+JSON.stringify(j,null,2);
   if(j&&(j.node_kind==="orchestration"||ORCH_IO_PHASES.has(String(s.phase||"").toLowerCase()))){
     const cn=summarizeOrchJsonCn(j,s.phase);
@@ -2644,10 +2837,11 @@ function filterExecThinking(thinking){
   return(Array.isArray(thinking)?thinking:[]).filter(s=>{
     if(!s||typeof s!=="object")return false;
     if(s.node_kind==="tool_call")return true;
+    if(s.node_kind==="orchestration"||s.step_lane==="orchestration"||s.step_lane==="prefetch")return true;
     if(stepIsSkipped(s))return false;
     const ph=String(s.phase||"").toLowerCase();
     const nm=String(s.step_name||"");
-    if(ph==="rag_decision")return false;
+    if(ph==="rag_decision")return true;
     if(ph==="react_round"||ph==="react_think"){
       return !!(String(s.think_text||"").trim()||s.llm_powered);
     }
@@ -2942,6 +3136,22 @@ function expandTaskNameSearchTokens(q){
   }
   return Array.from(set).filter(Boolean);
 }
+function isChatSessionMainTask(h){
+  if(!h||!h.task_id)return false;
+  const tid=String(h.task_id).trim();
+  if(!tid.startsWith("task_"))return false;
+  const kind=String(h.task_kind||"main").toLowerCase();
+  if(kind==="pipeline"||kind==="simple")return false;
+  const sid=String(c.sid||"").trim();
+  if(sid){
+    const hs=String(h.session_id||"").trim();
+    if(hs&&hs!==sid)return false;
+  }
+  return true;
+}
+function filterChatSessionMainHistory(list){
+  return dedupeMainTaskHistoryList(Array.isArray(list)?list:[]).filter(isChatSessionMainTask);
+}
 function taskHistRowMatches(h){
   if(!h)return false;
   const idQ=String(c.taskHistSearchId||"").trim().toLowerCase();
@@ -3007,6 +3217,7 @@ function rebuildMainTaskHistoryFromMsgs(){
     if(!origin)origin=isMainTaskFollowUpQuery(lastUser)?"":lastUser;
     const row={
       task_id:tid,
+      session_id:c.sid||"",
       user_query:origin,
       query_summary:String(origin||tid).slice(0,80),
       status:st,
@@ -3031,16 +3242,175 @@ function rebuildMainTaskHistoryFromMsgs(){
     if(m.span&&m.span.total_token_count!=null)prev.total_token_count=m.span.total_token_count;
     if(m.span&&m.span.total_duration_ms!=null)prev.total_duration_ms=m.span.total_duration_ms;
   }
-  c.mainTaskHistory=Array.from(byId.values());
+  c.mainTaskHistory=filterChatSessionMainHistory(Array.from(byId.values()));
 }
 const chatMainTaskHistory=computed(()=>{
-  const base=dedupeMainTaskHistoryList(c.mainTaskHistory||[]).map((h,i)=>({...h,_histOrd:i}));
-  const filtered=base.filter(taskHistRowMatches);
-  const sk=String(c.taskHistSort||"time_desc");
-  let sorted=sortTaskHistList(filtered,sk);
-  if(sk==="time_desc")sorted=sorted.slice().reverse();
-  return sorted;
+  let rows=filterChatSessionMainHistory(c.mainTaskHistory||[]).map((h,i)=>({...h,task_kind:"main",_histOrd:i}));
+  const stFilter=String(c.taskHistFilterStatus||"").trim().toLowerCase();
+  if(stFilter)rows=rows.filter(h=>String(h.status||"").toLowerCase()===stFilter);
+  rows=rows.filter(taskHistRowMatches);
+  rows=sortTaskHistList(rows,c.taskHistSort||"time_desc");
+  if(String(c.taskHistSort||"time_desc")==="time_desc")rows=rows.slice().reverse();
+  return rows;
 });
+const taskHistDisplayCount=computed(()=>chatMainTaskHistory.value.length);
+function refreshChatSessionTaskHistory(){
+  if(c.msgs.length)rebuildMainTaskHistoryFromMsgs();
+  c.mainTaskHistory=filterChatSessionMainHistory(c.mainTaskHistory||[]);
+}
+let _taskHistLoadTimer=null;
+async function loadTaskRegistry(force){
+  /* 任务中心独立页 / 全局查询用；AI 问答页任务历史仅用本会话 mainTaskHistory */
+  if(page.value!=="tasks"&&!force)return;
+  c.taskHistLoading=true;
+  try{
+    const qs=new URLSearchParams({
+      session_id:c.taskHistFilterSession||"",
+      task_id:c.taskHistSearchId||"",
+      status:c.taskHistFilterStatus||"",
+      task_kind:c.taskHistFilterKind||"all",
+      name:c.taskHistSearchName||"",
+      sort:c.taskHistSort||"time_desc",
+      limit:"200",
+    });
+    const r=await fetch("/api/tasks/query?"+qs,{headers:authBearerHeaders()});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||d.error||"查询失败");
+    c.taskHistRemoteList=Array.isArray(d.tasks)?d.tasks:[];
+    c.taskHistTotal=Number(d.total||c.taskHistRemoteList.length||0);
+    c.taskHistStats=d.stats||null;
+    c.taskHistMysqlInfo=d.mysql||null;
+  }catch(e){
+    showToastMsg("任务查询失败："+(e.message||e));
+    const fallback=dedupeMainTaskHistoryList(c.mainTaskHistory||[]).map(h=>({...h,task_kind:"main",mysql_synced:false,redis_present:true,mysql_table:"span_tasks"}));
+    c.taskHistRemoteList=fallback;
+    c.taskHistTotal=fallback.length;
+    c.taskHistStats=null;
+  }finally{
+    c.taskHistLoading=false;
+    preloadTaskHistDetails(c.taskHistRemoteList);
+  }
+}
+async function preloadTaskHistDetails(list){
+  const rows=Array.isArray(list)?list.slice(0,50):[];
+  if(!rows.length)return;
+  await Promise.all(rows.map(h=>loadTaskHistDetail(h).catch(()=>null)));
+}
+function scheduleTaskRegistryReload(){
+  if(page.value==="tasks"){
+    if(_taskHistLoadTimer)clearTimeout(_taskHistLoadTimer);
+    _taskHistLoadTimer=setTimeout(()=>loadTaskRegistry(true),350);
+  }
+}
+function scheduleChatTaskHistReload(){
+  if(_taskHistLoadTimer)clearTimeout(_taskHistLoadTimer);
+  _taskHistLoadTimer=setTimeout(()=>refreshChatSessionTaskHistory(),120);
+}
+function setTaskHistKindFilter(kind){
+  c.taskHistFilterKind=kind||"all";
+  scheduleTaskRegistryReload();
+}
+function setTaskHistSort(sk){
+  c.taskHistSort=sk||"time_desc";
+  if(page.value==="tasks")scheduleTaskRegistryReload();
+}
+async function syncTaskToMysql(h){
+  if(!h||!h.task_id)return;
+  const tid=String(h.task_id);
+  c.taskHistSyncingId=tid;
+  try{
+    const r=await fetch("/api/tasks/sync-mysql",{
+      method:"POST",
+      headers:{...authJsonHeaders()},
+      body:JSON.stringify({task_id:tid,task_kind:h.task_kind||"main"}),
+    });
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||d.error||"同步失败");
+    showToastMsg("已同步到 MySQL："+tid);
+    await loadTaskRegistry(true);
+  }catch(e){
+    showToastMsg("同步失败："+(e.message||e));
+  }finally{
+    c.taskHistSyncingId="";
+  }
+}
+async function openRegistryTask(h){
+  if(!h)return;
+  const kind=String(h.task_kind||"main").toLowerCase();
+  const tid=String(h.task_id||"").trim();
+  if(kind==="pipeline"||/^[0-9a-f]{12}$/i.test(tid)){
+    switchPage("video");
+    await pollQueue();
+    if(tid)selectQueueTask(tid);
+    return;
+  }
+  const sid=String(h.session_id||"").trim();
+  if(sid&&sid!==c.sid){
+    await loadChatSession(sid);
+  }
+  switchPage("chat");
+  setCurrentMainTaskFromHistory(h);
+}
+
+function taskHistDetailKey(h){
+  if(!h)return"";
+  return String(h.task_id||"")+":"+(h.task_kind||"main");
+}
+function taskHistDetailOf(h){
+  const k=taskHistDetailKey(h);
+  return k?(c.taskHistDetailCache[k]||null):null;
+}
+const taskHistModalDetail=computed(()=>{
+  const h=c.taskHistModalRow;
+  return h?taskHistDetailOf(h):null;
+});
+const taskHistModalLoading=computed(()=>{
+  const h=c.taskHistModalRow;
+  if(!h)return false;
+  return c.taskHistDetailLoading===taskHistDetailKey(h);
+});
+async function loadTaskHistDetail(h,force){
+  if(!h||!h.task_id)return null;
+  const k=taskHistDetailKey(h);
+  if(!force&&c.taskHistDetailCache[k])return c.taskHistDetailCache[k];
+  c.taskHistDetailLoading=k;
+  try{
+    const qs=new URLSearchParams({task_id:String(h.task_id),task_kind:String(h.task_kind||"main")});
+    const r=await fetch("/api/tasks/detail?"+qs,{headers:authBearerHeaders()});
+    const d=await r.json();
+    if(!r.ok)throw new Error(typeof d.detail==="string"?d.detail:(d.error||r.statusText));
+    c.taskHistDetailCache[k]=d;
+    return d;
+  }catch(e){
+    showToastMsg("任务详情加载失败："+(e.message||e));
+    return null;
+  }finally{
+    if(c.taskHistDetailLoading===k)c.taskHistDetailLoading="";
+  }
+}
+async function openTaskHistModal(h){
+  if(!h||!h.task_id)return;
+  c.taskHistModalRow=h;
+  openPageOverlay("taskHistModal",()=>{c.taskHistModalOpen=true;});
+  if(!taskHistDetailOf(h))await loadTaskHistDetail(h);
+}
+function closeTaskHistModal(){
+  c.taskHistModalOpen=false;
+  c.taskHistModalRow=null;
+}
+function taskMetaLabel(key){
+  return taskFieldLabel(key);
+}
+function taskHistDetailCounts(h){
+  const d=taskHistDetailOf(h);
+  if(!d)return null;
+  return{
+    fixed:(d.snapshot_fixed_rows||[]).length,
+    open:(d.snapshot_open_rows||[]).length,
+    tools:(d.tool_outputs||[]).length,
+    steps:(d.steps||[]).length,
+  };
+}
 function setCurrentMainTaskFromHistory(h){
   if(!h||!h.task_id)return;
   const tid=String(h.task_id).trim();
@@ -3146,6 +3516,160 @@ const chatTopKpi=computed(()=>{
 });
 const chatCurrentSubtask=computed(()=>{const t=c.curTask;if(!t||!t.steps||!t.steps.length)return"（尚无子步骤）";const run=t.steps.filter(s=>(s.status||"")==="running");if(run.length)return run[run.length-1].step_name||"执行中";const last=t.steps[t.steps.length-1];return last?(last.step_name+" · "+(last.status||"")):"—"});
 function persistChatPrefs(){try{localStorage.setItem("sba_chat_prefs",JSON.stringify({model:c.model,agentId:c.agentId,deepThink:c.deepThink,webSearch:c.webSearch,ragPrefetch:c.ragPrefetch,readComments:c.readComments,chatPrefs:c.chatPrefs}))}catch(_){}}
+function applyChatWarmupStatus(d){
+  if(!d||typeof d!=='object')return;
+  c.chatWarmup.ready=!!d.ready;
+  c.chatWarmup.warming=!!d.warming;
+  c.chatWarmup.toolsTotal=Number(d.tools_total||0);
+  c.chatWarmup.elapsedMs=Number(d.elapsed_ms||0);
+  c.chatWarmup.phases=(d.phases&&typeof d.phases==='object')?{...d.phases}:{};
+  c.chatWarmup.error=String(d.error||'');
+  const tc=d.tools_cached||{};
+  c.chatWarmup.readCommentsCached=!!tc.read_comments;
+  if(c.chatWarmup.warming||c.chatWarmup.loading)startWarmupPoll();
+  else if(c.chatWarmup.ready)stopWarmupPoll();
+  maybeFinishChatConnect();
+}
+let _chatConnectDoneTimer=null;
+function beginChatConnect(){
+  if(c.chatWarmup.ready&&!c.chatWarmup.warming&&!c.chatWarmup.loading&&!c.platformHealthLoading&&c.platformHealth&&c.platformHealth.ready)return;
+  c.chatConnect.active=true;
+  c.chatConnect.doneFlash=false;
+  if(_chatConnectDoneTimer){clearTimeout(_chatConnectDoneTimer);_chatConnectDoneTimer=null;}
+}
+function finishChatConnect(){
+  if(!c.chatConnect.active)return;
+  c.chatConnect.doneFlash=true;
+  if(_chatConnectDoneTimer)clearTimeout(_chatConnectDoneTimer);
+  _chatConnectDoneTimer=setTimeout(()=>{
+    c.chatConnect.active=false;
+    c.chatConnect.doneFlash=false;
+    _chatConnectDoneTimer=null;
+  },1800);
+}
+function maybeFinishChatConnect(){
+  if(!c.chatConnect.active||c.chatConnect.doneFlash)return;
+  const warmOk=!!c.chatWarmup.ready&&!c.chatWarmup.warming&&!c.chatWarmup.loading;
+  const healthOk=!c.platformHealthLoading&&(!!(c.platformHealth&&c.platformHealth.ready)||!!c.platformHealth);
+  if(warmOk&&healthOk)finishChatConnect();
+}
+let _warmupPollTimer=null;
+function stopWarmupPoll(){
+  if(_warmupPollTimer){clearInterval(_warmupPollTimer);_warmupPollTimer=null;}
+}
+function startWarmupPoll(){
+  if(_warmupPollTimer)return;
+  _warmupPollTimer=setInterval(async ()=>{
+    if(page.value!=='chat'){stopWarmupPoll();return;}
+    try{
+      const q=new URLSearchParams({
+        read_comments:c.readComments?'true':'false',
+        include_rag:c.ragPrefetch?'true':'false',
+        wait:'false',
+        force:'false',
+      });
+      const r=await fetch('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()});
+      const d=await r.json().catch(()=>({}));
+      applyChatWarmupStatus(d);
+      if(!c.chatWarmup.warming&&c.chatWarmup.ready)stopWarmupPoll();
+    }catch(_){}
+  },700);
+}
+const CHAT_CONNECT_STEPS=[
+  {phase:'langgraph',label:'编排引擎',needsRag:false},
+  {phase:'tools_mcp',label:'MCP',needsRag:false},
+  {phase:'rag_milvus',label:'RAG',needsRag:true},
+  {phase:'rag_embedder',label:'RAG 嵌入',needsRag:true,after:'rag_milvus'},
+  {phase:'llm',label:'LLM',needsRag:false,isHealth:true},
+];
+const chatConnectVisible=computed(()=>!!c.chatConnect.active);
+const chatConnectClass=computed(()=>c.chatConnect.doneFlash?'cc-done':'cc-loading');
+const chatConnectLabel=computed(()=>{
+  if(c.chatConnect.doneFlash)return'连接完成';
+  const phases=c.chatWarmup.phases||{};
+  const warming=!!(c.chatWarmup.warming||c.chatWarmup.loading);
+  if(!c.chatWarmup.ready||warming){
+    for(const step of CHAT_CONNECT_STEPS){
+      if(step.needsRag&&!c.ragPrefetch)continue;
+      if(step.isHealth)continue;
+      if(step.after&&phases[step.after]&&!phases[step.after].ok)continue;
+      const ph=phases[step.phase];
+      if(!ph||ph.ok!==true)return'连接 '+step.label;
+    }
+    return'连接中';
+  }
+  if(c.platformHealthLoading||!(c.platformHealth&&c.platformHealth.ready))return'连接 LLM';
+  return'连接中';
+});
+/** 后台/阻塞预热 MCP 工具、LangGraph、可选 RAG（未发问题前即可调用） */
+async function requestChatWarmup(opts={}){
+  const readComments=!!(opts.readComments!=null?opts.readComments:c.readComments);
+  const includeRag=opts.includeRag!==false&&!!c.ragPrefetch;
+  const wait=!!opts.wait;
+  const force=!!opts.force;
+  if(c.chatWarmup.warming&&!wait&&!force)return null;
+  c.chatWarmup.loading=true;
+  try{
+    const q=new URLSearchParams({
+      read_comments:readComments?'true':'false',
+      include_rag:includeRag?'true':'false',
+      force:force?'true':'false',
+      wait:wait?'true':'false',
+    });
+    const r=await fetch('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()});
+    const d=await r.json().catch(()=>({}));
+    applyChatWarmupStatus(d);
+    return d;
+  }catch(e){
+    console.warn('[SBA chat warmup]',e);
+    return null;
+  }finally{
+    c.chatWarmup.loading=false;
+  }
+}
+async function ensureChatWarmupBeforeSend(){
+  const needComments=!!c.readComments;
+  const maxWaitMs=12000;
+  const withCap=(p)=>Promise.race([
+    p,
+    new Promise((resolve)=>setTimeout(()=>resolve(null),maxWaitMs)),
+  ]);
+  if(!c.chatWarmup.ready){
+    await withCap(requestChatWarmup({wait:true,readComments:needComments,includeRag:!!c.ragPrefetch}));
+    return;
+  }
+  if(needComments&&!c.chatWarmup.readCommentsCached){
+    await withCap(requestChatWarmup({wait:true,readComments:true,includeRag:!!c.ragPrefetch}));
+  }
+}
+/** 应用挂载后后台预热，不阻塞首屏（与切到 chat 页逻辑一致） */
+function kickoffChatWarmup(){
+  requestChatWarmup({wait:false}).catch(()=>{});
+}
+/** 后台拉取会话上下文，补全任务轨与 memoryMeta（不切换 sid、不阻塞首屏） */
+async function prefetchChatSessionContext(sid){
+  if(!sid||sid==="temp"||c.chatStreaming)return;
+  try{
+    const r=await fetch("/api/chat/sessions/"+encodeURIComponent(sid),{headers:authBearerHeaders()});
+    if(!r.ok)return;
+    const d=await r.json();
+    const srvHist=Array.isArray(d.main_task_history)?d.main_task_history:[];
+    if(srvHist.length>(c.mainTaskHistory||[]).length){
+      c.mainTaskHistory=filterChatSessionMainHistory(srvHist);
+    }else if(!srvHist.length&&c.msgs.length){
+      rebuildMainTaskHistoryFromMsgs();
+    }
+    if(d.cur_task&&!c.curTask)c.curTask=normalizeCurTask(d.cur_task);
+    if(d.memory_meta&&typeof d.memory_meta==="object")c.memoryMeta=d.memory_meta;
+    const serverMsgs=Array.isArray(d.messages)?d.messages:[];
+    if(!c.msgs.length&&serverMsgs.length){
+      c.msgs=serverMsgs.map(normalizeChatMsg);
+      if(!c.mainTaskHistory.length&&c.msgs.length)rebuildMainTaskHistoryFromMsgs();
+    }
+  }catch(e){
+    console.warn("[SBA chat session prefetch]",e);
+  }
+}
 function chatCtxPct(s){
   const est=Number(s&&s.context_tokens_est)||0;
   const maxTok=Number(c.chatPrefs&&c.chatPrefs.contextMaxTokens)||128000;
@@ -3174,9 +3698,8 @@ function persistChatLocalCache(){
 }
 async function persistChatSession(){
   if(!c.sid||c.sid==="temp")return;
-  if(!(c.mainTaskHistory||[]).length&&c.msgs.length)rebuildMainTaskHistoryFromMsgs();
   else if(c.msgs.length)rebuildMainTaskHistoryFromMsgs();
-  c.mainTaskHistory=dedupeMainTaskHistoryList(c.mainTaskHistory||[]);
+  c.mainTaskHistory=filterChatSessionMainHistory(c.mainTaskHistory||[]);
   const payload={messages:c.msgs,cur_task:c.curTask,main_task_history:c.mainTaskHistory,prefs:{model:c.model,agentId:c.agentId,deepThink:c.deepThink,webSearch:c.webSearch,ragPrefetch:c.ragPrefetch,readComments:c.readComments,chatPrefs:c.chatPrefs}};
   persistChatLocalCache();
   try{
@@ -3194,7 +3717,7 @@ async function loadChatSession(sid){
     const d=await r.json();
     c.msgs=(d.messages||[]).map(normalizeChatMsg);
     c.curTask=normalizeCurTask(d.cur_task);
-    c.mainTaskHistory=dedupeMainTaskHistoryList(Array.isArray(d.main_task_history)?d.main_task_history:[]);
+    c.mainTaskHistory=filterChatSessionMainHistory(Array.isArray(d.main_task_history)?d.main_task_history:[]);
     c.memoryMeta=d.memory_meta&&typeof d.memory_meta==='object'?d.memory_meta:null;
     if(!c.mainTaskHistory.length)c.msgs.length&&rebuildMainTaskHistoryFromMsgs();
     else if(c.msgs.length)rebuildMainTaskHistoryFromMsgs();
@@ -3255,24 +3778,50 @@ function upFile(e){const files=Array.from(e.target.files||[]);files.forEach(f=>c
 let mediaRecorder=null,audioChunks=[];
 function toggleVoice(){if(c.recording){if(mediaRecorder){mediaRecorder.stop()}c.recording=false;return}if(!navigator.mediaDevices){alert('浏览器不支持麦克风')}navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{mediaRecorder=new MediaRecorder(stream);audioChunks=[];mediaRecorder.ondataavailable=e=>audioChunks.push(e.data);mediaRecorder.onstop=()=>{const blob=new Blob(audioChunks,{type:'audio/webm'});const fd=new FormData();fd.append('audio',blob,'voice.webm');fetch('/api/chat/voice-to-text',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{if(d.text){c.inp=d.text;autoResize()}}).catch(e=>console.error(e))};mediaRecorder.start();c.recording=true}).catch(e=>alert('麦克风权限被拒绝'))}
 function autoResize(){}
+const SLASH_SUGGEST_LIMIT=12;
 const slashOpen=ref(false);
 const slashItems=ref([]);
 const slashIdx=ref(0);
+const slashTotal=ref(0);
 let slashTimer=null;
+function scoreSlashItem(pref,item){
+  const p=String(pref||"").trim().toLowerCase();
+  const cmd=String(item&&item.command||"").toLowerCase();
+  const name=String(item&&item.name||"").toLowerCase();
+  const desc=String(item&&item.description||"").toLowerCase();
+  const body=(cmd+" "+name+" "+desc).trim();
+  if(!p||p==="/")return 1000;
+  const q=p.startsWith("/")?p:p.startsWith("/")?p:"/"+p.replace(/^\//,"");
+  const bare=q.replace(/^\//,"");
+  if(!bare)return 1000;
+  if(cmd===q||cmd===("/"+bare))return 2000;
+  if(cmd.startsWith(q)||cmd.startsWith("/"+bare))return 1800-bare.length;
+  if(name.startsWith(bare))return 1500;
+  const initials=name.split(/[\s\-_/]+/).filter(Boolean).map(w=>w[0]||"").join("");
+  if(initials&&initials.startsWith(bare))return 1300;
+  if(cmd.includes(bare))return 1100;
+  if(name.includes(bare))return 900;
+  if(desc.includes(bare))return 700;
+  if(body.includes(bare))return 500;
+  return 0;
+}
 async function refreshSlashRaw(){
   const raw=(c.inp||"");
   const line=(raw.split("\n").pop())||"";
   const m=line.match(/(?:^|\s)(\/[^\s]*)$/);
-  if(!m){slashOpen.value=false;return}
+  if(!m){slashOpen.value=false;slashTotal.value=0;return}
   const pref=(m[1]||"/").trim();
-  if(!pref.startsWith("/")){slashOpen.value=false;return}
+  if(!pref.startsWith("/")){slashOpen.value=false;slashTotal.value=0;return}
   try{
-    const r=await fetch("/api/chat/slash-suggest?prefix="+encodeURIComponent(pref));
+    const r=await fetch("/api/chat/slash-suggest?prefix="+encodeURIComponent(pref)+"&limit="+SLASH_SUGGEST_LIMIT);
     const d=await r.json();
-    slashItems.value=d.suggestions||[];
+    const all=Array.isArray(d.suggestions)?d.suggestions:[];
+    slashTotal.value=Number(d.total||all.length||0);
+    const ranked=all.slice().sort((a,b)=>scoreSlashItem(pref,b)-scoreSlashItem(pref,a)||String(a.command||"").localeCompare(String(b.command||"")));
+    slashItems.value=ranked.slice(0,SLASH_SUGGEST_LIMIT);
     slashIdx.value=0;
     slashOpen.value=true;
-  }catch(_){slashOpen.value=false}
+  }catch(_){slashOpen.value=false;slashTotal.value=0}
 }
 function refreshSlash(){clearTimeout(slashTimer);slashTimer=setTimeout(refreshSlashRaw,90)}
 function onChatInput(){autoResize();refreshSlash()}
@@ -3380,8 +3929,18 @@ function _streamIntervalMs(backlog){
   return base;
 }
 function _clearAnswerPlaceholder(aiMsg){
-  if(!aiMsg.content||/^(正在连接|正在准备|正在分析任务|正在生成回答|正在识别意图|正在编排)/.test(String(aiMsg.content||'')))
+  if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
     aiMsg.content='';
+}
+/** 流式占位文案：可被 pipeline_progress / orchestration_node_start 等真实 SSE 覆盖 */
+function isChatLoadingPlaceholder(text){
+  return /^(正在连接|正在准备|正在分析任务|正在生成回答|正在识别意图|正在延续|正在检索|正在编排)/.test(String(text||''));
+}
+function setChatProgressText(aiMsg,stage,fallback){
+  const st=String(stage||fallback||'').trim();
+  if(!st)return;
+  if(isChatLoadingPlaceholder(aiMsg.content)||!aiMsg.content)
+    aiMsg.content=st.slice(0,48)+'…';
 }
 function hasActiveMainTaskInHistory(){
   const hist=Array.isArray(c.mainTaskHistory)?c.mainTaskHistory:[];
@@ -3396,6 +3955,8 @@ function shouldKeepCurTaskOnSimpleIntent(){
     const st=String(c.curTask.status||'').toLowerCase();
     if(!['closed','resolved'].includes(st))return true;
   }
+  if((c.mainTaskHistory||[]).some(t=>t&&String(t.task_id||'').startsWith('task_')&&String(t.task_kind||'main')!=='simple'))
+    return true;
   return hasActiveMainTaskInHistory();
 }
 function _splitGraphemes(text){
@@ -3603,7 +4164,7 @@ function applyChatHitlFromSse(d,aiMsg){
   _syncHitlFormFromPayload(kind,inner);
   c.chatHitlResumeMsg=aiMsg||c.chatHitlResumeMsg;
   if(aiMsg){
-    aiMsg.content=(aiMsg.content&& !/^(正在连接|正在准备|正在编排)/.test(aiMsg.content))
+    aiMsg.content=(aiMsg.content&& !isChatLoadingPlaceholder(aiMsg.content))
       ?aiMsg.content
       :("⏸ "+h.title+"："+h.message);
     aiMsg._answerStreaming=false;
@@ -3680,7 +4241,7 @@ function chatPauseStreaming(){
   if(m&&m.role==="assistant"){
     m._answerStreaming=false;
     flushAnswerStream(m);
-    if(!m.content||/^(正在连接|正在准备|正在编排)/.test(String(m.content||"")))
+    if(!m.content||isChatLoadingPlaceholder(m.content))
       m.content="[已暂停] 流式输出已中断，可调整输入后重新发送";
   }
   if(c.curTask)c.curTask.status="paused";
@@ -3765,12 +4326,13 @@ function chatPrimaryActionDisabled(){
 
 function ingestChatSseEvent(curEvent,d,aiMsg){
   if(curEvent==='stream_error'){
-    const msg=String(d.message||d.detail||'流式请求失败');
-    aiMsg.content='[错误] '+msg;
+    // 禁止直出原始报错；后端应已改走 answer 事件，此处仅兜底等待分析结果
+    aiMsg._errorAnalyzing=true;
+    if(!aiMsg.content||/^(正在连接|正在准备)/.test(String(aiMsg.content||'')))
+      aiMsg.content='正在分析错误原因，请稍候…';
     aiMsg._answerStreaming=false;
     flushAnswerStream(aiMsg);
     clearChatHitl();
-    showToastMsg(msg);
     return;
   }
   if(curEvent==='hitl_required'||curEvent==='graph_interrupt'){
@@ -3778,20 +4340,64 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     return;
   }
   if(curEvent==='stream_open'){
-    if(!aiMsg.content||aiMsg.content==='正在连接…')
-      aiMsg.content=d.orchestration_engine==='langgraph'?'正在编排任务…':'正在准备…';
+    const stage=String(d.stage||'').trim();
+    if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content)){
+      if(d.orchestration_engine==='langgraph')
+        setChatProgressText(aiMsg,stage?'正在编排：'+stage:'','正在编排：启动');
+      else if(d.orchestration_engine==='pending'||stage.indexOf('会话')>=0)
+        aiMsg.content='正在准备会话上下文…';
+      else if(stage)setChatProgressText(aiMsg,stage,'正在准备');
+      else aiMsg.content='正在准备…';
+    }
     aiMsg.orchestrationEngine=d.orchestration_engine||'';
     if(d.orchestration_engine==='langgraph'&&Array.isArray(d.expected_orchestration_phases))
       aiMsg.expectedOrchestrationPhases=d.expected_orchestration_phases.slice();
   }else if(curEvent==='pipeline_progress'){
     aiMsg.pipelineStage=d.stage||d.detail||'';
-    if(d.stage&&(!aiMsg.content||/^(正在连接|正在准备)/.test(String(aiMsg.content||''))))
-      aiMsg.content=String(d.stage).slice(0,48)+'…';
+    setChatProgressText(aiMsg,d.stage||d.detail,'');
+    const tidPg=String(d.task_id||aiMsg.task_id||'').trim();
+    if(tidPg){
+      if(!c.curTask||String(c.curTask.task_id||'')!==tidPg){
+        const histRow=(c.mainTaskHistory||[]).find(t=>t.task_id===tidPg);
+        c.curTask={
+          task_id:tidPg,
+          user_query:String(histRow&&histRow.user_query||'').trim(),
+          query_summary:String(histRow&&histRow.query_summary||'').slice(0,80),
+          status:'executing',task_kind:'main',sub_plan_id:'',steps:[],
+          result_msg_index:null,result_status:'pending',
+        };
+      }
+      aiMsg.task_id=tidPg;
+      c.taskExpanded=true;
+      aiMsg.thinkingExpanded=true;
+    }
   }else if(curEvent==='orchestration_node_start'){
     aiMsg.pipelineStage=d.progress_hint||d.step_name||'';
     if(!Array.isArray(aiMsg.thinking))aiMsg.thinking=[];
-    if(!aiMsg.content||/^(正在连接|正在准备)/.test(String(aiMsg.content||'')))
-      aiMsg.content='正在编排：'+(d.step_name||'节点')+'…';
+    const orchStub={
+      step_id:d.step_id||('orch_'+Date.now()),
+      step_name:d.step_name||d.stage||'编排节点',
+      status:'running',phase:d.phase||'orchestration',step_lane:'orchestration',
+      node_kind:'orchestration',sub_plan_id:d.sub_plan_id||'',sub_index:d.sub_index||0,
+      think_text:'',description:d.progress_hint||'',duration_ms:0,io_expanded:false,expanded:false,
+    };
+    aiMsg.thinking.push(orchStub);
+    const tid=String(d.task_id||aiMsg.task_id||'').trim();
+    if(tid){
+      if(!c.curTask||String(c.curTask.task_id||'')!==tid){
+        c.curTask={
+          task_id:tid,user_query:'',query_summary:'',status:'executing',task_kind:'main',
+          sub_plan_id:d.sub_plan_id||'',steps:[],result_msg_index:null,result_status:'pending',
+        };
+      }
+      c.curTask.steps=c.curTask.steps||[];
+      const dup=c.curTask.steps.find(x=>x.step_id===orchStub.step_id);
+      if(!dup)c.curTask.steps.push({...orchStub});
+      aiMsg.task_id=tid;
+      c.taskExpanded=true;
+      aiMsg.thinkingExpanded=true;
+    }
+    setChatProgressText(aiMsg,'正在编排：'+(d.step_name||d.stage||'节点'),'');
   }else if(curEvent==='thinking_start'){
     if(d.ephemeral){
       if(!aiMsg.content||aiMsg.content==='正在连接…')aiMsg.content='正在识别意图…';
@@ -3816,7 +4422,7 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     aiMsg.task_id=d.task_id;
     aiMsg.result_status='pending';
     aiMsg.execTaskKind=d.task_kind||'main';
-    if(!aiMsg.content||/^(正在连接|正在准备|正在识别意图)/.test(String(aiMsg.content||'')))
+    if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
       aiMsg.content='正在分析任务…';
     upsertMainTaskHistory({
       task_id:d.task_id,
@@ -3828,7 +4434,31 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
       result_status:'pending',
     });
     if(d.rewrite_snapshot&&c.curTask)c.curTask.rewrite_snapshot=d.rewrite_snapshot;
-    c.taskExpanded=false;
+    if((d.task_kind||'main')!=='simple'&&d.persist_main_task!==false){
+      c.taskExpanded=true;
+      aiMsg.thinkingExpanded=true;
+      if(tid&&(!aiMsg.thinking||!aiMsg.thinking.length)){
+        aiMsg.thinking=[{
+          step_id:'orch_boot_'+tid.slice(-8),
+          step_name:'主任务编排',
+          status:'running',
+          phase:'execute_prep',
+          node_kind:'orchestration',
+          step_lane:'orchestration',
+          sub_plan_id:d.sub_plan_id||'',
+          sub_index:0,
+          think_text:'',
+          description:'',
+          duration_ms:0,
+          io_expanded:true,
+          expanded:true,
+        }];
+        if(c.curTask){
+          c.curTask.steps=Array.isArray(c.curTask.steps)?c.curTask.steps.slice():[];
+          if(!c.curTask.steps.length)c.curTask.steps=aiMsg.thinking.slice();
+        }
+      }
+    }
   }else if(curEvent==='context_memory'){
     if(d&&typeof d==='object'){
       c.memoryMeta=Object.assign({},c.memoryMeta||{},d);
@@ -3846,7 +4476,7 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     if(d.is_simple||kind==='simple'||d.persist_main_task===false){
       if(!shouldKeepCurTaskOnSimpleIntent())c.curTask=null;
       if(!d.task_id&&!shouldKeepCurTaskOnSimpleIntent())aiMsg.task_id='';
-      if(!aiMsg.content||/^(正在连接|正在准备|正在分析任务|正在编排)/.test(String(aiMsg.content||'')))
+      if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
         aiMsg.content='正在生成回答…';
     }else{
       const tid=String(d.task_id||'').trim();
@@ -3908,6 +4538,11 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
         });
       }
       if(d.rewrite_snapshot&&c.curTask)c.curTask.rewrite_snapshot=d.rewrite_snapshot;
+      if(isContinue)setChatProgressText(aiMsg,(d.needs_rag||c.ragPrefetch)?'正在检索知识库':'正在延续主任务','');
+      if(kind==='main'&&!d.is_simple){
+        c.taskExpanded=true;
+        aiMsg.thinkingExpanded=true;
+      }
     }
   }else if(curEvent==='step_think_start'){
     const ph=String(d.phase||'').toLowerCase();
@@ -3939,23 +4574,39 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
   }else if(curEvent==='thought_step_start'){
     const ph=String(d.phase||"").toLowerCase();
     const nk=d.node_kind||'sub_task';
+    const isOrch=nk==='orchestration'||ph==='execute_prep'||ph==='intent'||d.step_lane==='orchestration';
     const ioOpen=!!(c.chatPrefs&&c.chatPrefs.showToolIo)||nk==='tool_call';
     const stub={
       step_id:d.step_id,step_name:d.step_name,status:d.status||'running',
       duration_ms:0,description:d.description||'',think_text:d.think_text||'',
       input_text:d.input_text||'',output_text:d.output_text||'',
       sub_plan_id:d.sub_plan_id,sub_index:d.sub_index,operation:d.operation,target:d.target,
-      node_kind:nk,llm_powered:!!d.llm_powered,think_kind:d.think_kind||'',
-      phase:d.phase||'',io_expanded:ioOpen,expanded:ioOpen,
+      node_kind:isOrch?'orchestration':nk,llm_powered:!!d.llm_powered,think_kind:d.think_kind||'',
+      phase:d.phase||'',step_lane:isOrch?'orchestration':(d.step_lane||'execution'),
+      io_expanded:ioOpen,expanded:ioOpen||isOrch,
     };
     const arr=aiMsg.thinking||[];
     const ex=arr.find(x=>x.step_id===d.step_id);
     if(ex)Object.assign(ex,stub);else arr.push(stub);
     aiMsg.thinking=arr;
-    if(c.curTask){
+    const tid=String(d.task_id||aiMsg.task_id||(c.curTask&&c.curTask.task_id)||'').trim();
+    if(tid){
+      aiMsg.task_id=tid;
+      if(!c.curTask||String(c.curTask.task_id||'')!==tid){
+        const histRow=(c.mainTaskHistory||[]).find(t=>t.task_id===tid);
+        c.curTask={
+          task_id:tid,
+          user_query:String(histRow&&histRow.user_query||'').trim(),
+          query_summary:String(histRow&&histRow.query_summary||'').slice(0,80),
+          status:'executing',task_kind:'main',sub_plan_id:d.sub_plan_id||'',steps:[],
+          result_msg_index:null,result_status:'pending',
+        };
+      }
       c.curTask.steps=c.curTask.steps||[];
-      const ex2=c.curTask.steps.find(x=>x.step_id===d.step_id);
-      if(ex2)Object.assign(ex2,stub);else c.curTask.steps.push({...stub})
+      const ex2=c.curTask.steps.find(x=>x.step_id===stub.step_id);
+      if(ex2)Object.assign(ex2,stub);else c.curTask.steps.push({...stub});
+      c.taskExpanded=true;
+      aiMsg.thinkingExpanded=true;
     }
   }else if(curEvent==='thought_step_end'){
     if(!Array.isArray(aiMsg.thinking))aiMsg.thinking=[];
@@ -3993,6 +4644,25 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
       chatScrollBottom();
     }
     if(c.curTask)c.curTask.status='executing';
+  }else if(curEvent==='rag_prefetch_slices'){
+    const slices=Array.isArray(d.slices)?d.slices:[];
+    if(slices.length){
+      aiMsg.ragPrefetchSlices=slices;
+      if(c.curTask)c.curTask.rag_prefetch_slices=slices;
+      const arr=Array.isArray(aiMsg.thinking)?aiMsg.thinking:[];
+      const hit=arr.find(x=>x&&String(x.phase||"").toLowerCase()==="rag_decision");
+      if(hit){
+        hit.rag_slices=slices;
+        try{
+          const j=parseStepJson(hit.output_text);
+          if(j&&typeof j==="object"){
+            j.rag_slices=slices;
+            j.prefetch_count=slices.length;
+            hit.output_text=JSON.stringify(j);
+          }
+        }catch(_){}
+      }
+    }
   }else if(curEvent==='prefetch_segment_start'){
     aiMsg.prefetchSegmentLabel=d.label||'检索预取';
     if(c.curTask)c.curTask.status='executing';
@@ -4023,6 +4693,10 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
       aiMsg.content='正在生成回答…';
   }else if(curEvent==='answer_start'){
     aiMsg._answerStreaming=true;
+    if(d.error_analyzed){
+      aiMsg._errorAnalyzing=false;
+      resetAnswerStream(aiMsg);
+    }
     if(d.stream_mode)aiMsg._answerStreamMode=d.stream_mode;
   }else if(curEvent==='answer_delta'){
     if(d.content&&d.kind!=='preface'){
@@ -4038,7 +4712,7 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
       answer_stream_done:true,
     };
     if(d.search_results)aiMsg.span.search_results=d.search_results;
-    if(/^(正在连接|正在准备|正在分析任务|正在编排|正在生成回答|正在识别意图)/.test(String(aiMsg.content||'')))aiMsg.content='';
+    if(isChatLoadingPlaceholder(aiMsg.content))aiMsg.content='';
   }else if(curEvent==='task_completed'){
     aiMsg.span={...aiMsg.span,...d};
     if(Array.isArray(d.tool_outputs))aiMsg.span.tool_outputs=d.tool_outputs;
@@ -4063,9 +4737,11 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
         });
       }
       syncMainTaskResultIndex(aiMsg);
-    }else{
+    }else if(!shouldKeepCurTaskOnSimpleIntent()){
       c.curTask=null;
       aiMsg.task_id='';
+      aiMsg.execTaskKind='simple';
+    }else{
       aiMsg.execTaskKind='simple';
     }
     if(c.chatPrefs.autoFoldChain)aiMsg.thinkingExpanded=false;
@@ -4078,7 +4754,7 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     if(d.silent)return;
     const loadingMcp=d.discovery_stage==="loading_mcp";
     if(loadingMcp){
-      if(!aiMsg.content||/^(正在连接|正在准备|正在编排)/.test(String(aiMsg.content||'')))
+      if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
         aiMsg.content="正在绑定执行工具…";
     }
   }else if(curEvent==='span_update'){
@@ -4184,6 +4860,7 @@ function toggleTaskHistMenu(){
   _detachTaskHistMenuCloser();
   if(next){
     c.taskStatusMenuOpen=false;
+    refreshChatSessionTaskHistory();
     nextTick(()=>{
       _taskHistMenuDocCloser=(ev)=>{
         const wrap=document.querySelector(".chat-task-hist-wrap");
@@ -4273,8 +4950,9 @@ async function chatSend(){
   clearRewriteCountdown();
   c.rewriteConfirmOpen=false;
   await ensureChatSessionForSend(msg);
+  await ensureChatWarmupBeforeSend();
   c.inp='';
-  const aiMsg={role:'assistant',content:'正在连接…',thinking:[],span:{},thinkingExpanded:true,execTaskKind:'pending',execSubPlanId:'',task_id:'',result_status:'pending',_answerStreamBuf:'',rewriteSnapshot:null};
+  const aiMsg={role:'assistant',content:'正在连接服务端…',thinking:[],span:{},thinkingExpanded:true,execTaskKind:'pending',execSubPlanId:'',task_id:'',result_status:'pending',_answerStreamBuf:'',rewriteSnapshot:null};
   resetAnswerStream(aiMsg);
   c.msgs.push({role:'user',content:msg});c.msgs.push(aiMsg);c.summaryPatches=[];c.th='';
   c.chatHitlResumeMsg=aiMsg;
@@ -4291,7 +4969,7 @@ async function chatSend(){
     const ap=getAgentProfilePayload();
     if(ap)payload.agent_profile=ap;
     await runRepeatableChatSseStream(payload,aiMsg,{signal:ac.signal});
-  }catch(e){if(e&&e.name==="AbortError"){aiMsg.content=(aiMsg.content||"")+"\n\n[已暂停]";if(c.curTask)c.curTask.status="paused"}else{aiMsg.content='请求失败: '+(e.message||e)}}
+  }catch(e){if(e&&e.name==="AbortError"){aiMsg.content=(aiMsg.content||"")+"\n\n[已暂停]";if(c.curTask)c.curTask.status="paused"}else{aiMsg.content='请求未能完成，请检查网络连接或稍后重试'}}
   finally{c.chatStreaming=false;c.chatAbort=null;c.th='';syncMainTaskResultIndex(aiMsg);scheduleChatPersist()}
 }
 function chatKeydown(e){
@@ -4952,7 +5630,15 @@ async function kbSaveFileMeta(){
 }
 function kbRowPv(f){if(f)openKbFileDetail(f);else kb.pv=""}
 async function kbRm(){if(kb.si<0)return;const f=kb.fs[kb.si];if(!f)return;await fetch('/api/doc/rag/delete',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:f.path})});ldKbS();ldKbF()}
-const mm=reactive({queue:[],qi:-1,busy:false});
+const mm=reactive({
+  queue:[],qi:-1,busy:false,
+  mode:"doc",
+  page:1,
+  columnBands:0,
+  columnBandSplit:true,
+  skipArrows:true,
+  fcResult:null,
+});
 const mmBrowse=reactive({show:false,stack:[],entries:[],picks:[],current:""});
 const mmFileInp=ref(null);
 const d=reactive({log:""});
@@ -5020,9 +5706,65 @@ async function mmIngestFiles(files,srcLabel){
   }
   if(ok)showToastMsg("已上传并入队 "+ok+" 个文件");
 }
+function mmFcApplyResult(res){
+  if(!res||!res.ok){mm.fcResult=null;return}
+  const geom=res.geometry_score||{};
+  mm.fcResult={
+    final_block_count:res.final_block_count,
+    overlap_ok:!!res.overlap_ok,
+    overlap_pair_count:geom.overlap_pair_count!=null?geom.overlap_pair_count:"?",
+    column_band_cuts:res.column_band_cuts||[],
+    overlay_url:res.overlay_url||"",
+    work_dir:res.work_dir||"",
+  };
+}
+async function docProcFlowchart(){
+  if(mm.busy)return;
+  if(!mm.queue.length){showToastMsg("请先将 PDF/图片加入队列");return}
+  mm.busy=true;
+  mm.fcResult=null;
+  const stamp=()=>new Date().toLocaleTimeString();
+  try{
+    docLogLine("["+stamp()+"] 流程图得分 "+mm.queue.length+" 个文件 …");
+    docLogLine("  参数: page="+mm.page+" column_bands="+mm.columnBands+" column_band_split="+mm.columnBandSplit);
+    const list=[...mm.queue];
+    for(let i=0;i<list.length;i++){
+      const it=list[i];
+      docLogLine("  ["+(i+1)+"/"+list.length+"] "+it.name);
+      try{
+        const body={
+          path:it.path,
+          page:mm.page,
+          column_bands:mm.columnBands,
+          column_band_split:mm.columnBandSplit,
+          skip_arrows:mm.skipArrows,
+        };
+        const r=await fetch("/api/doc/flowchart/score",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        const res=await r.json().catch(()=>({}));
+        if(!r.ok){
+          const det=res.detail;
+          const msg=typeof det==="string"?det:(Array.isArray(det)&&det[0]&&det[0].msg)||(det&&String(det))||r.statusText||"请求失败";
+          docLogLine("      → HTTP "+r.status+" "+msg);
+          continue;
+        }
+        if(!res.ok){
+          docLogLine("      → FAIL "+((res.error||"").slice(0,400)));
+          continue;
+        }
+        const geom=res.geometry_score||{};
+        const cuts=(res.column_band_cuts||[]).join(",");
+        docLogLine("      → OK 块数:"+res.final_block_count+" 重叠对:"+geom.overlap_pair_count+(cuts?" 切线y:"+cuts:""));
+        if(i===list.length-1)mmFcApplyResult(res);
+      }catch(e){docLogLine("      → 请求异常: "+(e.message||String(e)))}
+    }
+    docLogLine("["+stamp()+"] 流程图得分完成");
+    showToastMsg("流程图得分已跑完");
+  }finally{mm.busy=false}
+}
 async function docProc(){
   if(mm.busy)return;
   if(!mm.queue.length){showToastMsg("请先将文件加入队列");return}
+  if(mm.mode==="flowchart"){await docProcFlowchart();return}
   mm.busy=true;
   const stamp=()=>new Date().toLocaleTimeString();
   try{
@@ -5086,6 +5828,149 @@ async function ldAr(){
       st.ags[k].nodes=Array.isArray(n)?n.join(","):(typeof n==="string"?n:(st.ags[k].nodes||""));
     }
   }catch(_){}
+}
+function onWebreplayNavClick(){
+  if(navCollapsed.value){openWebreplaySec(wr.sec||"scripts");return}
+  webreplayOpen.value=!webreplayOpen.value;
+  try{localStorage.setItem("sba_webreplay_open",webreplayOpen.value?"1":"0")}catch(_){}
+}
+function openWebreplaySec(sec){
+  page.value="webreplay";
+  wr.sec=sec||"scripts";
+  webreplayOpen.value=true;
+  try{
+    localStorage.setItem("sba_webreplay_open","1");
+    localStorage.setItem("sba_webreplay_sec",wr.sec);
+  }catch(_){}
+  if(sec==="scripts")ldWrScripts();
+  if(sec==="bridge")ldWrBridge();
+}
+function wrHost(url){
+  try{return new URL(url).hostname}catch(_){return url||"—"}
+}
+function wrFmtTime(ts){
+  if(!ts)return "—";
+  try{
+    const d=new Date(ts);
+    return isNaN(d.getTime())?String(ts):d.toLocaleString();
+  }catch(_){return String(ts)}
+}
+function wrStepKindLabel(st){
+  const k=String(st&&st.kind||"");
+  if(k==="click")return "点击";
+  if(k==="input")return "输入";
+  if(k==="wait")return "等待";
+  return k||"—";
+}
+function wrStepDesc(st){
+  if(!st)return "—";
+  if(st.kind==="click"||st.kind==="input"){
+    const css=st.selector&&st.selector.css;
+    return (css?css.slice(0,72):"—")+(st.kind==="input"&&st.value?" · 值="+String(st.value).slice(0,24):"");
+  }
+  if(st.kind==="wait")return (st.reason||"fixed")+" "+(st.timeoutMs||0)+"ms";
+  return "—";
+}
+async function ldWrScripts(){
+  wr.loading=true;wr.err="";
+  try{
+    const r=await fetch("/api/webreplay/scripts",{headers:authBearerHeaders()});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"加载失败");
+    wr.scripts=d.scripts||[];
+    if(wr.selId){
+      const hit=wr.scripts.find(s=>s.id===wr.selId);
+      wr.selDetail=hit||null;
+      if(!hit)wr.selId="";
+    }
+  }catch(e){wr.err=e.message||String(e)}finally{wr.loading=false}
+}
+async function wrSelectScript(id){
+  wr.selId=id;wr.err="";
+  try{
+    const r=await fetch("/api/webreplay/scripts/"+encodeURIComponent(id),{headers:authBearerHeaders()});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"加载失败");
+    wr.selDetail=d.script||null;
+  }catch(e){wr.err=e.message||String(e)}
+}
+async function wrDeleteScript(id){
+  if(!id||!confirm("确定删除该脚本？"))return;
+  wr.err="";
+  try{
+    const r=await fetch("/api/webreplay/scripts/"+encodeURIComponent(id),{method:"DELETE",headers:authBearerHeaders()});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"删除失败");
+    showToastMsg("已删除");
+    wr.selId="";wr.selDetail=null;
+    await ldWrScripts();
+  }catch(e){wr.err=e.message||String(e)}
+}
+async function wrExportAll(){
+  try{
+    const r=await fetch("/api/webreplay/scripts/export/all",{headers:authBearerHeaders()});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"导出失败");
+    const blob=new Blob([JSON.stringify(d,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download="webreplay-scripts-"+Date.now()+".json";a.click();
+    URL.revokeObjectURL(url);
+    showToastMsg("已导出");
+  }catch(e){wr.err=e.message||String(e)}
+}
+function wrExportOne(script){
+  if(!script)return;
+  const blob=new Blob([JSON.stringify({scripts:[script]},null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=(script.name||"script")+".webreplay.json";a.click();
+  URL.revokeObjectURL(url);
+}
+async function wrImportFile(ev){
+  const f=ev.target&&ev.target.files&&ev.target.files[0];
+  ev.target.value="";
+  if(!f)return;
+  wr.err="";
+  try{
+    const text=await f.text();
+    const payload=JSON.parse(text);
+    const scripts=Array.isArray(payload)?payload:(payload.scripts||[]);
+    const r=await fetch("/api/webreplay/scripts/import",{method:"POST",headers:authJsonHeaders(),body:JSON.stringify({scripts})});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"导入失败");
+    showToastMsg("已导入 "+(d.imported||0)+" 条");
+    await ldWrScripts();
+  }catch(e){wr.err=e.message||String(e)}
+}
+async function ldWrBridge(){
+  wr.err="";
+  try{
+    const r=await fetch("/api/webreplay/bridge",{headers:authBearerHeaders()});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"加载失败");
+    wr.bridge.extensionId=d.extensionId||"";
+    wr.bridge.origin=d.origin||(typeof location!=="undefined"?location.origin:"");
+  }catch(e){wr.err=e.message||String(e)}
+}
+async function wrSaveBridge(){
+  wr.err="";
+  try{
+    const r=await fetch("/api/webreplay/bridge",{method:"POST",headers:authJsonHeaders(),body:JSON.stringify({
+      extensionId:(wr.bridge.extensionId||"").trim(),
+      origin:(typeof location!=="undefined"?location.origin:""),
+    })});
+    const d=await parseApiJson(r);
+    if(!r.ok)throw new Error(d.detail||"保存失败");
+    wr.bridge.extensionId=d.extensionId||"";
+    showToastMsg("扩展配置已保存");
+  }catch(e){wr.err=e.message||String(e)}
+}
+async function wrCopyMcpSnippet(){
+  try{
+    await navigator.clipboard.writeText(wrMcpSnippet.value);
+    showToastMsg("已复制 MCP 示例");
+  }catch(_){prompt("复制以下内容",wrMcpSnippet.value)}
 }
 function onSettingsNavClick(){
   if(navCollapsed.value){openSettingsSec(isAdmin.value?(st.sec||"agent"):"link");return}
@@ -5228,6 +6113,9 @@ const INTERNAL_IAG_TABS=[
 const IAG_LAB={
   summary_prompt:"摘要前置说明 summary_prompt",system_prompt:"模型人设 system_prompt",rules:"摘要规则 rules",
   output_template:"成品 Markdown 模板 output_template",file_naming_rule:"文件命名 file_naming_rule",
+  comments_viewpoint_prompt:"评论观点提炼 comments_viewpoint_prompt",comments_viewpoint_rules:"评论观点规则 comments_viewpoint_rules",
+  comments_user_prompt:"评论用户补充 comments_user_prompt",comments_summary_mode:"评论并入摘要模式 comments_summary_mode",
+  comments_section_template:"【评论区】MD 片段 comments_section_template",
   article_polish_prompt:"原文抛光提示词",article_system_prompt:"原文 System",article_rules:"原文规则",
   framework_business_layer:"业务层框架",framework_rules_layer:"规则层框架",framework_constraints_layer:"约束层",
   framework_response_format_layer:"响应格式层",framework_optimization_layer:"优化层",
@@ -5251,6 +6139,11 @@ const IAG_HELP={
   rules:"对摘要内容的硬性要求：要点、语言、禁忌、格式等。",
   output_template:"最终落盘的 Markdown 骨架。花括号里是「变量」，右侧预览用演示数据替换，便于检查版式。",
   file_naming_rule:"命名策略说明或带占位符的模板。运行时为 月-日-{doc_title}_{类型}分析.md；首层用 {link_title}，成品名用 {doc_title}（AI 摘要首行）。",
+  comments_viewpoint_prompt:"独立于原文整理的评论 Agent 指令。占位符 {article_context}、{comments}；输出 Markdown 观点表 + 总览。与 system_prompt 共用角色层。",
+  comments_viewpoint_rules:"评论观点提炼的硬性规则（表头、派别、AI分析维度等）。",
+  comments_user_prompt:"跑单时用户对评论分析的额外说明（与原文 user_prompt 分离）。",
+  comments_summary_mode:"dual=两次 LLM（观点表→摘要）；merged=评论原文一次并入摘要输入。MD 均不放全量 raw 评论。",
+  comments_section_template:"嵌在 AI 分析章节之后的【评论区】Markdown 骨架。占位符：{comments_analysis}（观点表 LLM 输出）、{comments_file_link}、{comments_section}（整段）。也可在 output_template 内写 {comments_section} 控制位置。",
   article_polish_prompt:"原文整理步骤中发给模型的指令。",
   article_system_prompt:"原文整理步骤的系统人设。",
   article_rules:"原文整理的规则文本。",
@@ -5294,8 +6187,17 @@ const IAG_SUMMARY_PREVIEW_VARS=[
   {tok:"{link_title}",title:"链接首层标题",desc:"从帖子/视频页面 title 或链接解析，处理早期即可展示。",sample:"淘天集团AI Agent岗位笔记"},
   {tok:"{doc_title}",title:"AI 摘要标题",desc:"从摘要首行/标题行提取，用于导出文件名（月-日-文档名_类型分析.md）。",sample:"这份内容是淘天集团AI_Agent岗位的"},
   {tok:"{text}",title:"正文占位",desc:"与 summary_prompt 联用时注入正文。",sample:"（演示正文片段）"},
-  {tok:"{article}",title:"整理后正文",desc:"原文整理链路输出（若引用）。",sample:"（演示整理段落）"}
+  {tok:"{article}",title:"整理后正文",desc:"原文整理链路输出（若引用）。",sample:"（演示整理段落）"},
+  {tok:"{comments_section}",title:"评论区整段",desc:"由 comments_section_template 渲染，通常接在 AI 分析后。",sample:"## 【评论区】\n\n| 层次 | 角色 | 观点原句 | … |"},
+  {tok:"{comments_analysis}",title:"评论观点表",desc:"评论观点 Agent 输出（表格+总览）。",sample:"| 提问 | 网友 | 怎么玩 agent | … |"},
+  {tok:"{comments_file_link}",title:"评论原文链接",desc:"独立评论文件的 Markdown 链接行。",sample:"评论原文已单独保存，请查看: [comments_xxx.md](./comments_xxx.md)"}
 ];
+const IAG_COMMENTS_SECTION_VARS=[
+  {tok:"{comments_analysis}",title:"观点表+总览",desc:"LLM 按层次（提问/作者回复/派别）提炼后的正文。",sample:"| 层次 | 角色/派别 | 观点原句 | 精简解释 | AI分析 |"},
+  {tok:"{comments_file_link}",title:"原文文件",desc:"全量评论落盘后的引用行。",sample:"评论原文已单独保存，请查看: [comments.md](./comments.md)"},
+  {tok:"{comments_section}",title:"整段渲染结果",desc:"本模板渲染后的完整【评论区】块。",sample:"## 【评论区】\n…"}
+];
+const iagCommentsSectionPreview=computed(()=>iagFormatPreview((iag.fields&&iag.fields.comments_section_template)||""));
 const IAG_SUMMARY_BODY_TOKENS=[
   {tok:"{text}",title:"正文"},
   {tok:"{transcript}",title:"转写"},
@@ -5316,7 +6218,10 @@ function iagFormatPreview(str){
     "{doc_title}":"这份内容是淘天集团AI_Agent岗位的",
     "{article}":"（演示整理后正文）",
     "{text}":"（演示正文片段）",
-    "{raw_text}":"（演示 raw_text）"
+    "{raw_text}":"（演示 raw_text）",
+    "{comments_analysis}":"| 层次 | 角色/派别 | 观点原句 | 精简解释 | AI分析 |\n| 提问 | 网友 | 怎么玩 agent | 求学习路径 | 建议 0→1 vibe coding + tradeoff |\n| 作者回复 | 博主 | 蓝区不用 langchain | 一线面经 | 可采纳 |",
+    "{comments_file_link}":"评论原文已单独保存，请查看: [comments_demo.md](./comments_demo.md)",
+    "{comments_section}":"## 【评论区】\n\n（演示观点表）"
   };
   Object.keys(map).forEach(function(k){out=out.split(k).join(map[k]);});
   return out;
@@ -5324,7 +6229,7 @@ function iagFormatPreview(str){
 function iagHelpText(k){return IAG_HELP[k]||""}
 const iagRawMode=ref(false);
 const IAG_KEY_ORDER={
-  summary_agent:["summary_prompt","system_prompt","rules","output_template","file_naming_rule"],
+  summary_agent:["summary_prompt","system_prompt","rules","comments_viewpoint_prompt","comments_viewpoint_rules","comments_user_prompt","comments_summary_mode","comments_section_template","output_template","file_naming_rule"],
   doc_standardize_agent:["article_polish_prompt","article_system_prompt","article_rules"],
   qa_orchestrator_agent:["framework_business_layer","framework_rules_layer","framework_constraints_layer","framework_response_format_layer","framework_optimization_layer"],
   ops_agent:["ops_system_prompt"],
@@ -5347,7 +6252,7 @@ const iagTplPreviewFn=computed(()=>iagFormatPreview((iag.fields&&iag.fields.file
 function iagGenericFieldKeys(){
   const diagramKeys=iagDiagramStyleKeys().map(m=>m.key);
   if(iag.tab==="summary_agent"&&!iagRawMode.value){
-    var hide={summary_prompt:1,system_prompt:1,rules:1,output_template:1,file_naming_rule:1};
+    var hide={summary_prompt:1,system_prompt:1,rules:1,comments_viewpoint_prompt:1,comments_viewpoint_rules:1,comments_user_prompt:1,comments_summary_mode:1,comments_section_template:1,output_template:1,file_naming_rule:1};
     return iagFieldKeys().filter(function(k){return!hide[k]&&!diagramKeys.includes(k);});
   }
   if(iag.tab==="longpage_diagram_legend_agent"){
@@ -5400,7 +6305,7 @@ async function saveIag(){
 
 /* ══ P7 OPS ══ */
 const op=reactive({
-  sub:"ag",
+  sub:"sp",
   ov:{tc:0,sc:0,fc:0,ac:0,tp:[]},
   ev:[],
   st:{llm_ready:false,model:"",model_backup:"",memory_count:0,report_count:0},
@@ -5421,19 +6326,76 @@ const op=reactive({
   spanTasks:[],
   spanExceptions:[],
   spanTaskId:"",
-  spanDetail:null
+  spanDetail:null,
+  spanStepSel:null,
+  spanLoading:false,
+  spanStats:{task_count:0,step_count:0,total_ms:0,failed_count:0,tokens:0}
 });
+function opSpanStatusClass(st){
+  const s=(st||"").toLowerCase();
+  if(s==="completed"||s==="ok")return "ok";
+  if(s==="failed"||s==="timeout"||s==="error")return "err";
+  if(s==="running"||s==="pending"||s==="created")return "run";
+  if(s==="warn"||s==="warning")return "warn";
+  return "";
+}
+function opSpanMaxMs(spans){
+  const arr=spans||[];
+  let m=1;
+  for(const s of arr)m=Math.max(m,Number(s&&s.duration_ms)||0);
+  return m;
+}
+function opSpanBarPct(span,maxMs){
+  const m=maxMs||1;
+  return Math.min(100,Math.round((Number(span&&span.duration_ms)||0)/m*100));
+}
+function opFmtJson(v){
+  if(v==null||v==="")return "—";
+  if(typeof v==="string")return v.length>12000?v.slice(0,12000)+"\n…(已截断)":v;
+  try{return JSON.stringify(v,null,2);}catch(_){return String(v);}
+}
+function opPickSpanStep(s){op.spanStepSel=s;}
+function opSpanTypeLabel(t){
+  const m={retrieval:"检索",llm_call:"LLM",tool_call:"工具",api_call:"API",summary:"摘要",reasoning:"推理"};
+  return m[t]||t||"—";
+}
+function opComputeSpanStats(){
+  const tasks=op.spanTasks||[];
+  let steps=0,totalMs=0,failed=0,tokens=0;
+  for(const t of tasks){
+    totalMs+=Number(t.total_duration_ms)||0;
+    tokens+=Number(t.total_token_count)||0;
+    failed+=Number(t.failed_steps)||0;
+    steps+=Number(t.total_steps)||0;
+  }
+  op.spanStats={task_count:tasks.length,step_count:steps,total_ms:totalMs,failed_count:failed,tokens};
+}
 async function ldOpSpans(){
+  op.err="";
+  op.spanLoading=true;
   try{
     const r=await fetch("/api/ops/spans/tasks?limit=80");
     const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||d.error||"加载 SPAN 任务失败");
     op.spanTasks=d.tasks||[];
-  }catch(e){op.err=e.message||String(e)}
+    opComputeSpanStats();
+    if(op.spanTasks.length){
+      const keep=op.spanTaskId&&op.spanTasks.some(t=>t.task_id===op.spanTaskId);
+      if(!keep)await opLoadSpanTask(op.spanTasks[0].task_id);
+    }else{
+      op.spanTaskId="";op.spanDetail=null;op.spanStepSel=null;
+    }
+  }catch(e){
+    op.err=e.message||String(e);
+    op.spanTasks=[];
+    opComputeSpanStats();
+  }finally{op.spanLoading=false;}
 }
 async function ldOpSpanExceptions(){
   try{
     const r=await fetch("/api/ops/spans/exceptions?limit=100");
     const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||d.error||"加载异常 SPAN 失败");
     op.spanExceptions=d.items||[];
   }catch(e){op.err=e.message||String(e)}
 }
@@ -5441,12 +6403,19 @@ async function opLoadSpanTask(taskId){
   const tid=(taskId||"").trim();
   if(!tid)return;
   op.spanTaskId=tid;
+  op.spanLoading=true;
   try{
     const r=await fetch("/api/ops/spans/tasks/"+encodeURIComponent(tid));
     const d=await r.json();
-    if(!r.ok)throw new Error(d.detail||"加载失败");
+    if(!r.ok)throw new Error(d.detail||d.error||"加载失败");
     op.spanDetail=d;
-  }catch(e){op.err=e.message||String(e)}
+    const spans=d.spans||[];
+    op.spanStepSel=spans.length?spans[0]:null;
+  }catch(e){op.err=e.message||String(e);op.spanDetail=null;op.spanStepSel=null;}
+  finally{op.spanLoading=false;}
+}
+async function ldOpSpansAll(){
+  await Promise.all([ldOpSpans(),ldOpSpanExceptions()]);
 }
 async function ldOp(){
   try{
@@ -5532,6 +6501,9 @@ async function opAnalyzeLogs(useLlm){
 
 watch(v,()=>{try{localStorage.setItem('sba_link_prefs',JSON.stringify({wf:v.wf,fs:v.fs,fp:v.fp,html:v.html,subtitle:v.subtitle,cookies:v.cookies,pr:v.pr}))}catch(_){}},{deep:true});
 // 页面切换后的数据加载
+watch(()=>c.readComments,(v)=>{
+  if(v)requestChatWarmup({wait:false,readComments:true}).catch(()=>{});
+});
 watch(page,(p)=>{
   try{
     if(!isAuthenticated.value && REQUIRES_AUTH_PAGES.includes(p)){
@@ -5555,7 +6527,7 @@ watch(page,(p)=>{
       ldSkills();ldBuiltinTools();ldMcpCfg();ldMcpVendors();ldDiagramStyles();
       nextTick(()=>setupOrchSectionSpy());
     }else if(orchSecObs){orchSecObs.disconnect();orchSecObs=null;}
-    if(p==='chat'){refreshSlash();loadPlatformHealth(false);}
+    if(p==='chat'){refreshSlash();beginChatConnect();loadPlatformHealth(false);requestChatWarmup({wait:false}).catch(()=>{});}
     if(p==='rag'){kbLoadImportHistory();ldKbLibs();ldKbMetaOpts();ldKbS();ldKbF();ldKbConn();kbLoadRecallVocab();}
     if(p==='agpz'){ldApzCatalog().then(async()=>{await syncApzTemplateToCurrentAgent();});}
     if(p==='iag'){ldIag();}
@@ -5565,7 +6537,12 @@ watch(page,(p)=>{
       if(st.sec==='im')ldImPlatforms();
     }
     if(p==='profile'){syncProfFromAuth();ldUserPortrait();}
-    if(p==='ops'){ldOp();ldOpAg();if(op.sub==='ph')ldOpHealth(false);if(op.sub==='sp'){ldOpSpans();ldOpSpanExceptions()}}
+    if(p==='tasks'){scheduleTaskRegistryReload();}
+    if(p==='ops'){
+      ldOp();ldOpAg();
+      if(op.sub==='ph')ldOpHealth(false);
+      if(op.sub==='sp')ldOpSpansAll();
+    }
   }catch(err){
     console.error('[SBA watch(page) load]',err);
     revealRuntimeFault('页面数据加载失败',err&&(err.message||err));
@@ -5589,7 +6566,7 @@ onMounted(async()=>{
   const isLoginPage = currentPath === '/login.html' || currentPath.endsWith('/login.html');
   
   const pathPage=currentPath.replace(/^\//,'').split('/')[0];
-  const allMenuItemsBoot=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'}];
+  const allMenuItemsBoot=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
   const wantPage=pathPage&&allMenuItemsBoot.some(m=>m.key===pathPage)?pathPage:'';
   
   // 如果在登录页，不显示遮罩
@@ -5603,12 +6580,14 @@ onMounted(async()=>{
     if(e.state&&e.state.page)target=e.state.page;
     else{
       const path=window.location.pathname.replace(/^\//,'').split('/')[0];
-      const allMenuItems=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'}];
+      const allMenuItems=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
       if(path&&allMenuItems.some(m=>m.key===path))target=path;
     }
     if(!target)return;
-    if(guardPageSwitch(target))page.value=target;
-    else if(target!=='video')page.value='video';
+    if(guardPageSwitch(target)){
+      page.value=target;
+      if(target==='webreplay')openWebreplaySec(wr.sec||'scripts');
+    }else if(target!=='video')page.value='video';
   });
   
   // 仅有 token、无 sba_user 时从服务端补全（避免 AI 问答等页被鉴权遮罩挡死）
@@ -5656,6 +6635,7 @@ onMounted(async()=>{
       page.value=wantPage;
       if(!openTabs.value.includes(wantPage))openTabs.value=openTabs.value.concat([wantPage]);
       if(wantPage==='chat'&&c.chatPanelTab!=='config')c.chatPanelTab='room';
+      if(wantPage==='webreplay')openWebreplaySec(wr.sec||'scripts');
     }else if(wantPage!=='video'){
       page.value='video';
       if(history.replaceState)history.replaceState({page:'video'},'','/video');
@@ -5667,6 +6647,7 @@ onMounted(async()=>{
   loadUiPrefs();
   const linkPrefs=safeJsonParse(localStorage.getItem('sba_link_prefs'),null);
   if(linkPrefs&&typeof linkPrefs==='object')Object.assign(v,linkPrefs);
+  await ldLinkPipelinePrefs();
   
   // 加载用户数据
   await ldAuthUser();
@@ -5728,11 +6709,14 @@ onMounted(async()=>{
     try{localStorage.removeItem("sba_chat_local_v1")}catch(_){}
   }
   loadPlatformHealth(false);
+  kickoffChatWarmup();
+  if(page.value==='chat')beginChatConnect();
+  if(c.sid)prefetchChatSessionContext(c.sid);
   resetNavIslandTimer();
   bumpModalLayer();
   window.addEventListener("keydown",(ev)=>{
     if(ev.key!=="Escape")return;
-    if(skillImport.show||kbImportMeta.show||kbBrowse.show||mmBrowse.show||modalOut.show||modalArtifact.show||showHist.value||chatExpandOpen.value){
+    if(skillImport.show||kbImportMeta.show||kbBrowse.show||mmBrowse.show||modalOut.show||modalArtifact.show||showHist.value||chatExpandOpen.value||c.taskHistModalOpen){
       ev.preventDefault();
       closeAllPageOverlays();
     }
@@ -5745,20 +6729,20 @@ onMounted(async()=>{
     bindNavIslandScroll(document.querySelector('.chat-config-scroll'));
   });
 });
-return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,
-  v,vec,videoSubTab,subForm,subList,subDigest,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,pauseSubscription,resumeSubscription,deleteSubscription,renderSubDigestMd,taskQueue,logFocusId,outDirInp,toast,modalOut,modalArtifact,logs,logRowClass,startProc,clrV,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,
+return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,
+  v,vec,videoSubTab,subForm,subList,subDigest,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,pauseSubscription,resumeSubscription,deleteSubscription,renderSubDigestMd,taskQueue,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,outDirInp,toast,modalOut,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,
   showHist,openHistPanel,ht,hs,ldHist,restartTask,stopTask,moveTask,deleteTask,clearCompleted,regenerateHtml,
   histLogPanel,openHistLogs,closeHistLogPanel,histLogSourceLabel,
-  ldOpSpans,ldOpSpanExceptions,opLoadSpanTask,
+  ldOpSpans,ldOpSpanExceptions,ldOpSpansAll,opLoadSpanTask,opSpanStatusClass,opSpanMaxMs,opSpanBarPct,opFmtJson,opPickSpanStep,opSpanTypeLabel,
   o,ldNodes,skills,skillsFiltered,skillCmdDraft,saveSkillCommand,saveAllSkillCommands,importProjectSkillsBatch,retagAllSkillsBoard,sk,skillImport,openSkillImport,closeSkillImport,orchSkillAttachActive,skillAttachKindLabel,selectSkillAttachment,orchToolSearch,orchBoardTab,orchBoardByCategory,orchBoardFilteredItems,orchBoardTotalCount,orchBoardOpenItem,builtinTools,mcpDiscovered,mcpDiscoveredFiltered,mcpEnabledListFiltered,mcpByServer,mcpVendors,mcpMarketOpen,mcpEnabledList,mcpServerKeys,ldMcpVendors,insertMcpVendorMerge,addMcpFromMarket,openMcpServerConfig,saveMcpServerConfigFromRail,removeMcpServer,orchStage,orchRail,orchFlowDisplay,orchFlowPanStart,orchFlowPanMove,orchFlowPanEnd,resetOrchRailView,fitOrchFlowToViewport,Math,closeOrchRail,openOrchFullscreen,dockOrchFromFullscreen,selectOrchBuiltin,selectOrchMcpServer,selectOrchMcpTool,selectOrchSkill,openSkillDiff,onSkillVersionClick,clearSkillDiff,refreshSkillFlow,onOrchRailTabChange,onOrchDetailTabChange,orchRailTabIsFlow,diagramStyleFields,ldDiagramStyles,iagDiagramStyleKeys,iagDiagramStyleLabel,iagDiagramStyleHint,resetIagDiagramStyle,mcpConfigEditText,mcpFeishuForm,mcpDiscKey,orchToggle,isOrchOn,setOrchOn,orchTocActive,scrollOrchTo,orchDetailToc,orchDetailTocActive,scrollOrchDetailTo,orchDiffStats,orchDiffDisplay,skillAliasCn,mcpAliasCn,skillDescParts,skillCardSummary,skillCardTags,mcpSyncMsg,mcpJsonText,mcpPlaceholder,ldBuiltinTools,ldMcpCfg,saveMcpCfg,mcpSyncPull,ldSkills,importSkillForm,onSkillFile,onSkillFolder,delSkill,orchSubTabs,switchOrchSubTab,
   chatSbCollapsed,toggleChatSb,
-  c,cs,filteredCs,chatSessionTitle,chatTopKpi,chatMainTaskHistory,chatCurrentSubtask,chatGroupedSubPlans,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,mainTaskCardLabel,execCardLabel,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,setCurrentMainTaskFromHistory,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,regenerateAt,collectMsg,readMsg,slashOpen,slashItems,slashIdx,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,
+  c,cs,filteredCs,chatSessionTitle,chatTopKpi,chatMainTaskHistory,taskHistDisplayCount,refreshChatSessionTaskHistory,chatConnectVisible,chatConnectClass,chatConnectLabel,taskRegistryKindLabel:taskRegistryKindLabel,taskRegistryKindClass:taskRegistryKindClass,openRegistryTask,openTaskHistModal,closeTaskHistModal,taskHistModalDetail,taskHistModalLoading,loadTaskHistDetail,taskHistDetailOf,taskHistDetailCounts,taskFieldLabel,taskFieldDisplayValue,taskStepTypeLabel,taskMetaLabel,taskHistDetailKey,preloadTaskHistDetails,chatCurrentSubtask,chatGroupedSubPlans,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,isRagDecisionStep,extractRagSlicesFromStep,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,mainTaskCardLabel,execCardLabel,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,setCurrentMainTaskFromHistory,loadTaskRegistry,scheduleTaskRegistryReload,setTaskHistKindFilter,setTaskHistSort,syncTaskToMysql,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,regenerateAt,collectMsg,readMsg,slashOpen,slashItems,slashIdx,slashTotal,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,
   apz,ldApzCatalog,selectApzTemplate,ldApzCurrent,ldApzHist,loadApzRevision,saveApzTemplate,newApzCustom,useApzInChat,deactivateApzCustom,
   kb,kbImportMeta,kbImportBtnLabel,kbMilvusStatusText,kbMilvusStatusColor,ldKbS,ldKbF,ldKbMetaOpts,ldKbConn,kbSetConnectionParams,kbProbeConnection,kbRetryConnection,kbConnFmtTs,kbResetConnection,kbToggleConnDetail,kbSyncChunkCounts,kbRestoreCatalog,kbRm,ldKbLibs,onKbLibChange,promptCreateKbLib,deleteKbLib,saveKbLibCfg,kbLoadRecallVocab,kbImportInterviewFolder,kbFolderInp,kbPickLocalFolder,onKbLocalFolderPick,openKbBrowse,kbBrowse,kbBrowseEnter,kbBrowseUp,kbImportSelectedFiles,kbImportFolderHere,kbConfirmImportWithMeta,kbOpenImportMeta,openKbFileDetail,closeKbFileDetail,kbAutoFillMeta,kbSaveFileMeta,kbRowPv,
   d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,
   ca,caQ,caSel,caPickRow,caSv,caEx,
   st,agtKeys,ldGw,ldAr,ldNf,testConn,ndUpSert,ndPoolSv,ndUp,ndDn,ndDel,rtSv,ldWf,svWf,ldMd,svMd,svFs,ldFsCfg,aicf,ldAiCfg,svAiCfg,thcf,ldThCfg,svThCfg,ldTpl,svTpl,ldHtmlCfg,svHtmlCfg,ldImPlatforms,openImPlatform,closeImDetail,imPlatformIcon,imPlatformBadge,imDetailTitle,ldImFeishu,ldImFeishuMsgs,imFsSave,imFsTime,imFsWebhookUrl,imFsCopyWebhook,
-  INTERNAL_IAG_TABS,IAG_KEY_ORDER,IAG_SUMMARY_PREVIEW_VARS,iag,iagRawMode,ldIag,saveIag,iagLabel,iagHelpText,iagIsLongText,iagFieldKeys,iagGenericFieldKeys,iagTplPreviewMd,iagTplPreviewFn,insertIagToken,
+  INTERNAL_IAG_TABS,IAG_KEY_ORDER,IAG_SUMMARY_PREVIEW_VARS,IAG_COMMENTS_SECTION_VARS,iag,iagRawMode,ldIag,saveIag,iagLabel,iagHelpText,iagIsLongText,iagFieldKeys,iagGenericFieldKeys,iagTplPreviewMd,iagTplPreviewFn,iagCommentsSectionPreview,insertIagToken,
   op,ldOp,ldOpAg,ldOpHealth,opLoadReport,opAnalyzeLogs
 };
 }});
@@ -5773,6 +6757,16 @@ window.addEventListener('unhandledrejection',function(ev){
   if(r&&r.name==='AbortError')return;
   revealRuntimeFault('未处理的 Promise 异常',r&&(r.message||r));
 });
+document.addEventListener('click',function(ev){
+  const a=ev.target&&ev.target.closest&&ev.target.closest('a[href]');
+  if(!a||a.dataset.mdPreview==='0')return;
+  const href=(a.getAttribute('href')||'').trim();
+  if(!href.startsWith('/output/'))return;
+  const name=decodeURIComponent((href.split('/').pop()||'').split('?')[0]);
+  if(!/\.(md|txt|markdown|mdx)$/i.test(name))return;
+  ev.preventDefault();
+  window.open('/preview/md.html?file='+encodeURIComponent(name),'_blank','noopener');
+},true);
 try{
   _sbaApp.mount('#app');
   window.__SBA_VUE_MOUNTED__=true;

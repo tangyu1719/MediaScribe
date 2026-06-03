@@ -42,7 +42,12 @@ class ChatGraphRuntime:
     tools_meta: Dict[str, Any] = field(default_factory=dict)
     chat_lc_tools: List[Any] = field(default_factory=list)
     _pending_sse: List[str] = field(default_factory=list)
+    _live_sse_sink: Optional[Callable[[str], None]] = None
     last_hitl_event: Optional[Dict[str, Any]] = None
+
+    def set_live_sse_sink(self, sink: Optional[Callable[[str], None]]) -> None:
+        """Runner 注册：节点内 emit 时即时刷 SSE，避免 LangGraph 单节点阻塞导致 UI 假卡住。"""
+        self._live_sse_sink = sink
 
     def emit(self, event: str, data: Dict[str, Any]) -> None:
         payload = dict(data)
@@ -55,7 +60,14 @@ class ChatGraphRuntime:
                 "task_id": payload.get("task_id") or "",
                 "parent_status": payload.get("parent_status") or "",
             }
-        self._pending_sse.append(_sse(event, payload))
+        line = _sse(event, payload)
+        self._pending_sse.append(line)
+        sink = self._live_sse_sink
+        if sink is not None:
+            try:
+                sink(line)
+            except Exception:
+                pass
 
     def drain_sse(self) -> List[str]:
         out = list(self._pending_sse)

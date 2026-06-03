@@ -651,16 +651,363 @@ def _emit_thought_step(
     )
 
 
+async def fast_continue_main_to_handoff(
+    state: Dict[str, Any],
+    *,
+    runtime: ChatGraphRuntime,
+    message: str,
+    session_id: str,
+    trace_id: str,
+    task_id: str,
+    cur_task: Optional[Dict[str, Any]],
+    main_hist: Optional[List],
+) -> Dict[str, Any]:
+    """
+    延续主任务快径：规则意图 + 可选 RAG 预取，直接 handoff_execute。
+    跳过 LangGraph 多节点（改写/槽位/HITL），避免长时间停在「正在编排任务」。
+    """
+    from .chat_context_memory import (
+        enrich_snapshot_for_continue_main,
+        resolve_preserved_task_queries,
+        resolve_task_affiliation,
+        resolve_intent_mode,
+    )
+
+    tid = str(task_id or "").strip()
+    task_aff = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
+    runtime.emit(
+        "pipeline_progress",
+        {
+            "task_id": tid,
+            "stage": "延续主任务",
+            "progress": 8,
+            "detail": "规则续接，跳过重复编排",
+        },
+    )
+    runtime.emit(
+        "orchestration_node_start",
+        {
+            "trace_id": trace_id,
+            "task_id": tid,
+            "step_id": _new_id("step_"),
+            "step_name": "延续主任务",
+            "phase": "execute_prep",
+            "progress_hint": "正在执行：延续主任务",
+        },
+    )
+    intent_decision = dict(task_aff) if task_aff else resolve_intent_mode(
+        message, cur_task=cur_task, is_simple_heuristic=False, main_task_history=main_hist
+    )
+    if str(intent_decision.get("mode") or "") != "continue_main":
+        intent_decision = {
+            **intent_decision,
+            "mode": "continue_main",
+            "task_id": tid,
+            "reason": intent_decision.get("reason") or "快径：延续当前主任务",
+        }
+
+    snap = ai_chat._build_intent_rewrite_snapshot_for_message(message, runtime.link_ctx)
+    snap = _merge_intent_llm_into_snapshot(
+        snap,
+        intent_decision,
+        message=message,
+        rag_prefetch=bool(runtime.rag_prefetch),
+        web_search=bool(runtime.web_search),
+    )
+    snap = enrich_snapshot_for_continue_main(
+        snap,
+        cur_task=cur_task,
+        task_id=tid,
+        rag_prefetch=bool(runtime.rag_prefetch),
+    )
+    cont_uq, cont_qs = resolve_preserved_task_queries(
+        task_id=tid, cur_task=cur_task, fallback_message=""
+    )
+    needs_rag = bool(snap.get("needs_rag") or runtime.rag_prefetch)
+    intent_result_cn = intent_decision.get("reason") or "延续主任务，跳过重复编排"
+
+    cont_step_id = _new_id("step_")
+    runtime.emit(
+        "orchestration_node_start",
+        {
+            "task_id": tid,
+            "step_id": cont_step_id,
+            "step_name": "延续主任务",
+            "phase": "execute_prep",
+            "sub_plan_id": "",
+            "sub_index": int(state.get("group_seq") or 0),
+            "progress_hint": "正在执行：延续主任务",
+        },
+    )
+    runtime.emit(
+        "thought_step_start",
+        {
+            "trace_id": trace_id,
+            "task_id": tid,
+            "step_id": cont_step_id,
+            "step_name": "延续主任务",
+            "phase": "execute_prep",
+            "node_kind": "orchestration",
+            "step_lane": "orchestration",
+            "status": "running",
+        },
+    )
+    runtime.emit(
+        "thought_step_end",
+        {
+            "trace_id": trace_id,
+            "task_id": tid,
+            "step_id": cont_step_id,
+            "step_name": "延续主任务",
+            "phase": "execute_prep",
+            "node_kind": "orchestration",
+            "step_lane": "orchestration",
+            "status": "done",
+            "result_brief": intent_result_cn[:120],
+            "output_text": intent_result_cn,
+        },
+    )
+
+    runtime.emit(
+        "intent_resolved",
+        {
+            "task_id": tid,
+            "task_kind": "main",
+            "is_simple": False,
+            "persist_main_task": True,
+            "task_action": "continue_main",
+            "continue_main_task": True,
+            "rewrite_snapshot": snap,
+            "user_query": cont_uq or message,
+            "query_summary": cont_qs or (message or "")[:120],
+            "preserve_task_identity": bool(cont_uq),
+            "intent_reason": intent_decision.get("reason") or "",
+        },
+    )
+    runtime.emit(
+        "task_created",
+        {
+            "task_id": tid,
+            "session_id": session_id,
+            "user_query": cont_uq,
+            "status": PARENT_EXECUTING,
+            "task_kind": "main",
+            "persist_main_task": True,
+            "stage": "延续主任务",
+            "progress": 12,
+            "rewrite_snapshot": snap,
+            "query_summary": cont_qs,
+            "task_action": "continue",
+            "preserve_task_identity": True,
+        },
+    )
+    step_id = _new_id("step_")
+    runtime.emit(
+        "thought_step_start",
+        {
+            "trace_id": trace_id,
+            "task_id": tid,
+            "step_id": step_id,
+            "step_name": "延续主任务",
+            "step_type": "reasoning",
+            "status": SUB_ACTING,
+            "status_text": "执行中…",
+            "sub_index": 0,
+            "node_kind": "orchestration",
+            "phase": "execute_prep",
+            "step_lane": "orchestration",
+        },
+    )
+    runtime.emit(
+        "thought_step_end",
+        {
+            "trace_id": trace_id,
+            "task_id": tid,
+            "step_id": step_id,
+            "step_name": "延续主任务",
+            "status": SUB_DONE,
+            "status_text": "完成",
+            "result_brief": intent_result_cn[:120],
+            "phase": "execute_prep",
+            "node_kind": "orchestration",
+            "step_lane": "orchestration",
+        },
+    )
+    ai_chat._span_update(tid, status=PARENT_EXECUTING)
+
+    rag_slices: List[Dict[str, Any]] = []
+    rag_ctx = ""
+    rag_cite = ""
+    if needs_rag and tid:
+        from .web_search_plan import build_rag_retrieve_query
+
+        rag_query = build_rag_retrieve_query(
+            rewritten_query=str(
+                snap.get("rewritten_query") or message or ""
+            ).strip(),
+            original_query=message or "",
+            slot_snapshot={},
+            enhancement_snapshot={},
+        ).strip()
+        if rag_query:
+            runtime.emit(
+                "pipeline_progress",
+                {
+                    "task_id": tid,
+                    "stage": "知识库检索",
+                    "progress": 14,
+                    "detail": rag_query[:120],
+                },
+            )
+            runtime.emit(
+                "orchestration_node_start",
+                {
+                    "trace_id": trace_id,
+                    "task_id": tid,
+                    "step_id": _new_id("step_"),
+                    "step_name": "知识库检索",
+                    "phase": "rag_decision",
+                    "progress_hint": "正在执行：知识库检索",
+                },
+            )
+            t0 = time.perf_counter()
+            rag_hits, rag_err = await _safe_kb_search(
+                rag_query,
+                top_k=5,
+                span_ctx={"session_id": session_id, "task_id": tid, "trace_id": trace_id},
+            )
+            from .rag_slice_utils import build_rag_llm_blocks, normalize_rag_slices
+
+            rag_slices = normalize_rag_slices(rag_hits)
+            rag_ctx, rag_cite = build_rag_llm_blocks(
+                rag_slices,
+                prefetch_error=rag_err,
+                rag_query=rag_query,
+            )
+            if rag_slices:
+                runtime.emit(
+                    "rag_prefetch_slices",
+                    {
+                        "trace_id": trace_id,
+                        "task_id": tid,
+                        "rag_query": rag_query[:300],
+                        "slice_count": len(rag_slices),
+                        "slices": rag_slices,
+                        "prefetch_error": rag_err[:300] if rag_err else "",
+                    },
+                )
+            rag_step_id = _new_id("step_")
+            runtime.emit(
+                "thought_step_start",
+                {
+                    "trace_id": trace_id,
+                    "task_id": tid,
+                    "step_id": rag_step_id,
+                    "step_name": "知识库检索",
+                    "phase": "rag_decision",
+                    "node_kind": "orchestration",
+                    "step_lane": "prefetch",
+                    "status": "running",
+                },
+            )
+            runtime.emit(
+                "thought_step_end",
+                {
+                    "trace_id": trace_id,
+                    "task_id": tid,
+                    "step_id": rag_step_id,
+                    "step_name": "知识库检索",
+                    "phase": "rag_decision",
+                    "node_kind": "orchestration",
+                    "step_lane": "prefetch",
+                    "status": "done",
+                    "result_brief": f"命中 {len(rag_slices)} 条切片",
+                    "output_text": f"query={rag_query[:80]}; hits={len(rag_slices)}",
+                },
+            )
+            _LOG.info(
+                "[AI问答-LangGraph|chat_graph_nodes.fast_continue_main_to_handoff|session:%s|硬编执行|续接RAG] "
+                "hit_count=%s; cost_ms=%s",
+                session_id,
+                len(rag_slices),
+                int((time.perf_counter() - t0) * 1000),
+            )
+
+    runtime.emit("thinking_end", {"task_id": tid, "ephemeral": False, "bundle": {"task_kind": "main"}})
+    _LOG.info(
+        "[AI问答-LangGraph|chat_graph_nodes.fast_continue_main_to_handoff|session:%s|硬编执行|完成] "
+        "task_id=%s; needs_rag=%s",
+        session_id,
+        tid[:16],
+        needs_rag,
+    )
+    out = {
+        "orchestration_phase": PHASE_REACT,
+        "task_kind": "main",
+        "use_main_task": True,
+        "framework": "react",
+        "intent_passed": True,
+        "intent_rewrite_snapshot": snap,
+        "needs_rag": needs_rag,
+        "query_summary": cont_qs or str(snap.get("query_summary") or (message or "")[:120]),
+        "rewritten_query": str(snap.get("rewritten_query") or message or ""),
+        "task_id": tid,
+        "continue_main_task": True,
+        "graph_route": "handoff_execute",
+        "execution_done": False,
+        "react_round": 0,
+        "rag_slices": rag_slices,
+        "rag_context_block": rag_ctx,
+        "rag_citation_instruction": rag_cite,
+        "rag_prefetch_done": bool(needs_rag),
+        "intent_result_brief": intent_result_cn,
+    }
+    out.update(_sse_events_from_runtime(runtime))
+    return out
+
+
 async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
-    """意图识别：LLM 判定 简单直答 / 延续主任务 / 新开主任务（规则仅兜底）。"""
-    from .chat_context_memory import resolve_intent_mode, llm_resolve_intent_mode
+    """意图识别：先任务归属，再 LLM/规则判定 simple / 续接 / 新主任务。"""
+    from .chat_context_memory import (
+        resolve_intent_mode,
+        llm_resolve_intent_mode,
+        resolve_task_affiliation,
+        hydrate_client_task_context,
+    )
 
     runtime = _runtime_from_state_or_config(state, config)
     message = state.get("message") or runtime.message
     trace_id = state.get("trace_id") or runtime.trace_id
     session_id = state.get("session_id") or runtime.session_id
+    runtime.emit(
+        "pipeline_progress",
+        {
+            "task_id": str(state.get("task_id") or "").strip(),
+            "stage": "意图识别",
+            "progress": 6,
+            "detail": "判定 simple / 续接 / 新主任务",
+        },
+    )
+    _intent_tid = str(state.get("task_id") or "").strip()
+    if not _intent_tid and isinstance(state.get("client_cur_task"), dict):
+        _intent_tid = str(state["client_cur_task"].get("task_id") or "").strip()
+    runtime.emit(
+        "orchestration_node_start",
+        {
+            "task_id": _intent_tid,
+            "step_id": _new_id("step_"),
+            "step_name": "意图识别",
+            "phase": "intent",
+            "progress_hint": "正在执行：意图识别",
+        },
+    )
     cur_task = state.get("client_cur_task") if isinstance(state.get("client_cur_task"), dict) else None
     main_hist = state.get("client_main_task_history") if isinstance(state.get("client_main_task_history"), list) else []
+    cur_task, main_hist = hydrate_client_task_context(
+        session_id,
+        client_cur_task=cur_task,
+        client_main_task_history=main_hist,
+    )
 
     simple_heur = ai_chat._is_simple_intent(message)
     if not cur_task and not simple_heur:
@@ -669,7 +1016,19 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
 
     intent_decision: Dict[str, Any] = {}
     intent_llm_powered = False
-    if _orch_enabled(runtime, "intent_recognition"):
+    task_aff = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
+    from .chat_context_memory import peek_continue_main_intent
+
+    _skip_intent_llm = bool(task_aff) or peek_continue_main_intent(
+        message, cur_task=cur_task, main_task_history=main_hist
+    )
+    if task_aff:
+        intent_decision = dict(task_aff)
+    elif _skip_intent_llm:
+        intent_decision = resolve_intent_mode(
+            message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
+        )
+    elif _orch_enabled(runtime, "intent_recognition"):
         intent_decision = await llm_resolve_intent_mode(
             message,
             cur_task=cur_task,
@@ -687,6 +1046,10 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         intent_decision = resolve_intent_mode(
             message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
         )
+    # 任务归属优先于 LLM 误判的 simple/new_main（含已结案主任务续接）
+    task_aff_final = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
+    if task_aff_final:
+        intent_decision = {**intent_decision, **task_aff_final, "mode": "continue_main"}
     mode = intent_decision.get("mode") or "new_main"
     simple = mode == "simple"
     continue_main = mode == "continue_main"
@@ -705,6 +1068,7 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         _has_link_analysis_intent,
         _looks_like_continuation,
         _looks_like_task_recall,
+        _looks_like_task_resume,
         _looks_like_task_status_inquiry,
         _resolve_continue_task_id,
     )
@@ -713,6 +1077,7 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
     if tid_fix and (
         _looks_like_task_status_inquiry(message)
         or _looks_like_task_recall(message)
+        or _looks_like_task_resume(message)
         or _looks_like_continuation(message, cur_task)
     ):
         simple = False
@@ -736,6 +1101,9 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
                 if isinstance(h, dict) and str(h.get("task_id") or "") == rid:
                     cur_task = {**h, **cur_task}
                     break
+    task_id = (state.get("task_id") or intent_decision.get("task_id") or "").strip() or None
+    if continue_main and cur_task:
+        task_id = str(cur_task.get("task_id") or task_id or "").strip() or task_id
     use_main = mode in ("new_main", "continue_main")
     task_kind = "simple" if simple else "main"
     framework = "assistant" if simple else "react"
@@ -754,12 +1122,18 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         rag_prefetch=bool(runtime.rag_prefetch),
         web_search=bool(runtime.web_search),
     )
+    if continue_main:
+        from .chat_context_memory import enrich_snapshot_for_continue_main
+
+        snap = enrich_snapshot_for_continue_main(
+            snap,
+            cur_task=cur_task,
+            task_id=str(task_id or intent_decision.get("task_id") or ""),
+            rag_prefetch=bool(runtime.rag_prefetch),
+        )
     rewrite_state = snap.get("rewrite_state") or "rewrite_confirm"
     skip_confirm = rewrite_state == "rewrite_hold" or not _orch_enabled(runtime, "rewrite_confirm")
 
-    task_id = (state.get("task_id") or intent_decision.get("task_id") or "").strip() or None
-    if continue_main and cur_task:
-        task_id = str(cur_task.get("task_id") or task_id or "").strip() or task_id
     step_idx = int(state.get("step_idx") or 0) + 1
     sub_plan_id, group_seq = _next_step_group(state)
     step_id = _new_id("step_")
@@ -1041,6 +1415,7 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         "skip_rewrite_confirm": skip_confirm,
         "needs_rag": bool(snap.get("needs_rag")),
         "query_summary": str(snap.get("query_summary") or snap.get("task_summary") or (message or "")[:120]),
+        "rewritten_query": str(snap.get("rewritten_query") or message or ""),
         "task_id": task_id,
         "step_idx": step_idx,
         "group_seq": orch_emit.get("group_seq", group_seq),
@@ -1551,6 +1926,17 @@ async def node_rag_filter_confirm_ui(state: Dict[str, Any], config: RunnableConf
             **_sse_events_from_runtime(runtime),
         }
 
+    # 已确认过（含 resume 重入）：勿再次 interrupt / 推 hitl，避免表单弹两次
+    if state.get("rag_filter_confirmed"):
+        filt = state.get("rag_metadata_filter") if isinstance(state.get("rag_metadata_filter"), dict) else {}
+        return {
+            "rag_metadata_filter": filt,
+            "rag_filter_confirmed": True,
+            "orchestration_phase": PHASE_SLOT_CONFIRM,
+            "graph_route": "rag_decision",
+            **_sse_events_from_runtime(runtime),
+        }
+
     from .rag_recall_filter import propose_rag_filter_form
 
     query = (
@@ -1576,14 +1962,7 @@ async def node_rag_filter_confirm_ui(state: Dict[str, Any], config: RunnableConf
         "message": "请确认知识库元数据筛选条件（空=不筛）；确认后继续检索。",
         "ui": "form",
     }
-    runtime.emit(
-        "hitl_required",
-        {
-            "task_id": state.get("task_id") or "",
-            "hitl_kind": "rag_filter_confirm",
-            "payload": payload,
-        },
-    )
+    # 首次暂停由 runner 发 graph_interrupt；节点内不再 emit hitl_required，避免 resume 重入重复弹窗
     user = interrupt(payload)
     if not isinstance(user, dict):
         user = {"action": "confirm"}
@@ -1674,11 +2053,13 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
     )
 
     enhance = state.get("enhancement_snapshot") or {}
+    intent_snap = state.get("intent_rewrite_snapshot") or {}
     preset_kw: List[str] = []
     for src in (
         enhance.get("search_keyword_queries"),
         slot.get("retrieval_terms"),
-        (state.get("intent_rewrite_snapshot") or {}).get("keywords"),
+        intent_snap.get("keywords"),
+        intent_snap.get("query_keywords"),
     ):
         if isinstance(src, list):
             for x in src:
@@ -1686,31 +2067,38 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
                 if s and s not in preset_kw:
                     preset_kw.append(s)
 
-    # 意图增强已产出检索词时自动确认，避免 LangGraph interrupt 无前端 resume 导致卡在「意图增强」后
-    if needs and preset_kw:
+    # 已有检索词或 RAG 筛选已确认：自动走检索，不再弹「检索词确认」HITL
+    if needs and (preset_kw or state.get("rag_filter_confirmed")):
         slot = dict(slot)
-        slot["retrieval_terms"] = preset_kw[:12]
+        terms = list(preset_kw[:12])
+        if not terms:
+            for src in (intent_snap.get("query_keywords"), intent_snap.get("keywords")):
+                if isinstance(src, list):
+                    for x in src:
+                        s = str(x or "").strip()
+                        if s and s not in terms:
+                            terms.append(s)
+        if not terms:
+            q = str(
+                slot.get("rewritten_query") or state.get("rewritten_query") or state.get("message") or ""
+            ).strip()
+            if q:
+                terms = [q[:120]]
+        slot["retrieval_terms"] = terms
         _LOG.info(
             "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|跳过HITL] "
-            "auto_rag_confirm; keyword_count=%s",
+            "auto_rag_confirm; keyword_count=%s; rag_filter_confirmed=%s",
             session_id,
-            len(preset_kw),
+            len(terms),
+            bool(state.get("rag_filter_confirmed")),
         )
     elif needs:
         payload = {
             "kind": "rag_confirm",
             "query": slot.get("rewritten_query") or state.get("message"),
-            "keywords": slot.get("retrieval_terms") or [],
+            "keywords": slot.get("retrieval_terms") or preset_kw,
             "ui": "form",
         }
-        runtime.emit(
-            "hitl_required",
-            {
-                "task_id": state.get("task_id") or "",
-                "hitl_kind": "rag_confirm",
-                "payload": payload,
-            },
-        )
         user = interrupt(payload)
         if isinstance(user, dict) and str(user.get("action")).lower() == "pause":
             return {"paused": True, "graph_route": "paused", **_sse_events_from_runtime(runtime)}
@@ -1769,12 +2157,35 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
             (rag_err or "")[:120],
         )
 
+    from .rag_slice_utils import build_rag_llm_blocks, normalize_rag_slices
+
+    rag_slices = normalize_rag_slices(rag_hits)
+    rag_ctx_block, rag_cite_block = build_rag_llm_blocks(
+        rag_slices,
+        prefetch_error=rag_err,
+        rag_query=str(rag_query or ""),
+    )
+    if rag_slices:
+        runtime.emit(
+            "rag_prefetch_slices",
+            {
+                "trace_id": trace_id,
+                "task_id": task_id or "",
+                "rag_query": str(rag_query or "")[:300],
+                "slice_count": len(rag_slices),
+                "slices": rag_slices,
+                "prefetch_error": rag_err[:300] if rag_err else "",
+            },
+        )
+
     rag_out = {
         "needs_rag": needs,
         "rag_query": str(rag_query)[:300],
         "prefetch_count": len(rag_hits),
         "prefetch_error": rag_err[:300] if rag_err else "",
         "metadata_filter": meta_filt if needs else {},
+        "rag_slices": rag_slices,
+        "citation_instruction": rag_cite_block,
     }
     seq: Dict[str, Any] = {}
     # 无需知识库检索时不向前端推送「RAG 决策」步骤组（避免空 IO / 误导性绿点）
@@ -1799,24 +2210,15 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
             output_payload=rag_out,
             executed=True,
         )
-    rag_block: Optional[str] = None
-    if rag_hits:
-        lines = ["编排段知识库预检索（供执行段参考）："]
-        for idx, hit in enumerate(rag_hits[:5], start=1):
-            if isinstance(hit, dict):
-                title = hit.get("title") or hit.get("file") or hit.get("source") or f"片段{idx}"
-                snippet = hit.get("snippet") or hit.get("content") or hit.get("text") or ""
-                lines.append(f"{idx}. {title}")
-                if snippet:
-                    lines.append(f"   {str(snippet)[:400]}")
-        rag_block = "\n".join(lines)
-
     return {
         "orchestration_phase": PHASE_RAG_DECISION,
         "needs_rag": needs,
         "rag_confirmed": True,
         "slot_snapshot": slot,
-        "rag_context_block": rag_block or state.get("rag_context_block"),
+        "rag_slices": rag_slices,
+        "rag_citation_instruction": rag_cite_block,
+        "rag_context_block": rag_ctx_block or state.get("rag_context_block"),
+        "rag_prefetch_done": bool(needs),
         "graph_route": route,
         "group_seq": seq.get("group_seq"),
         "orch_chain": seq.get("orch_chain", []),
@@ -1875,8 +2277,78 @@ async def node_plan_detect(state: Dict[str, Any], config: RunnableConfig) -> Dic
 async def node_react_entry(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """进入执行段：编排收尾思考 + handoff（执行段再加载 MCP 并调用工具）。"""
     runtime = _runtime_from_state_or_config(state, config)
-    # 延续主任务：跳过「执行准备」步骤组，避免无意义步骤组 #1
+    trace_id = state.get("trace_id") or runtime.trace_id
+    task_id = str(state.get("task_id") or "").strip()
+    session_id = state.get("session_id") or runtime.session_id
+    # 延续主任务：跳过「执行准备」步骤组；但须补 RAG 预取（编排 rag_decision 未走）
     if str(state.get("graph_route") or "").strip() == "continue_execute":
+        rag_ctx = str(state.get("rag_context_block") or "")
+        rag_slices = state.get("rag_slices") if isinstance(state.get("rag_slices"), list) else []
+        needs_rag = bool(state.get("needs_rag") or runtime.rag_prefetch)
+        if needs_rag and task_id and not rag_slices:
+            from .web_search_plan import build_rag_retrieve_query
+
+            slot = state.get("slot_snapshot") or {}
+            enhance = state.get("enhancement_snapshot") or {}
+            intent_snap = state.get("intent_rewrite_snapshot") or {}
+            rag_query = build_rag_retrieve_query(
+                rewritten_query=str(
+                    intent_snap.get("rewritten_query")
+                    or state.get("rewritten_query")
+                    or state.get("message")
+                    or runtime.message
+                    or ""
+                ).strip(),
+                original_query=state.get("message") or runtime.message or "",
+                slot_snapshot=slot,
+                enhancement_snapshot=enhance,
+            ).strip()
+            if rag_query:
+                t0 = time.perf_counter()
+                rag_hits, rag_err = await _safe_kb_search(
+                    rag_query,
+                    top_k=5,
+                    span_ctx={"session_id": session_id, "task_id": task_id, "trace_id": trace_id},
+                )
+                from .rag_slice_utils import build_rag_llm_blocks, normalize_rag_slices
+
+                rag_slices = normalize_rag_slices(rag_hits)
+                rag_ctx, rag_cite = build_rag_llm_blocks(
+                    rag_slices,
+                    prefetch_error=rag_err,
+                    rag_query=rag_query,
+                )
+                if rag_slices:
+                    runtime.emit(
+                        "rag_prefetch_slices",
+                        {
+                            "trace_id": trace_id,
+                            "task_id": task_id,
+                            "rag_query": rag_query[:300],
+                            "slice_count": len(rag_slices),
+                            "slices": rag_slices,
+                            "prefetch_error": rag_err[:300] if rag_err else "",
+                        },
+                    )
+                _LOG.info(
+                    "[AI问答-LangGraph|chat_graph_nodes.node_react_entry|session:%s|硬编执行|续接RAG] "
+                    "hit_count=%s; cost_ms=%s; error=%s",
+                    session_id,
+                    len(rag_slices),
+                    int((time.perf_counter() - t0) * 1000),
+                    (rag_err or "")[:120],
+                )
+                return {
+                    "orchestration_phase": PHASE_REACT,
+                    "graph_route": "handoff_execute",
+                    "execution_done": False,
+                    "react_round": 0,
+                    "rag_slices": rag_slices,
+                    "rag_context_block": rag_ctx,
+                    "rag_citation_instruction": rag_cite,
+                    "needs_rag": True,
+                    **_sse_events_from_runtime(runtime),
+                }
         _LOG.info(
             "[AI问答-LangGraph|chat_graph_nodes.node_react_entry|session:%s|硬编执行|handoff] "
             "continue_main_skip_prep",
@@ -1887,6 +2359,9 @@ async def node_react_entry(state: Dict[str, Any], config: RunnableConfig) -> Dic
             "graph_route": "handoff_execute",
             "execution_done": False,
             "react_round": 0,
+            "rag_slices": rag_slices,
+            "rag_context_block": rag_ctx,
+            "needs_rag": needs_rag,
             **_sse_events_from_runtime(runtime),
         }
     plan_steps = list(state.get("plan_steps") or [])

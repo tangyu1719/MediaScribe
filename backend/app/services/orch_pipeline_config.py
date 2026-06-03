@@ -25,7 +25,8 @@ DEFAULT_ORCH_PIPELINE_NODES: Dict[str, bool] = {
     "task_decompose": True,
     # 默认关闭：易与知识库检索混淆并生成多余联网向词
     "intent_enhance": False,
-    "rag_filter_confirm": True,
+    # 默认关闭：HITL 会阻塞 SSE，知识库检索由 rag_decision / 执行段处理
+    "rag_filter_confirm": False,
     "rag_decision": True,
 }
 

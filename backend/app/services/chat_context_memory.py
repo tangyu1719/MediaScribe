@@ -42,6 +42,13 @@ _STATUS_INQUIRY_HINTS = (
     "好了吗", "完成了吗", "结果呢", "进度", "怎么样了", "搞定了吗", "出来了吗", "好了没",
     "分析好了", "处理好了", "完成了没",
 )
+_TASK_RESUME_HINTS = (
+    "任务恢复", "恢复说明", "重新启动", "重启检索", "恢复检索", "恢复流程", "重新执行",
+    "续执行", "继续执行", "接着执行", "之前执行", "当前将重新", "出现代码报错", "报错后",
+    "重新走", "重新跑", "接着做", "未完成", "继续任务", "重新启动检索",
+)
+# 不用前导 \b：中文与 task_ 连写时（如「执行task_554…」）Word boundary 会失效
+_TASK_ID_IN_MESSAGE_RE = re.compile(r"(task_[a-z0-9]{8,})\b", re.I)
 
 _SESSION_SUMMARY_SYSTEM = """你是会话上下文压缩助手（类似 Claude Code / Cursor 的 context compact）。
 你的输出是【会话摘要】，供后续轮次恢复对话脉络，不是主任务执行日志。
@@ -459,6 +466,12 @@ def resolve_preserved_task_queries(
     tid = str(task_id or (cur_task or {}).get("task_id") or "").strip()
     uq = str((cur_task or {}).get("user_query") or "").strip()
     qs = str((cur_task or {}).get("query_summary") or "").strip()
+    rs = (cur_task or {}).get("rewrite_snapshot")
+    if isinstance(rs, dict):
+        if not uq:
+            uq = str(rs.get("rewritten_query") or rs.get("query") or "").strip()
+        if not qs:
+            qs = str(rs.get("query_summary") or rs.get("task_summary") or "").strip()
     if tid:
         try:
             from .span_audit import get_task
@@ -480,6 +493,52 @@ def resolve_preserved_task_queries(
     if not qs:
         qs = (uq or fb or tid)[:80]
     return uq[:500], qs[:80]
+
+
+def infer_needs_rag_from_task_text(text: str) -> bool:
+    """从主任务原问推断是否需知识库检索。"""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    keys = (
+        "知识库", "文档", "资料", "检索", "召回", "RAG", "rag",
+        "MCP", "mcp", "向量", "milvus", "出处", "来源",
+    )
+    return any(k in t or k.lower() in t.lower() for k in keys)
+
+
+def enrich_snapshot_for_continue_main(
+    snap: Dict[str, Any],
+    *,
+    cur_task: Optional[Dict[str, Any]] = None,
+    task_id: str = "",
+    rag_prefetch: bool = False,
+) -> Dict[str, Any]:
+    """续接主任务：用锁定原问覆盖「继续」类短句，并继承 needs_rag。"""
+    out = dict(snap or {})
+    uq, qs = resolve_preserved_task_queries(
+        task_id=task_id,
+        cur_task=cur_task,
+        fallback_message="",
+    )
+    if uq:
+        out["rewritten_query"] = uq
+        out["query"] = uq
+        out["task_summary"] = qs or uq[:120]
+        out["query_summary"] = qs or uq[:120]
+        if not out.get("query_keywords"):
+            kws = []
+            for token in re.split(r"[\s，,、；;：:]+", uq):
+                token = token.strip()
+                if len(token) >= 2 and token not in kws:
+                    kws.append(token)
+            if kws:
+                out["query_keywords"] = kws[:8]
+                out["keywords"] = kws[:8]
+    out["needs_rag"] = bool(
+        out.get("needs_rag") or rag_prefetch or infer_needs_rag_from_task_text(uq)
+    )
+    return out
 
 
 def upsert_session_main_task_history(
@@ -546,6 +605,171 @@ def upsert_session_main_task_history(
     )
 
 
+def extract_task_id_from_message(message: str) -> str:
+    """从用户句中提取显式 task_id（如 task_554272e197cc）。"""
+    m = _TASK_ID_IN_MESSAGE_RE.search((message or "").strip())
+    return m.group(1).lower() if m else ""
+
+
+def _looks_like_task_resume(message: str) -> bool:
+    m = (message or "").strip()
+    if not m:
+        return False
+    if extract_task_id_from_message(m):
+        return True
+    return any(h in m for h in _TASK_RESUME_HINTS)
+
+
+def _find_main_task_row(
+    task_id: str,
+    *,
+    cur_task: Optional[Dict[str, Any]] = None,
+    main_task_history: Optional[List] = None,
+) -> Optional[Dict[str, Any]]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return None
+    if isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid:
+        return dict(cur_task)
+    for h in reversed(main_task_history or []):
+        if isinstance(h, dict) and str(h.get("task_id") or "") == tid:
+            return dict(h)
+    return {"task_id": tid, "task_kind": "main"}
+
+
+def _get_recent_main_task(
+    cur_task: Optional[Dict[str, Any]],
+    main_task_history: Optional[List] = None,
+) -> Optional[Dict[str, Any]]:
+    if isinstance(cur_task, dict):
+        tid = str(cur_task.get("task_id") or "").strip()
+        if tid and str(cur_task.get("task_kind") or "main") != "simple":
+            return dict(cur_task)
+    for h in reversed(main_task_history or []):
+        if not isinstance(h, dict):
+            continue
+        tid = str(h.get("task_id") or "").strip()
+        if tid and str(h.get("task_kind") or "main") != "simple":
+            return dict(h)
+    return None
+
+
+def _message_belongs_to_task_row(message: str, task_row: Dict[str, Any]) -> bool:
+    """判断当前句是否指向给定主任务（含已结案）。"""
+    msg = (message or "").strip()
+    if not msg or not isinstance(task_row, dict):
+        return False
+    tid = str(task_row.get("task_id") or "").strip()
+    if tid and tid in msg:
+        return True
+    if _looks_like_task_resume(msg):
+        return True
+    if _looks_like_task_status_inquiry(msg) or _looks_like_task_recall(msg):
+        return True
+    if _looks_like_continuation(msg, task_row):
+        return True
+    anchor = str(task_row.get("user_query") or task_row.get("query_summary") or "").strip()
+    if anchor and len(anchor) >= 4:
+        tokens = [w for w in re.split(r"[\s，,、；;：:]+", anchor) if len(w) >= 2][:8]
+        hits = sum(1 for w in tokens if w in msg)
+        if hits >= 2 or (len(tokens) == 1 and tokens[0] in msg):
+            return True
+    return False
+
+
+def hydrate_client_task_context(
+    session_id: str,
+    *,
+    client_cur_task: Optional[Dict[str, Any]] = None,
+    client_main_task_history: Optional[List] = None,
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    合并前端指针与会话持久化：避免简单直答后 cur_task 被清空导致「继续」误判 simple。
+    """
+    cur = dict(client_cur_task) if isinstance(client_cur_task, dict) else None
+    hist: List[Dict[str, Any]] = [
+        dict(h) for h in (client_main_task_history or []) if isinstance(h, dict) and h.get("task_id")
+    ]
+    sid = str(session_id or "").strip()
+    doc: Dict[str, Any] = {}
+    if sid:
+        try:
+            doc = get_session_document(sid) or {}
+        except Exception:
+            doc = {}
+    if not cur and isinstance(doc.get("cur_task"), dict):
+        cur = dict(doc["cur_task"])
+    if not hist:
+        raw_hist = doc.get("main_task_history")
+        if isinstance(raw_hist, list) and raw_hist:
+            hist = [dict(h) for h in raw_hist if isinstance(h, dict) and h.get("task_id")]
+    if not hist:
+        hist = rebuild_main_task_history_from_messages(doc.get("messages") or [], existing=hist)
+    if not cur and hist:
+        for h in reversed(hist):
+            if str(h.get("task_kind") or "main") != "simple":
+                cur = dict(h)
+                break
+    return cur, hist
+
+
+def resolve_task_affiliation(
+    message: str,
+    *,
+    cur_task: Optional[Dict[str, Any]] = None,
+    main_task_history: Optional[List] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    任务归属（优先于 simple/复杂分流）：
+    1) 消息显式 task_id；2) 当前主任务指针；3) 最近一轮主任务（含已结案）。
+    命中则 continue_main，否则返回 None。
+    """
+    msg = (message or "").strip()
+    hist = main_task_history if isinstance(main_task_history, list) else []
+
+    explicit_tid = extract_task_id_from_message(msg)
+    if explicit_tid:
+        row = _find_main_task_row(explicit_tid, cur_task=cur_task, main_task_history=hist)
+        return {
+            "mode": "continue_main",
+            "task_id": explicit_tid,
+            "skip_orchestration": True,
+            "reason": "用户消息显式指定主任务，续接该 task_id",
+            "cur_task": row,
+            "affiliation": "explicit_task_id",
+        }
+
+    if _looks_like_new_task(msg):
+        return None
+
+    recent = _get_recent_main_task(cur_task, hist)
+    if not recent:
+        return None
+
+    tid = str(recent.get("task_id") or "").strip()
+    if not tid:
+        return None
+
+    belongs = _message_belongs_to_task_row(msg, recent)
+    if not belongs and isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid:
+        belongs = not _looks_like_new_task(msg)
+
+    if not belongs:
+        return None
+
+    ct = dict(recent)
+    if isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid:
+        ct = {**recent, **cur_task}
+    return {
+        "mode": "continue_main",
+        "task_id": tid,
+        "skip_orchestration": True,
+        "reason": "判定属于当前/最近主任务，续接执行",
+        "cur_task": ct,
+        "affiliation": "current_or_recent_main",
+    }
+
+
 def _looks_like_continuation(message: str, cur_task: Optional[Dict[str, Any]]) -> bool:
     m = (message or "").strip()
     if not m:
@@ -595,16 +819,26 @@ async def llm_resolve_intent_mode(
         return None
     from .ai_chat import _iter_react_llm_tokens
 
-    ctx_lines = []
+    ctx_lines = [
+        "判定顺序：① 是否属于当前/最近主任务（含已结案，含消息内 task_ 与任务恢复说明）→ continue_main；"
+        "② 是否显式新课题 → new_main；③ 最后才 simple。"
+    ]
     if isinstance(cur_task, dict) and cur_task.get("task_id"):
         ctx_lines.append(
             f"当前主任务 task_id={cur_task.get('task_id')}; "
             f"status={cur_task.get('status')}; "
             f"摘要={(cur_task.get('query_summary') or cur_task.get('user_query') or '')[:120]}"
         )
+    recent = _get_recent_main_task(cur_task, main_task_history)
+    if recent and (not isinstance(cur_task, dict) or not cur_task.get("task_id")):
+        ctx_lines.append(
+            f"最近主任务 task_id={recent.get('task_id')}; "
+            f"status={recent.get('status')}; "
+            f"摘要={(recent.get('query_summary') or recent.get('user_query') or '')[:120]}"
+        )
     elif main_task_history:
         last = main_task_history[-1] if isinstance(main_task_history[-1], dict) else {}
-        if last.get("task_id"):
+        if last.get("task_id") and not recent:
             ctx_lines.append(
                 f"最近主任务 task_id={last.get('task_id')}; "
                 f"status={last.get('status')}; "
@@ -710,14 +944,17 @@ def resolve_intent_mode(
 ) -> Dict[str, Any]:
     """
     意图分流（含主任务续接）：
-    - simple: 闲聊直答
-    - continue_main: 延续当前主任务，跳过完整编排
-    - new_main: 开启新主任务，走完整编排
+    - 先 resolve_task_affiliation（当前/最近主任务，含已结案）
+    - 再 simple / continue_main / new_main
     """
     from .ai_chat import _is_simple_intent
 
     msg = (message or "").strip()
     hist = main_task_history if isinstance(main_task_history, list) else []
+
+    affiliated = resolve_task_affiliation(msg, cur_task=cur_task, main_task_history=hist)
+    if affiliated:
+        return affiliated
 
     # 追问进度/结果优先于「含链接关键词」误判为新任务（如「链接分析好了吗」）
     if _looks_like_task_status_inquiry(msg) or _looks_like_task_recall(msg):
@@ -775,6 +1012,19 @@ def resolve_intent_mode(
             }
 
     if is_simple_heuristic:
+        recent = _get_recent_main_task(cur_task, hist)
+        if recent and not _looks_like_new_task(msg):
+            tid = str(recent.get("task_id") or "").strip() or _resolve_continue_task_id(cur_task, hist)
+            if tid:
+                ct = dict(cur_task) if isinstance(cur_task, dict) else dict(recent)
+                ct.setdefault("task_id", tid)
+                return {
+                    "mode": "continue_main",
+                    "task_id": tid,
+                    "skip_orchestration": True,
+                    "reason": "存在最近主任务且非显式新话题，禁止落回 simple",
+                    "cur_task": ct,
+                }
         return {"mode": "simple", "task_id": "", "skip_orchestration": True, "reason": "简单问答，不建主任务"}
 
     if active and tid and not _looks_like_new_task(msg):
@@ -1526,6 +1776,7 @@ async def prepare_session_memory(
     extra_tokens: int = 0,
 ) -> Dict[str, Any]:
     """发送前：评估占用，必要时 LLM 会话摘要 / 强制存档。"""
+    _t0 = time.perf_counter()
     doc = get_session_document(session_id) or {}
     if client_cur_task and isinstance(client_cur_task, dict):
         doc["cur_task"] = client_cur_task
@@ -1576,7 +1827,16 @@ async def prepare_session_memory(
     task_id = ""
     if isinstance(doc.get("cur_task"), dict):
         task_id = str(doc["cur_task"].get("task_id") or "")
-    task_ctx = load_task_repo(task_id) if task_id else {}
+    task_ctx: Dict[str, Any] = {}
+    if task_id:
+        cached_repo = doc.get("task_redis") if isinstance(doc.get("task_redis"), dict) else None
+        if not cached_repo and isinstance(doc.get("task_repo"), dict):
+            cached_repo = doc.get("task_repo")
+        ct_status = str((doc.get("cur_task") or {}).get("status") or "").lower()
+        if cached_repo and ct_status in ("executing", "planning", "running"):
+            task_ctx = dict(cached_repo)
+        else:
+            task_ctx = await asyncio.to_thread(load_task_repo, task_id)
   # 若 SPAN 工具轨迹含未结案的后台 link_pipeline，标记给执行段/终态决策
     pipeline_ids: List[str] = []
     if task_id:
@@ -1605,6 +1865,16 @@ async def prepare_session_memory(
     memory_meta["mode"] = usage["mode"]
     memory_meta["last_pct"] = usage["pct"]
 
+    _ms = int((time.perf_counter() - _t0) * 1000)
+    _log.info(
+        "[AI问答-会话记忆|chat_context_memory.prepare_session_memory|session:%s|硬编执行|完成] "
+        "cost_ms=%s; pct=%s; compress_events=%s; task_id=%s",
+        session_id,
+        _ms,
+        usage.get("pct"),
+        len(events),
+        (task_id or "")[:16],
+    )
     return {
         "usage": usage,
         "memory_meta": memory_meta,

@@ -127,7 +127,14 @@ def build_node_think_analysis(
             lines.append(f"核验要点 {len(vps)} 条，防止幻觉进入最终回答。")
     elif phase == "rag_decision":
         if output_payload.get("needs_rag"):
-            lines.append("需要知识库预检索，结果写入执行上下文。")
+            cnt = output_payload.get("prefetch_count")
+            err = str(output_payload.get("prefetch_error") or "").strip()
+            if cnt is not None and int(cnt) > 0:
+                lines.append(f"知识库预取命中 {int(cnt)} 条切片，已写入执行上下文供引用。")
+            elif err:
+                lines.append(f"需要知识库预检索，但预取失败：{err[:80]}")
+            else:
+                lines.append("需要知识库预检索，当前未命中切片（执行段可再调 rag_search）。")
     elif phase == "execute_prep":
         steps = output_payload.get("plan_steps") or []
         web_on = bool(input_payload.get("web_search"))
