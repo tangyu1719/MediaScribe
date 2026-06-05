@@ -233,6 +233,9 @@ def summarize_orchestration_payload_cn(
             lines.append(f"需要 RAG：{'是' if p.get('needs_rag') else '否'}")
         if p.get("prefetch_count") is not None:
             lines.append(f"预取条数：{p.get('prefetch_count')}")
+        slices = p.get("rag_slices")
+        if isinstance(slices, list) and slices:
+            lines.append(f"文献切片：{len(slices)} 条（完整正文见下方切片框）")
         if p.get("prefetch_error"):
             lines.append(f"预取异常：{str(p['prefetch_error'])[:120]}")
     elif role == "input" and ph:

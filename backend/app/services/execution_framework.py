@@ -31,6 +31,8 @@ class ExecutionContext:
     enhancement_snapshot: Dict[str, Any] = field(default_factory=dict)
     react_memory: List[Dict[str, str]] = field(default_factory=list)
     min_tool_rounds: int = 1
+    rag_prefetch_done: bool = False
+    rag_slice_count: int = 0
 
 
 class ExecutionFrameworkStrategy(ABC):
@@ -103,9 +105,19 @@ class ReActFrameworkStrategy(ExecutionFrameworkStrategy):
     name = "react"
 
     def min_rounds_before_finalize(self, ctx: ExecutionContext) -> int:
+        if ctx.rag_prefetch_done and ctx.rag_slice_count > 0 and not ctx.web_search:
+            return 0
         return max(1, ctx.min_tool_rounds)
 
     def continuation_system_hint(self, ctx: ExecutionContext, *, reason: str) -> str:
+        if ctx.rag_prefetch_done and ctx.rag_slice_count > 0:
+            return (
+                "【执行框架 · RAG 已预取】编排段已完成知识库检索并注入预检索文献切片。"
+                "请直接基于系统消息中的「预检索文献」撰写面向用户的总结；"
+                "正文须论文式上标引用（¹²），文末附「## 文献注释」说明切片原文与推理链路；"
+                "禁止再调用 rag_search、rag_retrieve、kb_search 等检索类工具；"
+                "禁止输出 <|FunctionCallBegin|> 或编造工具结果。"
+            )
         hints = ctx.enhancement_snapshot.get("search_keyword_queries") or []
         kw = "、".join(str(x) for x in hints[:5])
         base = (

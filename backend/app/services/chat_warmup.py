@@ -324,7 +324,11 @@ async def run_chat_warmup(
             _status["warming"] = False
             _status["finished_at"] = datetime.now().isoformat(timespec="seconds")
             _status["elapsed_ms"] = elapsed
+            # ready=工具+MCP 已缓存；RAG 嵌入在 phases.rag_embedder 单独标记
             _status["ready"] = bool(_tools_cache.get(False))
+            _status["rag_embed_ready"] = bool(
+                ((_status.get("phases") or {}).get("rag_embedder") or {}).get("ok")
+            )
             _status["error"] = err_msg
             cached_row = _tools_cache.get(False) or ([], {})
             tools_total = int((cached_row[1] or {}).get("total") or 0)

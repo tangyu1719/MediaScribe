@@ -529,6 +529,69 @@ def _parse_llm_json(raw: str) -> Dict[str, Any]:
     return {}
 
 
+def _eligible_kb_orch_fast_lane(
+    runtime: ChatGraphRuntime,
+    message: str,
+    snap: Dict[str, Any],
+) -> bool:
+    """知识库检索型主任务：合并业务对齐+任务分解为一次 LLM（仍保留独立 SSE 步骤）。"""
+    if not runtime.rag_prefetch:
+        return False
+    if not (
+        _orch_enabled(runtime, "slot_fill")
+        and _orch_enabled(runtime, "task_decompose")
+        and _orch_enabled(runtime, "query_rewrite")
+    ):
+        return False
+    text = str(message or "")
+    needs_rag = bool(snap.get("needs_rag")) or any(
+        k in text for k in ("知识库", "MCP", "RAG", "检索", "文档", "milvus")
+    )
+    return needs_rag and _infer_domain_module(text)[0] == "知识库"
+
+
+def _apply_slot_decompose_bundle(
+    rewritten: str,
+    snap: Dict[str, Any],
+    combined_json: Dict[str, Any],
+    *,
+    tools_meta: Optional[Dict[str, Any]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[Any]]:
+    slot = _align_business_slots(str(rewritten or ""), tools_meta, snap)
+    for key in (
+        "domain", "module", "operation_type", "entities",
+        "retrieval_terms", "needs_rag", "state",
+    ):
+        val = combined_json.get(key)
+        if val is not None and val != "":
+            slot[key] = val
+    qk = snap.get("query_keywords") or snap.get("keywords")
+    if isinstance(qk, list) and qk:
+        ents = [str(x).strip() for x in (slot.get("entities") or []) if str(x).strip()]
+        for x in qk:
+            s = str(x).strip()
+            if s and s not in ents:
+                ents.append(s)
+        if ents:
+            slot["entities"] = ents
+    decomp = _decompose_task_by_rules(rewritten, slot)
+    sub_tasks = combined_json.get("sub_tasks")
+    if isinstance(sub_tasks, list) and sub_tasks:
+        decomp = {
+            **decomp,
+            "decomposition_type": str(
+                combined_json.get("decomposition_type") or decomp.get("decomposition_type") or "stage"
+            ),
+            "sub_tasks": sub_tasks,
+            "dependencies": (
+                combined_json.get("dependencies")
+                if isinstance(combined_json.get("dependencies"), list)
+                else decomp.get("dependencies")
+            ),
+        }
+    return slot, decomp, list(decomp.get("sub_tasks") or [])
+
+
 async def _orch_llm_invoke(
     runtime: ChatGraphRuntime,
     phase: str,
@@ -542,6 +605,10 @@ async def _orch_llm_invoke(
         return "", {}
     text = ""
     t0 = time.perf_counter()
+    # 编排段 JSON 输出不需要深度思考，关闭 thinking 可显著降延迟
+    _orch_no_think = phase in (
+        "intent", "rewrite", "slot", "decompose", "enhance", "slot_decompose_bundle",
+    )
     try:
         async for piece in ai_chat._iter_react_llm_tokens(
             phase=phase,
@@ -554,6 +621,7 @@ async def _orch_llm_invoke(
             react_memory=[],
             intent_snapshot=intent_snapshot,
             max_tokens=max_tokens,
+            thinking_enabled=not _orch_no_think,
         ):
             text += piece
     except Exception as ex:
@@ -725,48 +793,6 @@ async def fast_continue_main_to_handoff(
     )
     needs_rag = bool(snap.get("needs_rag") or runtime.rag_prefetch)
     intent_result_cn = intent_decision.get("reason") or "延续主任务，跳过重复编排"
-
-    cont_step_id = _new_id("step_")
-    runtime.emit(
-        "orchestration_node_start",
-        {
-            "task_id": tid,
-            "step_id": cont_step_id,
-            "step_name": "延续主任务",
-            "phase": "execute_prep",
-            "sub_plan_id": "",
-            "sub_index": int(state.get("group_seq") or 0),
-            "progress_hint": "正在执行：延续主任务",
-        },
-    )
-    runtime.emit(
-        "thought_step_start",
-        {
-            "trace_id": trace_id,
-            "task_id": tid,
-            "step_id": cont_step_id,
-            "step_name": "延续主任务",
-            "phase": "execute_prep",
-            "node_kind": "orchestration",
-            "step_lane": "orchestration",
-            "status": "running",
-        },
-    )
-    runtime.emit(
-        "thought_step_end",
-        {
-            "trace_id": trace_id,
-            "task_id": tid,
-            "step_id": cont_step_id,
-            "step_name": "延续主任务",
-            "phase": "execute_prep",
-            "node_kind": "orchestration",
-            "step_lane": "orchestration",
-            "status": "done",
-            "result_brief": intent_result_cn[:120],
-            "output_text": intent_result_cn,
-        },
-    )
 
     runtime.emit(
         "intent_resolved",
@@ -1028,6 +1054,34 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         intent_decision = resolve_intent_mode(
             message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
         )
+    elif _orch_enabled(runtime, "intent_recognition") and runtime.rag_prefetch and not cur_task and not task_aff:
+        _kb_hint = _infer_domain_module(message)[0] == "知识库" and any(
+            k in (message or "") for k in ("知识库", "MCP", "RAG", "检索", "文档")
+        )
+        if _kb_hint and not simple_heur:
+            intent_decision = resolve_intent_mode(
+                message,
+                cur_task=cur_task,
+                is_simple_heuristic=False,
+                main_task_history=main_hist,
+            )
+            intent_decision.setdefault("mode", "new_main")
+            intent_decision.setdefault("reason", "规则快径：知识库检索型主任务")
+            intent_llm_powered = False
+        else:
+            intent_decision = await llm_resolve_intent_mode(
+                message,
+                cur_task=cur_task,
+                main_task_history=main_hist,
+                provider=runtime.provider,
+                base_url=runtime.base_url,
+                api_key=runtime.api_key,
+                model=runtime.model_resolved,
+                tools_meta=runtime.tools_meta,
+                rag_prefetch=bool(runtime.rag_prefetch),
+                web_search=bool(runtime.web_search),
+            ) or {}
+            intent_llm_powered = bool(intent_decision and intent_decision.get("llm_powered"))
     elif _orch_enabled(runtime, "intent_recognition"):
         intent_decision = await llm_resolve_intent_mode(
             message,
@@ -1507,6 +1561,8 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
             react_memory=[],
             intent_snapshot=snap,
             include_tools_catalog=False,
+            max_tokens=480,
+            thinking_enabled=False,
         ):
             text += piece
         if text.strip():
@@ -1545,6 +1601,27 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
         or rewritten[:120]
         or (message or "")[:120]
     )
+    orch_kb_fast_lane = False
+    slot_prefill: Dict[str, Any] = {}
+    decomp_prefill: Dict[str, Any] = {}
+    plan_prefill: List[Any] = []
+    combined_lane_text = ""
+    if _eligible_kb_orch_fast_lane(runtime, message, snap):
+        combined_lane_text, combined_json = await _orch_llm_invoke(
+            runtime,
+            "slot_decompose_bundle",
+            rewritten,
+            intent_snapshot={**snap, **rewrite_result},
+            max_tokens=680,
+        )
+        if combined_json:
+            slot_prefill, decomp_prefill, plan_prefill = _apply_slot_decompose_bundle(
+                rewritten,
+                snap,
+                combined_json,
+                tools_meta=runtime.tools_meta,
+            )
+            orch_kb_fast_lane = True
     actions = [str(x) for x in (rewrite_result.get("rewrite_actions") or ["no_rewrite_needed"])]
     rewrite_out = {
         "rewritten_query": rewritten[:500],
@@ -1579,6 +1656,11 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
         "graph_route": "slot_fill",
         "group_seq": seq.get("group_seq"),
         "orch_chain": seq.get("orch_chain", []),
+        "orch_kb_fast_lane": orch_kb_fast_lane,
+        "slot_snapshot_prefill": slot_prefill if orch_kb_fast_lane else {},
+        "decomposition_snapshot_prefill": decomp_prefill if orch_kb_fast_lane else {},
+        "plan_steps_prefill": plan_prefill if orch_kb_fast_lane else [],
+        "orch_fast_lane_combined_text": combined_lane_text if orch_kb_fast_lane else "",
     }
     out.update(_sse_events_from_runtime(runtime))
     _LOG.info(
@@ -1616,6 +1698,35 @@ async def node_intent_decompose(state: Dict[str, Any], config: RunnableConfig | 
                 "plan_steps": state.get("plan_steps") or [],
             },
         )
+
+    if state.get("orch_kb_fast_lane") and state.get("decomposition_snapshot_prefill"):
+        snapshot = dict(state.get("decomposition_snapshot_prefill") or {})
+        sub_tasks = list(state.get("plan_steps_prefill") or snapshot.get("sub_tasks") or [])
+        llm_text = str(state.get("orch_fast_lane_combined_text") or "")
+        decomp_type = str(snapshot.get("decomposition_type") or "stage")
+        seq = _emit_orchestration_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="任务分解",
+            phase="decompose",
+            result_brief=f"已拆解为 {len(sub_tasks)} 个{'并行' if decomp_type == 'parallel' else '阶段'}任务",
+            input_payload={"rewritten_query": rewritten[:500], "slot_snapshot": slot, "fast_lane": True},
+            output_payload=snapshot,
+            think_text_override=llm_text or None,
+            llm_powered=bool(llm_text),
+        )
+        out = {
+            "orchestration_phase": PHASE_DECOMPOSE,
+            "decomposition_snapshot": snapshot,
+            "plan_steps": sub_tasks,
+            "graph_route": _route_after_decompose(runtime, slot, framework),
+            "group_seq": seq.get("group_seq"),
+            "orch_chain": seq.get("orch_chain", []),
+        }
+        out.update(_sse_events_from_runtime(runtime))
+        return out
 
     snapshot = _decompose_task_by_rules(rewritten, slot)
     llm_text, llm_json = await _orch_llm_invoke(
@@ -1819,6 +1930,39 @@ async def node_slot_fill(state: Dict[str, Any], config: RunnableConfig) -> Dict[
         )
 
     slot = _align_business_slots(str(rewritten or ""), runtime.tools_meta, snap)
+    if state.get("orch_kb_fast_lane") and state.get("slot_snapshot_prefill"):
+        slot = dict(state.get("slot_snapshot_prefill") or slot)
+        llm_text = str(state.get("orch_fast_lane_combined_text") or "")
+        result_brief = "已识别业务对象和查询范围"
+        if slot.get("needs_rag"):
+            result_brief = "已定位到资料分析任务，需按文档核验"
+        seq = _emit_orchestration_step(
+            runtime,
+            state,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="业务对齐",
+            phase="slot",
+            result_brief=result_brief,
+            input_payload={
+                "rewritten_query": str(rewritten or "")[:500],
+                "query_summary": state.get("query_summary") or snap.get("rewritten_query", "")[:120],
+                "fast_lane": True,
+            },
+            output_payload=slot,
+            think_text_override=llm_text or None,
+            llm_powered=bool(llm_text),
+        )
+        out = {
+            "orchestration_phase": PHASE_SLOT_FILL,
+            "slot_snapshot": slot,
+            "graph_route": _route_after_slot(runtime, slot, framework),
+            "group_seq": seq.get("group_seq"),
+            "orch_chain": seq.get("orch_chain", []),
+        }
+        out.update(_sse_events_from_runtime(runtime))
+        return out
+
     llm_text, llm_json = await _orch_llm_invoke(
         runtime, "slot", str(rewritten or ""), intent_snapshot=snap, max_tokens=520,
     )
@@ -1991,7 +2135,7 @@ async def node_rag_filter_confirm_ui(state: Dict[str, Any], config: RunnableConf
 
 
 _RAG_PREFETCH_TIMEOUT_SEC = float(
-    __import__("os").environ.get("CHAT_RAG_PREFETCH_TIMEOUT_SEC", "8") or "8"
+    __import__("os").environ.get("CHAT_RAG_PREFETCH_TIMEOUT_SEC", "30") or "30"
 )
 
 

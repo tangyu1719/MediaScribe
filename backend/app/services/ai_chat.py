@@ -608,6 +608,7 @@ async def _async_iter_llm_token_stream(
     temperature: float = 0.3,
     max_tokens: int = 1800,
     timeout: float = 120.0,
+    thinking_enabled: bool = True,
 ) -> Any:
     """
     对齐 Claude/Cursor：从网关拉取 text_delta，异步产出 content 片段。
@@ -629,7 +630,7 @@ async def _async_iter_llm_token_stream(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                thinking_enabled=True,
+                thinking_enabled=thinking_enabled,
             ):
                 loop.call_soon_threadsafe(q.put_nowait, ("chunk", item))
             loop.call_soon_threadsafe(q.put_nowait, ("end", None))
@@ -765,6 +766,16 @@ _REACT_STEP_SYSTEM: Dict[str, str] = {
         '{"domain":"…","module":"…","operation_type":"查询|分析|对比|生成","entities":["…"],"retrieval_terms":["…"],"needs_rag":true|false,"state":"待补全|已对齐"}'
         "禁止 Markdown。"
     ),
+    "slot_decompose_bundle": (
+        "你是 SuperBizAgent 编排段【业务对齐+任务分解】合并节点。"
+        "一次输出业务槽位与子任务拆解，仅 JSON："
+        '{"domain":"…","module":"…","operation_type":"查询|分析|对比|生成",'
+        '"entities":["…"],"retrieval_terms":["…"],"needs_rag":true|false,"state":"已对齐",'
+        '"decomposition_type":"stage|parallel",'
+        '"sub_tasks":[{"index":1,"title":"中文","task_type":"scope|retrieval|verification|synthesis"}],'
+        '"dependencies":[{"from":1,"to":2}]}'
+        "禁止 Markdown。"
+    ),
 }
 
 
@@ -804,6 +815,7 @@ async def _iter_react_llm_tokens(
     pending_tool_args: Optional[Dict[str, Any]] = None,
     max_tokens: int = 520,
     include_tools_catalog: bool = True,
+    thinking_enabled: bool = True,
 ):
     """单步 ReAct LLM 推理，逐 token 产出供上层写入 step_think_delta。"""
     sys = _REACT_STEP_SYSTEM.get(phase, "用简体中文简要推理本步。")
@@ -827,7 +839,9 @@ async def _iter_react_llm_tokens(
         )
     if prior:
         user_parts.append(prior)
-    if include_tools_catalog and phase not in ("intent", "rewrite", "decompose", "enhance", "slot"):
+    if include_tools_catalog and phase not in (
+        "intent", "rewrite", "decompose", "enhance", "slot", "slot_decompose_bundle",
+    ):
         user_parts.append(f"已挂载工具目录：\n{catalog}")
     messages = [
         {"role": "system", "content": sys},
@@ -842,6 +856,7 @@ async def _iter_react_llm_tokens(
         temperature=0.35,
         max_tokens=max_tokens,
         timeout=90.0,
+        thinking_enabled=thinking_enabled,
     ):
         yield piece
 
@@ -1075,6 +1090,38 @@ def _skill_result_is_doc_only(raw_out: Any) -> bool:
     return bool(raw_out.get("ok")) and any(m in body for m in markers)
 
 
+_RAG_RETRIEVAL_TOOL_NAMES = frozenset({
+    "rag_search", "rag_retrieve", "kb_search", "vector_search", "knowledge_base_search",
+})
+
+
+def _filter_rag_tools_when_prefetched(
+    tools: List[Any],
+    meta: Dict[str, Any],
+    *,
+    rag_prefetch_done: bool,
+    rag_slice_count: int,
+) -> tuple[List[Any], Dict[str, Any]]:
+    """编排段已 RAG 预取时，执行段不再暴露检索类工具，避免重复 rag_search。"""
+    if not rag_prefetch_done or rag_slice_count <= 0:
+        return tools, meta
+    kept = [
+        t for t in tools
+        if str(getattr(t, "name", "") or "").lower() not in _RAG_RETRIEVAL_TOOL_NAMES
+    ]
+    if len(kept) == len(tools):
+        return tools, meta
+    meta = dict(meta or {})
+    catalog = [
+        row for row in (meta.get("tools") or [])
+        if str(row.get("name") or "").lower() not in _RAG_RETRIEVAL_TOOL_NAMES
+    ]
+    meta["tools"] = catalog
+    meta["total"] = len(catalog)
+    meta["rag_tools_filtered"] = True
+    return kept, meta
+
+
 def _filter_skill_tools_for_execution(
     tools: List[Any],
     meta: Dict[str, Any],
@@ -1118,6 +1165,7 @@ async def chat_stream_v2(
     rag_prefetch: bool = False,
     web_search: bool = False,
     read_comments: bool = False,
+    include_rss: bool = False,
     deep_think: bool = False,
     chat_max_tool_rounds: Optional[int] = None,
     chat_tool_timeout_sec: Optional[float] = None,
@@ -1145,7 +1193,19 @@ async def chat_stream_v2(
     if graph_boot and isinstance(graph_boot.get("memory_prepared"), dict):
         mem_ctx = {**mem_ctx, **graph_boot["memory_prepared"]}
     rag_context_block: Optional[str] = None
+    rss_context_block: Optional[str] = None
     rag_citation_instruction: str = ""
+
+    from .rss_reader import bind_chat_user, build_chat_context_block, message_wants_rss_context
+
+    bind_chat_user(user_id)
+    if include_rss or message_wants_rss_context(message):
+        rss_context_block = build_chat_context_block(
+            user_id,
+            limit=12,
+            query=(message or "") if message_wants_rss_context(message) and not include_rss else "",
+            unread_only=bool(include_rss),
+        )
 
     if session_id not in _sessions:
         ensure_session(session_id, message[:30] or "新对话")
@@ -2233,6 +2293,13 @@ async def chat_stream_v2(
     from .execution_framework import ExecutionContext, get_execution_strategy
 
     exec_strategy = get_execution_strategy(framework)
+    _rag_slices_boot = list((_graph_boot.get("rag_slices") or []))
+    _rag_slice_count = len(_rag_slices_boot)
+    if not _rag_slice_count and rag_context_block:
+        _rag_slice_count = len(re.findall(r"^\d+\.\s", rag_context_block, re.M))
+    _rag_prefetch_done_flag = bool(
+        _boot_rag_already or bool(_graph_boot.get("rag_prefetch_done"))
+    )
     exec_ctx = ExecutionContext(
         framework=framework,
         use_main_task=use_main_task,
@@ -2243,6 +2310,8 @@ async def chat_stream_v2(
         enhancement_snapshot=dict(enhancement_snapshot_exec) if enhancement_snapshot_exec else {},
         react_memory=react_memory,
         min_tool_rounds=1,
+        rag_prefetch_done=_rag_prefetch_done_flag,
+        rag_slice_count=_rag_slice_count,
     )
 
     if skip_phase1 and use_main_task and task_id:
@@ -2259,6 +2328,17 @@ async def chat_stream_v2(
                 else "编排已完成，进入 ReAct 推理与工具调用（联网/RAG 由模型按需调用）"
             ),
         })
+        if _boot_rag_already and _rag_slice_count > 0:
+            yield _sse(
+                "pipeline_progress",
+                {
+                    "trace_id": trace_id,
+                    "task_id": task_id,
+                    "stage": "RAG 已注入",
+                    "progress": 72,
+                    "detail": f"编排段已预取 {_rag_slice_count} 条知识库切片，执行段跳过重复 rag_retrieve",
+                },
+            )
         # 每轮 function calling 前由 _yield_react_reasoning_analysis 产出真实 Observe/Act，禁止裸调工具
 
     if show_llm_as_subtask:
@@ -2291,9 +2371,13 @@ async def chat_stream_v2(
                 extra_blocks.append(rag_citation_instruction)
             if rag_context_block:
                 extra_blocks.append(rag_context_block)
+            if rss_context_block:
+                extra_blocks.append(rss_context_block)
             if rag_context_block and re.search(r"MCP|知识库|mcp", message or "", re.I):
                 extra_blocks.append(
-                    "【MCP 知识库总结 · 硬性要求】须基于上方 RAG 切片作答；"
+                    "【MCP 知识库总结 · 硬性要求】须基于上方「预检索文献」切片作答；"
+                    "正文每一句依据知识库的论断句末必须带上标（¹² 或 ¹《父文档名》），"
+                    "正文结束后必须输出「## 文献注释」脚注区，逐条写明切片原文与推理链路；"
                     "正文须明确写出至少 2 个来自文档的术语，例如："
                     "「Model Context Protocol（模型上下文协议）」「MCP 服务器」「MCP 客户端」。"
                     "禁止在正文输出 FunctionCallBegin、```json 工具参数或伪工具调用。"
@@ -2308,6 +2392,11 @@ async def chat_stream_v2(
                 extra_blocks.append(
                     "用户已在对话页勾选「读取评论」。若有合法作品链接，可调用 scrape_comments；"
                     "调用 link_pipeline_start 时须传 read_comments_flag=true 才会在流水线中读评论。"
+                )
+            if include_rss or rss_context_block:
+                extra_blocks.append(
+                    "用户已启用 RSS 订阅上下文。回答资讯/订阅相关问题时须基于上方 RSS 条目或调用 rss_list_recent；"
+                    "禁止编造未出现在 RSS 列表中的文章标题或链接。"
                 )
             if continue_main_task and task_id:
                 from .chat_context_memory import known_pipeline_ids_for_main_task
@@ -2380,6 +2469,12 @@ async def chat_stream_v2(
             chat_lc_tools, tools_meta = _filter_skill_tools_for_execution(
                 chat_lc_tools, tools_meta, message
             )
+            chat_lc_tools, tools_meta = _filter_rag_tools_when_prefetched(
+                chat_lc_tools,
+                tools_meta,
+                rag_prefetch_done=_rag_prefetch_done_flag,
+                rag_slice_count=_rag_slice_count,
+            )
             yield _sse("tools_discovered", {
                 "trace_id": trace_id,
                 "task_id": task_id or "",
@@ -2433,7 +2528,17 @@ async def chat_stream_v2(
             if openai_tools:
                 by_name = {getattr(t, "name", ""): t for t in chat_lc_tools if getattr(t, "name", "")}
                 working: List[Dict[str, Any]] = list(messages)
+                if _rag_prefetch_done_flag and _rag_slice_count > 0 and not web_search:
+                    working.append({
+                        "role": "system",
+                        "content": exec_strategy.continuation_system_hint(
+                            exec_ctx, reason="rag_prefetched",
+                        ),
+                    })
                 max_rounds = max(1, int(cfg.get("chat_max_tool_rounds", 15) or 15))
+                _exec_thinking = not (
+                    _rag_prefetch_done_flag and _rag_slice_count > 0 and not web_search
+                ) and not deep_think
                 tool_timeout_sec = float(cfg.get("chat_tool_timeout_sec", 60) or 60)
                 max_retry_per_tool = max(1, int(cfg.get("chat_tool_max_retry", 3) or 3))
                 distinct_fail_limit = max(1, int(cfg.get("chat_distinct_tool_fail_limit", 3) or 3))
@@ -2464,7 +2569,7 @@ async def chat_stream_v2(
                             temperature=0.3,
                             max_tokens=1800,
                             timeout=120.0,
-                            thinking_enabled=True,
+                            thinking_enabled=_exec_thinking,
                             tools=openai_tools,
                             tool_choice="auto",
                         )
@@ -3251,6 +3356,7 @@ async def chat_stream(
     rag_prefetch: bool = False,
     web_search: bool = False,
     read_comments: bool = False,
+    include_rss: bool = False,
     deep_think: bool = False,
     **orchestration_kwargs: Any,
 ):
@@ -3263,6 +3369,8 @@ async def chat_stream(
         user_id=user_id,
         rag_prefetch=rag_prefetch,
         web_search=web_search,
+        read_comments=read_comments,
+        include_rss=include_rss,
         deep_think=deep_think,
         **orchestration_kwargs,
     ):

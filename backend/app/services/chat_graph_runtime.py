@@ -61,13 +61,14 @@ class ChatGraphRuntime:
                 "parent_status": payload.get("parent_status") or "",
             }
         line = _sse(event, payload)
-        self._pending_sse.append(line)
         sink = self._live_sse_sink
         if sink is not None:
             try:
                 sink(line)
             except Exception:
                 pass
+        else:
+            self._pending_sse.append(line)
 
     def drain_sse(self) -> List[str]:
         out = list(self._pending_sse)
