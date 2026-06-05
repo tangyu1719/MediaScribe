@@ -1,0 +1,316 @@
+"""UP 画像五阶段编排 — 目录拉取 → 轻量画像 → 选篇 → 原文 MD → 深度画像 → 持久化。"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from .creator_feed_adapter import get_feed_adapter
+from .creator_profile_article import run_article_only_for_note
+from .creator_profile_llm import (
+    build_deep_profile,
+    build_light_profile,
+    build_note_selection,
+    render_profile_markdown,
+)
+from .creator_profile_store import (
+    create_profile_run,
+    get_latest_profile_doc,
+    get_profile_run,
+    save_profile_doc,
+    update_profile_run,
+)
+from .creator_subscription_store import get_subscription, init_db
+from .task_manager import get_output_dir
+
+_log = logging.getLogger("sba.creator_profile_runner")
+_CHAIN = "社媒订阅-UP画像-五阶段编排"
+
+_PROFILE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(subscription_id: str) -> asyncio.Lock:
+    if subscription_id not in _PROFILE_LOCKS:
+        _PROFILE_LOCKS[subscription_id] = asyncio.Lock()
+    return _PROFILE_LOCKS[subscription_id]
+
+
+def _red_id_from_sub(sub: Dict[str, Any]) -> str:
+    for tag in sub.get("tags") or []:
+        if str(tag).startswith("red_id:"):
+            return str(tag).split(":", 1)[1]
+    return ""
+
+
+def _catalog_to_dicts(items) -> List[Dict[str, Any]]:
+    return [it.to_dict() if hasattr(it, "to_dict") else dict(it) for it in items]
+
+
+async def run_creator_profile(
+    subscription_id: str,
+    *,
+    trigger: str = "manual",
+    min_pick: int = 5,
+    max_pick: int = 10,
+) -> Dict[str, Any]:
+    init_db()
+    sub = get_subscription(subscription_id)
+    if not sub:
+        return {"ok": False, "error_code": "SUB_NOT_FOUND", "error": "订阅不存在"}
+
+    lock = _lock_for(subscription_id)
+    if lock.locked():
+        return {"ok": False, "error_code": "PROFILE_BUSY", "error": "该 UP 画像任务正在进行"}
+
+    async with lock:
+        run = create_profile_run(subscription_id, trigger=trigger)
+        run_id = run["profile_run_id"]
+        display_name = sub.get("display_name") or sub.get("creator_id") or ""
+        red_id = _red_id_from_sub(sub)
+        creator_id = sub.get("creator_id") or ""
+        profile_url = sub.get("profile_url") or ""
+
+        _log.info(
+            "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|开始] subscription_id=%s; display_name=%s",
+            _CHAIN,
+            run_id,
+            subscription_id,
+            display_name,
+        )
+
+        try:
+            # ── 阶段0：拉取笔记目录 ──
+            update_profile_run(run_id, status="running", stage="catalog")
+            adapter = get_feed_adapter(sub["platform"])
+            loop = asyncio.get_event_loop()
+            catalog_items = await loop.run_in_executor(
+                None,
+                lambda: adapter.fetch_catalog(creator_id, profile_url=profile_url),
+            )
+            catalog = _catalog_to_dicts(catalog_items)
+            if not catalog:
+                raise RuntimeError("PROFILE_CATALOG_EMPTY: 主页未解析到笔记列表")
+            update_profile_run(run_id, catalog_count=len(catalog), stage="light_profile")
+
+            # ── 阶段1：轻量画像（仅标题） ──
+            light = await loop.run_in_executor(
+                None,
+                lambda: build_light_profile(
+                    display_name=display_name,
+                    red_id=red_id,
+                    catalog=catalog,
+                ),
+            )
+            if not light.get("ok"):
+                raise RuntimeError(f"PROFILE_LIGHT_FAILED: {light.get('error')}")
+            update_profile_run(run_id, light_profile_json=light, stage="selecting")
+
+            # ── 阶段2：选篇 5-10 ──
+            selection = await loop.run_in_executor(
+                None,
+                lambda: build_note_selection(
+                    display_name=display_name,
+                    light_profile=light,
+                    catalog=catalog,
+                    min_pick=min_pick,
+                    max_pick=max_pick,
+                ),
+            )
+            if not selection.get("ok"):
+                raise RuntimeError(f"PROFILE_SELECT_FAILED: {selection.get('error')}")
+            selected_ids = [str(x) for x in selection.get("selected_note_ids") or []]
+            id_set = set(selected_ids)
+            selected_notes = [it for it in catalog if str(it.get("note_id")) in id_set]
+            if not selected_notes:
+                raise RuntimeError("PROFILE_SELECT_EMPTY: 选篇结果为空")
+            update_profile_run(
+                run_id,
+                selection_json=selection,
+                selected_count=len(selected_notes),
+                stage="deep_fetch",
+            )
+
+            # ── 阶段3：并行原文 MD（仅原文，无摘要） ──
+            per_timeout = int(os.environ.get("PROFILE_ARTICLE_TIMEOUT_SEC", "1800"))
+            results = await asyncio.gather(
+                *[run_article_only_for_note(note=n, timeout_sec=per_timeout) for n in selected_notes],
+                return_exceptions=True,
+            )
+            articles: List[Dict[str, Any]] = []
+            ok_n = 0
+            fail_n = 0
+            for r in results:
+                if isinstance(r, Exception):
+                    fail_n += 1
+                    continue
+                if r.get("ok") and (r.get("article") or "").strip():
+                    articles.append(r)
+                    ok_n += 1
+                else:
+                    fail_n += 1
+            update_profile_run(
+                run_id,
+                deep_ok_count=ok_n,
+                deep_fail_count=fail_n,
+                stage="deep_profile",
+            )
+            if not articles:
+                raise RuntimeError("PROFILE_DEEP_FETCH_ALL_FAILED: 深度采样原文全部失败")
+
+            # ── 阶段4：深度画像 ──
+            deep = await loop.run_in_executor(
+                None,
+                lambda: build_deep_profile(
+                    display_name=display_name,
+                    red_id=red_id,
+                    light_profile=light,
+                    articles=articles,
+                ),
+            )
+            if not deep.get("ok"):
+                raise RuntimeError(f"PROFILE_DEEP_FAILED: {deep.get('error')}")
+
+            # ── 阶段5：固化文档 + DB ──
+            profile_md = render_profile_markdown(
+                display_name=display_name,
+                red_id=red_id,
+                creator_id=creator_id,
+                profile_run_id=run_id,
+                light_profile=light,
+                selection=selection,
+                deep_profile=deep,
+                selected_notes=selected_notes,
+            )
+            safe_name = re.sub(r'[\\/:*?"<>|]', "_", display_name)[:40] or creator_id[:12]
+            out_dir = get_output_dir() / "creator_profiles" / subscription_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            md_path = out_dir / f"{safe_name}_profile_{ts}.md"
+            md_path.write_text(profile_md, encoding="utf-8")
+
+            payload = {
+                **deep,
+                "display_name": display_name,
+                "red_id": red_id,
+                "creator_id": creator_id,
+                "subscription_id": subscription_id,
+                "profile_run_id": run_id,
+                "light_profile": light,
+                "selection": selection,
+                "selected_notes": [
+                    {
+                        "note_id": n.get("note_id"),
+                        "title": n.get("title"),
+                        "canonical_url": n.get("canonical_url"),
+                        "content_type": n.get("content_type"),
+                        "published_at": n.get("published_at"),
+                    }
+                    for n in selected_notes
+                ],
+                "sampled_articles": [
+                    {
+                        "note_id": a.get("note_id"),
+                        "title": a.get("title"),
+                        "doc_path": a.get("doc_path"),
+                        "char_len": len(a.get("article") or ""),
+                    }
+                    for a in articles
+                ],
+            }
+            doc = save_profile_doc(
+                subscription_id=subscription_id,
+                profile_run_id=run_id,
+                payload=payload,
+                profile_md=profile_md,
+                profile_md_path=str(md_path),
+                llm_model=deep.get("llm_model") or "",
+            )
+
+            final_status = "completed" if fail_n == 0 else "partial"
+            update_profile_run(
+                run_id,
+                status=final_status,
+                stage="done",
+                deep_profile_json=deep,
+                profile_md=profile_md,
+                llm_model=deep.get("llm_model") or "",
+            )
+
+            _log.info(
+                "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|完成] status=%s; deep_ok=%s; deep_fail=%s",
+                _CHAIN,
+                run_id,
+                final_status,
+                ok_n,
+                fail_n,
+            )
+            return {
+                "ok": True,
+                "profile_run_id": run_id,
+                "status": final_status,
+                "profile_doc_id": doc.get("profile_doc_id"),
+                "profile_md_path": str(md_path),
+                "catalog_count": len(catalog),
+                "selected_count": len(selected_notes),
+                "deep_ok_count": ok_n,
+                "deep_fail_count": fail_n,
+                "profile_doc": doc,
+            }
+
+        except Exception as ex:
+            msg = str(ex)
+            code = "PROFILE_FAILED"
+            if "PROFILE_" in msg:
+                code = msg.split(":", 1)[0]
+            update_profile_run(
+                run_id,
+                status="failed",
+                stage="failed",
+                error_code=code,
+                error_message=msg,
+            )
+            _log.error(
+                "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|失败] error_code=%s; error=%s",
+                _CHAIN,
+                run_id,
+                code,
+                msg,
+            )
+            return {"ok": False, "profile_run_id": run_id, "error_code": code, "error": msg}
+
+
+async def run_creator_profile_by_red_id(
+    red_id: str,
+    *,
+    display_name: str = "",
+    trigger: str = "regression",
+) -> Dict[str, Any]:
+    """回归/脚本入口：按小红书号创建或复用订阅并跑画像。"""
+    from .creator_subscription_api import api_create_subscription
+    from .creator_subscription_store import list_subscriptions
+
+    init_db()
+    existing = None
+    for row in (list_subscriptions(page_size=50).get("items") or []):
+        tags = row.get("tags") or []
+        if f"red_id:{red_id}" in tags or red_id in (row.get("display_name") or ""):
+            existing = row
+            break
+
+    if existing:
+        subscription_id = existing["subscription_id"]
+    else:
+        sub = api_create_subscription(
+            {
+                "platform": "xiaohongshu",
+                "red_id": red_id,
+                "display_name": display_name or red_id,
+            }
+        )
+        subscription_id = sub["subscription_id"]
+
+    return await run_creator_profile(subscription_id, trigger=trigger)

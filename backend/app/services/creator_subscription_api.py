@@ -51,7 +51,7 @@ def api_create_subscription(body: Dict[str, Any]) -> Dict[str, Any]:
     display_name = ""
 
     if red_id:
-        resolved = resolve_xhs_red_id(red_id)
+        resolved = resolve_xhs_red_id(red_id, display_name=(body.get("display_name") or "").strip())
         profile_url = resolved["profile_url"]
         creator_id = resolved["creator_id"]
         display_name = (body.get("display_name") or resolved.get("display_name") or creator_id).strip()
@@ -160,3 +160,28 @@ def api_get_digest(digest_id: str) -> Optional[Dict[str, Any]]:
 def api_get_latest_digest(subscription_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     _ensure_db()
     return get_latest_digest(subscription_id)
+
+
+async def api_run_creator_profile(subscription_id: str) -> Dict[str, Any]:
+    _ensure_db()
+    from .creator_profile_runner import run_creator_profile
+
+    return await run_creator_profile(subscription_id, trigger="manual")
+
+
+def api_get_latest_creator_profile(subscription_id: str) -> Optional[Dict[str, Any]]:
+    _ensure_db()
+    from .creator_profile_store import get_latest_profile_doc, get_latest_profile_run
+
+    doc = get_latest_profile_doc(subscription_id)
+    run = get_latest_profile_run(subscription_id)
+    if not doc and not run:
+        return None
+    return {"profile_doc": doc, "latest_run": run}
+
+
+def api_get_creator_profile_run(profile_run_id: str) -> Optional[Dict[str, Any]]:
+    _ensure_db()
+    from .creator_profile_store import get_profile_run
+
+    return get_profile_run(profile_run_id)

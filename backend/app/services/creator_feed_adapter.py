@@ -169,7 +169,7 @@ def _post_search_usersearch(sess: requests.Session, red_id: str) -> Optional[Dic
         return None
 
 
-def resolve_xhs_red_id(red_id: str) -> Dict[str, Any]:
+def resolve_xhs_red_id(red_id: str, *, display_name: str = "") -> Dict[str, Any]:
     """
     将「小红书号」解析为内部 user_id 与 profile_url。
     依赖有效 Cookie（backend/output/.xhs_cookies.json 或 SBA_XHS_COOKIE）。
@@ -217,19 +217,40 @@ def resolve_xhs_red_id(red_id: str) -> Dict[str, Any]:
         }
 
     from .xhs_session import probe_xhs_session
+    from .xhs_stateless import (
+        cookie_attempts,
+        record_cookie_attempt,
+        resolve_red_id_stateless,
+        should_use_stateless,
+    )
+
+    if should_use_stateless():
+        return resolve_red_id_stateless(red_id, display_name=display_name)
 
     probe = probe_xhs_session(sess)
     if probe.get("guest") or not probe.get("logged_in"):
-        _log.info(
-            "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|Agent执行|回退] "
-            "文件 Cookie 为访客，改用本机 Chrome 用户配置; red_id=%s",
-            _CHAIN_RESOLVE,
-            red_id,
-            red_id,
-        )
+        from .xhs_stateless import _MAX_ATTEMPTS as _max_att
         from .xhs_local_browser import resolve_red_id_via_local_chrome
 
-        return resolve_red_id_via_local_chrome(red_id)
+        _log.info(
+            "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|Agent执行|回退] "
+            "Cookie 非登录态，尝试本机 Chrome（最多 %s 次后无状态）; red_id=%s",
+            _CHAIN_RESOLVE,
+            red_id,
+            _max_att,
+            red_id,
+        )
+        try:
+            got = resolve_red_id_via_local_chrome(red_id)
+            record_cookie_attempt(ok=True)
+            return got
+        except Exception as ex:
+            record_cookie_attempt(ok=False)
+            if should_use_stateless():
+                return resolve_red_id_stateless(red_id, display_name=display_name)
+            raise RuntimeError(
+                f"SUB_XHS_COOKIE_UNAVAILABLE: Chrome Cookie 获取失败（已尝试 {cookie_attempts()} 次）: {ex}"
+            ) from ex
 
     require_xhs_logged_in(sess)
 
@@ -284,9 +305,29 @@ def resolve_xhs_red_id(red_id: str) -> Dict[str, Any]:
 
     try:
         from .xhs_local_browser import resolve_red_id_via_local_chrome
+        from .xhs_stateless import record_cookie_attempt, resolve_red_id_stateless, should_use_stateless
 
-        return resolve_red_id_via_local_chrome(red_id)
+        if should_use_stateless():
+            return resolve_red_id_stateless(red_id, display_name=display_name)
+        try:
+            got = resolve_red_id_via_local_chrome(red_id)
+            record_cookie_attempt(ok=True)
+            return got
+        except Exception as ex2:
+            record_cookie_attempt(ok=False)
+            if should_use_stateless():
+                return resolve_red_id_stateless(red_id)
+            raise RuntimeError(
+                f"SUB_RED_ID_NOT_FOUND: 未找到小红书号 {red_id} 对应的用户（{ex2}）。"
+                "请确认号正确；或在 App 打开博主主页复制 profile 链接（含 24 位 user_id）直接订阅。"
+            ) from ex2
+    except RuntimeError:
+        raise
     except Exception as ex:
+        from .xhs_stateless import resolve_red_id_stateless, should_use_stateless
+
+        if should_use_stateless():
+            return resolve_red_id_stateless(red_id, display_name=display_name)
         raise RuntimeError(
             f"SUB_RED_ID_NOT_FOUND: 未找到小红书号 {red_id} 对应的用户（{ex}）。"
             "请确认号正确；或在 App 打开博主主页复制 profile 链接（含 24 位 user_id）直接订阅。"
@@ -439,31 +480,31 @@ class XiaohongshuFeedAdapter:
 
     def fetch_profile_meta(self, profile_url: str) -> Dict[str, Any]:
         from .xhs_session import probe_xhs_session
+        from .xhs_stateless import bootstrap_stateless_session, should_use_stateless
 
         creator_id = parse_xiaohongshu_profile_url(profile_url)
-        sess = self._session()
-        probe = probe_xhs_session(sess)
-        if probe.get("guest") or not probe.get("logged_in"):
-            from .xhs_local_browser import sync_cookies_from_local_chrome
-
-            sync_cookies_from_local_chrome()
-            # 重新加载 Cookie 到 session
-            from .cookie_manager import load_cookies
-
-            for k, v in (load_cookies("xiaohongshu") or {}).items():
-                sess.cookies.set(k, v, domain=".xiaohongshu.com")
+        if should_use_stateless():
+            sess = bootstrap_stateless_session()
         else:
-            from .xhs_session import require_xhs_logged_in
+            sess = self._session()
+            probe = probe_xhs_session(sess)
+            if probe.get("guest") or not probe.get("logged_in"):
+                from .xhs_stateless import record_cookie_attempt
 
-            require_xhs_logged_in(sess)
+                record_cookie_attempt(ok=False)
+                sess = bootstrap_stateless_session()
+            else:
+                from .xhs_session import require_xhs_logged_in
+
+                require_xhs_logged_in(sess)
         resp = sess.get(profile_url, timeout=30, allow_redirects=True)
-        if resp.status_code in (401, 403) or "登录" in resp.text[:2000]:
-            raise RuntimeError("SUB_FETCH_AUTH_FAILED")
-        if resp.status_code != 200:
-            raise RuntimeError(f"SUB_PROFILE_UNREACHABLE: HTTP {resp.status_code}")
         data = _parse_init_state(resp.text)
         if not data:
+            if resp.status_code != 200:
+                raise RuntimeError(f"SUB_PROFILE_UNREACHABLE: HTTP {resp.status_code}")
             raise RuntimeError("SUB_PROFILE_PARSE_FAILED")
+        if resp.status_code not in (200, 404) and "登录" in resp.text[:2000]:
+            raise RuntimeError("SUB_FETCH_AUTH_FAILED")
         display_name = creator_id
         user = data.get("user") or {}
         if isinstance(user, dict):
@@ -511,6 +552,23 @@ class XiaohongshuFeedAdapter:
         next_cursor = start + len(page_items)
         has_more = next_cursor < len(items)
         return page_items, next_cursor, has_more
+
+    def fetch_catalog(
+        self,
+        creator_id: str,
+        *,
+        profile_url: str = "",
+    ) -> List[FeedItem]:
+        """拉取主页可见的全部笔记（用于 UP 画像目录）。"""
+        url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+        meta = self.fetch_profile_meta(url)
+        return parse_feed_from_init_state(
+            meta["init_state"],
+            creator_id=creator_id,
+            profile_url=url,
+            xsec_token=meta.get("xsec_token") or "",
+            fetch_source="catalog",
+        )
 
 
 def get_feed_adapter(platform: str) -> CreatorFeedAdapter:

@@ -113,3 +113,61 @@ class CreatorDigest(CreatorSubBase):
     llm_model: Mapped[str] = mapped_column(String(128), default="")
     rag_degraded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CreatorProfileRun(CreatorSubBase):
+    """UP 画像流水线运行记录。"""
+
+    __tablename__ = "creator_profile_runs"
+
+    profile_run_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(String(32), index=True)
+    trigger: Mapped[str] = mapped_column(String(16), default="manual")
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    stage: Mapped[str] = mapped_column(String(32), default="")
+    catalog_count: Mapped[int] = mapped_column(Integer, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer, default=0)
+    deep_ok_count: Mapped[int] = mapped_column(Integer, default=0)
+    deep_fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    light_profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    selection_json: Mapped[str] = mapped_column(Text, default="{}")
+    deep_profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    profile_md: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str] = mapped_column(String(64), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    llm_model: Mapped[str] = mapped_column(String(128), default="")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CreatorProfileDoc(CreatorSubBase):
+    """UP 画像固化文档（每个订阅保留最新 + 历史版本）。"""
+
+    __tablename__ = "creator_profile_docs"
+
+    profile_doc_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(String(32), index=True)
+    profile_run_id: Mapped[str] = mapped_column(String(32), index=True)
+    display_name: Mapped[str] = mapped_column(String(256), default="")
+    red_id: Mapped[str] = mapped_column(String(64), default="")
+    creator_id: Mapped[str] = mapped_column(String(128), default="")
+    industry: Mapped[str] = mapped_column(String(256), default="")
+    domain: Mapped[str] = mapped_column(String(256), default="")
+    niche: Mapped[str] = mapped_column(String(256), default="")
+    persona_summary: Mapped[str] = mapped_column(Text, default="")
+    target_audience: Mapped[str] = mapped_column(Text, default="")
+    content_style: Mapped[str] = mapped_column(String(256), default="")
+    deep_directions_json: Mapped[str] = mapped_column(Text, default="[]")
+    recent_topics_json: Mapped[str] = mapped_column(Text, default="[]")
+    content_type_distribution_json: Mapped[str] = mapped_column(Text, default="{}")
+    output_analysis_json: Mapped[str] = mapped_column(Text, default="{}")
+    selected_notes_json: Mapped[str] = mapped_column(Text, default="[]")
+    profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    profile_md: Mapped[str] = mapped_column(Text, default="")
+    profile_md_path: Mapped[str] = mapped_column(String(1024), default="")
+    llm_model: Mapped[str] = mapped_column(String(128), default="")
+    is_latest: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_profile_doc_sub_latest", "subscription_id", "is_latest"),)

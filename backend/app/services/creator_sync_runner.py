@@ -30,6 +30,7 @@ _CHAIN = "社媒订阅-增量拉取-单条分析-批次digest"
 
 _SUB_LOCKS: Dict[str, asyncio.Lock] = {}
 _INITIAL_FETCH_LIMIT = int(os.environ.get("SUBSCRIPTION_INITIAL_FETCH_LIMIT", "20"))
+_INCREMENTAL_FETCH_LIMIT = int(os.environ.get("SUBSCRIPTION_INCREMENTAL_FETCH_LIMIT", "30"))
 _DIGEST_WAIT_SEC = int(os.environ.get("SUBSCRIPTION_DIGEST_WAIT_SEC", "1800"))
 
 
@@ -88,13 +89,20 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
 
         try:
             adapter = get_feed_adapter(sub["platform"])
-            cursor = 0 if not sub.get("initial_backfill_done") else int(sub.get("cursor_offset") or 0)
-            limit = _INITIAL_FETCH_LIMIT
+            backfill_done = bool(sub.get("initial_backfill_done"))
+            # 历史回填：按 cursor_offset 分页扫主页 INITIAL_STATE 列表
+            # 增量更新：始终从列表头部拉取，靠 note_id 判重（避免新发笔记被 offset 跳过）
+            if backfill_done:
+                cursor = 0
+                limit = _INCREMENTAL_FETCH_LIMIT
+            else:
+                cursor = int(sub.get("cursor_offset") or 0)
+                limit = _INITIAL_FETCH_LIMIT
             profile_url = sub.get("profile_url") or ""
             creator_id = sub.get("creator_id") or ""
 
             loop = asyncio.get_event_loop()
-            items, next_cursor, _has_more = await loop.run_in_executor(
+            items, next_cursor, has_more = await loop.run_in_executor(
                 None,
                 lambda: adapter.fetch_page(creator_id, cursor, limit, profile_url=profile_url),
             )
@@ -214,16 +222,26 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                     }
                 )
 
-            last_note = new_items[-1] if new_items else (items[-1] if items else None)
-            last_pub = _parse_published_at(last_note.published_at) if last_note else None
-            update_subscription_cursor(
-                subscription_id,
-                cursor_offset=next_cursor,
-                last_note_id=last_note.note_id if last_note else sub.get("last_note_id"),
-                cursor_published_at=last_pub,
-                mark_backfill_done=not sub.get("initial_backfill_done"),
-                reset_failures=True,
-            )
+            newest_note = new_items[0] if new_items else (items[0] if items else None)
+            last_pub = _parse_published_at(newest_note.published_at) if newest_note else None
+            if backfill_done:
+                update_subscription_cursor(
+                    subscription_id,
+                    cursor_offset=int(sub.get("cursor_offset") or 0),
+                    last_note_id=newest_note.note_id if newest_note else sub.get("last_note_id"),
+                    cursor_published_at=last_pub,
+                    mark_backfill_done=False,
+                    reset_failures=True,
+                )
+            else:
+                update_subscription_cursor(
+                    subscription_id,
+                    cursor_offset=next_cursor,
+                    last_note_id=newest_note.note_id if newest_note else sub.get("last_note_id"),
+                    cursor_published_at=last_pub,
+                    mark_backfill_done=not has_more,
+                    reset_failures=True,
+                )
 
             update_sync_run(sync_run_id, status="digesting")
             digest_record = None
