@@ -23,6 +23,8 @@ DEFAULT_POLICIES = [
     ("p", "viewer", "/api/*", "(GET|HEAD|OPTIONS)"),
     # viewer: AI 问答与会话写操作（SSE 为 POST /api/chat/stream）
     ("p", "viewer", "/api/chat/*", "(POST|PUT|PATCH|DELETE)"),
+    # viewer: RSS 订阅管理（添加/同步/删除）
+    ("p", "viewer", "/api/rss/*", "(POST|PUT|PATCH|DELETE)"),
     # admin: 全部功能
     ("p", "admin", "/api/*", ".*"),
 ]

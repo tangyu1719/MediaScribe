@@ -95,4 +95,19 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             ],
             "outputs": "评论文本（含序号、作者、时间、属地、点赞数、回复链）。",
         },
+        {
+            "id": "tool_rss_reader",
+            "name": "RSS 订阅阅读",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "读取当前用户在 RSS 阅读器中的订阅文章（标题、摘要、链接、已读/星标）。",
+            "inputs": [
+                {"name": "query", "type": "string", "required": False, "hint": "标题/摘要关键词过滤"},
+                {"name": "limit", "type": "int", "required": False, "hint": "返回条数，默认 10"},
+                {"name": "unread_only", "type": "bool", "required": False, "hint": "仅未读"},
+                {"name": "starred_only", "type": "bool", "required": False, "hint": "仅星标"},
+            ],
+            "outputs": "JSON：items 列表与 stats 统计。",
+        },
     ]

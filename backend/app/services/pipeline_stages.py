@@ -37,6 +37,12 @@ PIPELINE_ROUTES: Dict[str, List[Dict[str, Any]]] = {
         {"id": "generate_md", "label": "生成文档"},
         {"id": "html", "label": "HTML长页", "optional": True},
     ],
+    "rss_article": [
+        {"id": "fetch_fulltext", "label": "抓取全文"},
+        {"id": "ai_analysis", "label": "原文整理与摘要"},
+        {"id": "generate_md", "label": "生成文档"},
+        {"id": "html", "label": "HTML长页", "optional": True},
+    ],
 }
 
 STATUS_TO_STAGE = {
@@ -59,6 +65,10 @@ STATUS_TO_STAGE = {
         "extracting": "extract",
         "ocr": "ocr",
         "assembling": "assemble",
+        "consolidating": "ai_analysis",
+        "generating": "generate_md",
+    },
+    "rss_article": {
         "consolidating": "ai_analysis",
         "generating": "generate_md",
     },

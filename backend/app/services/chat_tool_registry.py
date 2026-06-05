@@ -18,6 +18,7 @@ _BUILTIN_ID_TO_FN = {
     "tool_doc_analyze": "document_analyze",
     "tool_cache_rw": "cache_query",
     "tool_ops_snapshot": "ops_overview",
+    "tool_rss_reader": "rss_list_recent",
 }
 
 
@@ -352,6 +353,32 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         func=ops_overview,
         name="ops_overview",
         description="OPS 观测：调用统计、事件与运维建议摘要。",
+    ))
+
+    def rss_list_recent(
+        limit: int = 10,
+        query: str = "",
+        starred_only: bool = False,
+        unread_only: bool = False,
+    ) -> str:
+        from .rss_reader import rss_list_for_tool
+
+        return _json_result(
+            rss_list_for_tool(
+                limit=limit,
+                query=query,
+                starred_only=starred_only,
+                unread_only=unread_only,
+            )
+        )
+
+    tools.append(StructuredTool.from_function(
+        func=rss_list_recent,
+        name="rss_list_recent",
+        description=(
+            "列出当前登录用户在 RSS 阅读器中的近期文章（标题、摘要、链接、已读/星标）。"
+            "用户询问订阅资讯、RSS、未读或星标文章时调用；勿编造未返回的条目。"
+        ),
     ))
 
     return tools
