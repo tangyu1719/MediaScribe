@@ -27,30 +27,104 @@ _agent_path = str(_AGENT_DIR)
 if _agent_path not in sys.path:
     sys.path.insert(0, _agent_path)
 
-# uvicorn --reload 不监视 src/agent；强制 reload 避免进程内缓存旧版 speech_to_text（无 strict 参数）
+# uvicorn --reload 不监视 src/agent；每次转写前 reload，避免进程内缓存旧版 speech_to_text
 import video_downloader as _video_downloader  # noqa: E402
 
-_video_downloader = importlib.reload(_video_downloader)
-if "strict" not in inspect.signature(_video_downloader.speech_to_text).parameters:
-    raise ImportError(
-        f"speech_to_text 缺少 strict 参数，请确认 {_video_downloader.__file__} 已更新并重启后端"
-    )
 download_video = _video_downloader.download_video
-speech_to_text = _video_downloader.speech_to_text
 VIDEO_DIR = _video_downloader.VIDEO_DIR
 _log = logging.getLogger(__name__)
-_log.info(
-    "[链接沉淀文档-视频转写|video_pipeline|video_downloader|硬编执行|加载] "
-    "module=%s; strict_ok=true",
-    _video_downloader.__file__,
-)
+
+
+def _reload_speech_to_text():
+    """重新加载 video_downloader，返回最新的 speech_to_text（含 strict 参数检测）。"""
+    mod = importlib.reload(_video_downloader)
+    fn = mod.speech_to_text
+    has_strict = "strict" in inspect.signature(fn).parameters
+    return fn, has_strict, str(getattr(mod, "__file__", ""))
+
+
+def invoke_speech_to_text(
+    video_path: str,
+    *,
+    log_callback=None,
+    progress_callback=None,
+    llm_config=None,
+    user_prompt: str = "",
+    strict: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """调用 Whisper 转写；兼容旧版 speech_to_text（无 strict 时用 transcribe_quality 兜底）。"""
+    fn, has_strict, mod_file = _reload_speech_to_text()
+    kwargs: Dict[str, Any] = {
+        "log_callback": log_callback,
+        "progress_callback": progress_callback,
+        "llm_config": llm_config,
+        "user_prompt": user_prompt,
+    }
+    if has_strict:
+        kwargs["strict"] = strict
+    elif strict:
+        _log.warning(
+            "[链接沉淀文档-视频转写|video_pipeline.invoke_speech_to_text|speech_to_text|硬编执行|兼容] "
+            "旧版 speech_to_text 无 strict; module=%s; 将用 transcribe_quality 门禁",
+            mod_file,
+        )
+    try:
+        result = fn(video_path, **kwargs)
+    except TypeError as exc:
+        if "strict" in str(exc) and "strict" in kwargs:
+            _log.warning(
+                "[链接沉淀文档-视频转写|video_pipeline.invoke_speech_to_text|speech_to_text|硬编执行|重试] "
+                "strict 参数不被接受，降级重试; module=%s; error=%s",
+                mod_file,
+                exc,
+            )
+            kwargs.pop("strict", None)
+            result = fn(video_path, **kwargs)
+            has_strict = False
+        else:
+            raise
+    if strict and not has_strict and result is not None:
+        from .transcribe_quality import assess_transcript
+
+        raw = (result.get("full_text") or result.get("transcript") or "").strip()
+        assessment = assess_transcript(
+            raw,
+            transcribe_source=str(result.get("transcribe_source") or ""),
+            transcript_meta=result if isinstance(result, dict) else None,
+        )
+        if not assessment.ok:
+            return {
+                "ok": False,
+                "error_code": assessment.error_code,
+                "error_message": assessment.error_message,
+            }
+    return result
+
+
+# 模块加载时探测一次（仅日志，不阻断启动——避免 uvicorn 子进程路径不一致）
+try:
+    _st_fn, _st_strict, _st_file = _reload_speech_to_text()
+    speech_to_text = _st_fn
+    _log.info(
+        "[链接沉淀文档-视频转写|video_pipeline|video_downloader|硬编执行|加载] "
+        "module=%s; strict_ok=%s",
+        _st_file,
+        _st_strict,
+    )
+except Exception as _load_ex:
+    speech_to_text = _video_downloader.speech_to_text
+    _log.warning(
+        "[链接沉淀文档-视频转写|video_pipeline|video_downloader|硬编执行|加载] "
+        "reload_failed; error=%s",
+        _load_ex,
+    )
 from .link_hash import normalize_link_for_hash, url_hash as link_url_hash
 from .task_manager import get_task, add_log, update_task, get_output_dir
 from .history_manager import add_or_update_task_in_history, sync_html_artifact_for_task
 from .document_consolidation import run_document_consolidation, extract_title_from_summary, clean_title
 from .ops import ops_monitor_task
 from .file_naming import render_output_template, build_output_md_path
-from .transcribe_quality import assess_transcript, assess_video_file
+from .transcribe_quality import assess_transcript, assess_video_file, sanitize_transcript_for_pipeline
 from .pipeline_logging import pipeline_log
 from .pipeline_finalize import complete_task_after_md, mark_pipeline_running
 from .pipeline_stages import PipelineStageTracker, mark_failure_from_task, remap_resume_stage
@@ -199,6 +273,19 @@ def generate_document_with_comments(
         naming_rule=naming_rule if "{doc_title}" in naming_rule else "",
     )
 
+    from .pipeline_comments import (
+        append_comments_section_to_md,
+        format_comments_file_link,
+        render_comments_section,
+    )
+
+    viewpoint = (result_data.get("comments_viewpoint") or "").strip()
+    cfp = (comments_file_path or result_data.get("comments_file_path") or "").strip()
+    comments_section = render_comments_section(
+        cfg.get("comments_section_template") or "",
+        comments_analysis=viewpoint,
+        comments_file_path=cfp,
+    )
     output_tpl = (cfg.get("output_template") or "").strip()
     md = render_output_template(
         output_tpl,
@@ -210,6 +297,9 @@ def generate_document_with_comments(
         transcribe_source=transcribe_source,
         link_title=(result_data.get("link_title") or doc_name),
         doc_title=doc_name,
+        comments_section=comments_section,
+        comments_analysis=viewpoint,
+        comments_file_link=format_comments_file_link(cfp),
     )
     if not md.strip():
         md = f"""# {platform}{content_type}分析
@@ -228,14 +318,12 @@ def generate_document_with_comments(
 ## AI分析摘要
 {summary}
 """
-    # 评论内容
-    if comments_file_path:
-        comments_filename = Path(comments_file_path).name
-        md += f"""
-## 评论区
-评论已单独保存，请查看: [{comments_filename}](./{comments_filename})
-"""
-
+    md = append_comments_section_to_md(
+        md,
+        cfg,
+        comments_analysis=viewpoint,
+        comments_file_path=cfp,
+    )
     md += """
 ---
 *由视频转文字处理工具自动生成*
@@ -485,8 +573,56 @@ def _write_bundle(doc_path: str, bundle: dict):
         pass
 
 
+def _is_douyin_graphic_url(link: str) -> bool:
+    """URL 路径可直接判定为抖音图文（article / note）。"""
+    low = (link or "").lower()
+    if not ("douyin.com" in low or "iesdouyin" in low):
+        return False
+    return "/article/" in low or "/note/" in low or "modal_id=" in low
+
+
 def _is_douyin_article_url(link: str) -> bool:
-    return "/article/" in link and ("douyin.com" in link or "tiktok.com" in link)
+    """兼容旧名：抖音图文 URL 快判（article + note）。"""
+    return _is_douyin_graphic_url(link)
+
+
+def _probe_douyin_graphic_sync(link: str, task_id: str = "") -> tuple:
+    """
+    检测抖音链接是否为图文（含 v.douyin.com 短链重定向到 /note/）。
+    返回 (is_graphic, content_type_hint)。
+    """
+    import time as _time
+
+    if _is_douyin_graphic_url(link):
+        return True, "douyin_image"
+
+    t0 = _time.perf_counter()
+    if task_id:
+        add_log(task_id, "[路由] 抖音类型检测开始（LinkAnalyzer._detect_douyin_type）…")
+    try:
+        from link_analyzer import LinkAnalyzer
+
+        analyzer = LinkAnalyzer()
+        dtype = analyzer._detect_douyin_type(link)
+        elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+        is_graphic = dtype == "douyin_image"
+        if task_id:
+            add_log(
+                task_id,
+                f"[路由] 抖音类型检测: {dtype}; is_graphic={is_graphic}; elapsed_ms={elapsed_ms}",
+            )
+        return is_graphic, dtype
+    except Exception as e:
+        elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+        if task_id:
+            add_log(
+                task_id,
+                f"抖音类型检测失败: {e}; elapsed_ms={elapsed_ms}",
+                "WARNING",
+            )
+        else:
+            add_log("system", f"抖音类型检测失败: {e}", "WARNING")
+    return False, "video"
 
 
 def _is_xiaohongshu_url(link: str) -> bool:
@@ -634,31 +770,40 @@ async def process_video_pipeline(task_id: str):
                 if comments_file_path:
                     add_log(task_id, f"断点恢复：复用评论文件 {comments_file_path}")
 
-        # ── 路由1：抖音图文 → 图文分析链路 ──
-        if _is_douyin_article_url(link):
-            add_log(task_id, "检测到抖音图文链接，路由到图文分析链路...")
-            prev_route = (task.get("pipeline_route") or "video").strip() or "video"
-            rf = (task.get("resume_from") or task.get("failed_stage") or "").strip()
-            mapped_rf = remap_resume_stage(rf, prev_route, "douyin_graphic") if rf else ""
-            patch: Dict[str, Any] = {
-                "pipeline_route": "douyin_graphic",
-                "stage": "抖音图文分析",
-                "status": "running",
-            }
-            if mapped_rf and mapped_rf != rf:
-                patch["resume_from"] = mapped_rf
-                if (task.get("failed_stage") or "") == rf:
-                    patch["failed_stage"] = mapped_rf
-                from .pipeline_stages import stage_label
-
-                add_log(
-                    task_id,
-                    f"[路由] 断点阶段 {rf}→{mapped_rf}（{stage_label(prev_route, rf)}→{stage_label('douyin_graphic', mapped_rf)}）",
+        # ── 路由1：抖音图文（article / note）→ 图文分析链路 ──
+        _link_low = link.lower()
+        if "douyin.com" in _link_low or "iesdouyin" in _link_low:
+            is_douyin_graphic = _is_douyin_graphic_url(link)
+            if not is_douyin_graphic:
+                is_douyin_graphic, _dtype_hint = await loop.run_in_executor(
+                    _io_executor(),
+                    lambda: _probe_douyin_graphic_sync(link, task_id),
                 )
-            update_task(task_id, **patch)
-            from .douyin_article import process_douyin_article_pipeline
-            await process_douyin_article_pipeline(task_id, user_prompt=user_prompt, comments_data=comments_data)
-            return
+            if is_douyin_graphic:
+                add_log(task_id, "检测到抖音图文，路由到图文分析链路...")
+                prev_route = (task.get("pipeline_route") or "video").strip() or "video"
+                rf = (task.get("resume_from") or task.get("failed_stage") or "").strip()
+                mapped_rf = remap_resume_stage(rf, prev_route, "douyin_graphic") if rf else ""
+                patch: Dict[str, Any] = {
+                    "pipeline_route": "douyin_graphic",
+                    "stage": "抖音图文分析",
+                    "status": "running",
+                    "content_type": "图文",
+                }
+                if mapped_rf and mapped_rf != rf:
+                    patch["resume_from"] = mapped_rf
+                    if (task.get("failed_stage") or "") == rf:
+                        patch["failed_stage"] = mapped_rf
+                    from .pipeline_stages import stage_label
+
+                    add_log(
+                        task_id,
+                        f"[路由] 断点阶段 {rf}→{mapped_rf}（{stage_label(prev_route, rf)}→{stage_label('douyin_graphic', mapped_rf)}）",
+                    )
+                update_task(task_id, **patch)
+                from .douyin_article import process_douyin_article_pipeline
+                await process_douyin_article_pipeline(task_id, user_prompt=user_prompt, comments_data=comments_data)
+                return
 
         # ── 路由2：小红书图文 → 小红书图文分析链路 ──
         if _is_xiaohongshu_url(link):
@@ -737,7 +882,7 @@ async def process_video_pipeline(task_id: str):
             llm_cfg = cfg.get("llm_config") or cfg
             transcript = await loop.run_in_executor(
                 _io_executor(),
-                lambda: speech_to_text(
+                lambda: invoke_speech_to_text(
                     video_path,
                     log_callback=log,
                     progress_callback=progress,
@@ -767,6 +912,17 @@ async def process_video_pipeline(task_id: str):
                 return
 
         raw_text = (transcript.get("full_text") or transcript.get("transcript") or "").strip()
+        cleaned_text, stripped_tail = sanitize_transcript_for_pipeline(raw_text)
+        if stripped_tail > 0 and cleaned_text:
+            add_log(
+                task_id,
+                f"[转写清洗] 已剔除尾部 Whisper 幻听循环（约 {stripped_tail} 字），保留有效正文进入沉淀",
+                "WARNING",
+            )
+            raw_text = cleaned_text
+            transcript["full_text"] = cleaned_text
+            if transcript.get("transcript"):
+                transcript["transcript"] = cleaned_text
         assessment = assess_transcript(
             raw_text,
             transcribe_source=str(transcript.get("transcribe_source") or ""),
@@ -806,6 +962,15 @@ async def process_video_pipeline(task_id: str):
                 except Exception:
                     pass
 
+            from .pipeline_comments import resolve_comments_text
+            from .pipeline_options_util import is_article_only
+
+            comments_text = resolve_comments_text(
+                comments_data=comments_data,
+                comments_file_path=comments_file_path
+                or str((task.get("comments") or {}).get("comments_file_path") or ""),
+            )
+            _article_only = is_article_only(task)
             consolidation = await loop.run_in_executor(
                 _llm_executor(),
                 lambda: run_document_consolidation(
@@ -814,6 +979,8 @@ async def process_video_pipeline(task_id: str):
                     user_prompt=user_prompt,
                     stage_label=f"{platform}视频沉淀",
                     summary_after_article=True,
+                    skip_summary=_article_only,
+                    comments_text=comments_text,
                     log_cb=lambda msg, lvl="INFO": add_log(task_id, msg, lvl),
                     ops_cb=_ops_cb,
                 ),
@@ -821,24 +988,28 @@ async def process_video_pipeline(task_id: str):
 
             ai_summary = (consolidation.get("ai_summary") or "").strip()
             article_text = (consolidation.get("article") or "").strip()
-            if not ai_summary:
+            transcript["comments_viewpoint"] = (consolidation.get("comments_viewpoint") or "").strip()
+            if not _article_only and not ai_summary:
                 tracker.fail("ai_analysis", "摘要生成失败")
                 return
 
             from .file_naming import resolve_doc_title
             task_snap = get_task(task_id) or {}
             link_title = (task_snap.get("link_title") or "").strip()
-            title = await loop.run_in_executor(
-                _io_executor(),
-                lambda: resolve_doc_title(
-                    ai_summary,
-                    link,
-                    link_title=link_title,
-                    fallback=(transcript.get("title") or platform),
-                    log_cb=lambda msg: add_log(task_id, msg),
-                    platform=platform,
-                ),
-            )
+            if _article_only:
+                title = link_title or (transcript.get("title") or platform)
+            else:
+                title = await loop.run_in_executor(
+                    _io_executor(),
+                    lambda: resolve_doc_title(
+                        ai_summary,
+                        link,
+                        link_title=link_title,
+                        fallback=(transcript.get("title") or platform),
+                        log_cb=lambda msg: add_log(task_id, msg),
+                        platform=platform,
+                    ),
+                )
             update_task(task_id, doc_title=title)
             add_log(task_id, f"二层标题（AI摘要）: {title}")
             tracker.complete("ai_analysis", {"ai_summary": ai_summary, "article": article_text or raw_text, "title": title, "link_title": link_title}, persist_payload={"ai_summary": ai_summary, "article": article_text or raw_text, "title": title, "link_title": link_title})

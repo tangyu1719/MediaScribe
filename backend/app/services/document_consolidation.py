@@ -21,7 +21,7 @@ if _AGENT_DIR and str(_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENT_DIR))
 
 from .pipeline_executor import get_llm_executor
-from .pipeline_comments import compose_summary_input
+from .pipeline_comments import compose_summary_input, prepare_comments_for_summary
 from .pipeline_logging import (
     enrich_pipeline_llm_cfg,
     invoke_llm_via_gateway,
@@ -255,6 +255,7 @@ def run_document_consolidation(
     user_prompt: str = "",
     stage_label: str = "文档沉淀",
     summary_after_article: bool = True,
+    skip_summary: bool = False,
     comments_text: str = "",
     log_cb: Callable = None,
     ops_cb: Callable = None,  # 运维Agent回调：(link, error_message, stage, error_type) -> None
@@ -590,27 +591,70 @@ def run_document_consolidation(
     ai_summary = ""
     article_text = ""
     raw_text = (text or "").strip()
-    comments_block = (comments_text or "").strip()
-    has_comments = bool(comments_block)
+    comments_raw = (comments_text or "").strip()
+    has_comments = bool(comments_raw)
+    comments_block = ""
+    comments_viewpoint = ""
+    comments_summary_mode = "none"
     if has_comments and not summary_after_article:
         log(f"[{stage_label}] 已抓取评论，摘要将与整理后正文合并（强制顺序摘要）", "INFO")
         summary_after_article = True
+
+    def _prepare_comments_block(article_ctx: str) -> None:
+        nonlocal comments_block, comments_viewpoint, comments_summary_mode
+        if not has_comments:
+            return
+        comments_user = (llm_cfg.get("comments_user_prompt") or "").strip()
+        comments_block, comments_viewpoint, comments_summary_mode = prepare_comments_for_summary(
+            comments_raw,
+            article_context=article_ctx,
+            llm_cfg=llm_cfg,
+            comments_user_prompt=comments_user,
+            log_cb=log_cb,
+            stage_label=stage_label,
+        )
 
     _plog(
         "入口",
         "文档沉淀开始",
         text_len=len(raw_text),
         summary_after_article=summary_after_article,
-        comments_len=len(comments_block),
+        skip_summary=skip_summary,
+        comments_len=len(comments_raw),
     )
 
-    if summary_after_article:
-        log(f"[{stage_label}] 顺序执行：先原文整理，再摘要" + ("（含评论区）" if has_comments else ""))
+    if skip_summary:
+        log(f"[{stage_label}] 仅原文整理模式（跳过摘要 Agent）")
         article_text = do_article(raw_text)
+        article_source = "llm_polish"
+        if not (article_text and article_text.strip()):
+            article_source = "heuristic_fallback"
+            article_text = raw_text
+        _plog(
+            "出口",
+            "文档沉淀完成（仅原文）",
+            ai_summary_len=0,
+            article_len=len(article_text or ""),
+            article_source=article_source,
+        )
+        return {
+            "ai_summary": "",
+            "article": article_text,
+            "article_source": article_source,
+            "comments_viewpoint": "",
+            "comments_summary_mode": "none",
+            "llm_meta": llm_meta,
+        }
+
+    if summary_after_article:
+        log(f"[{stage_label}] 顺序执行：先原文整理，再评论观点（可选），再摘要" + ("（含评论）" if has_comments else ""))
+        article_text = do_article(raw_text)
+        _prepare_comments_block(article_text or raw_text)
         summary_input = compose_summary_input(article_text or raw_text, comments_block)
         ai_summary = do_summarize(summary_input)
     else:
         log(f"[{stage_label}] 并发：摘要 + 原文整理（共享 LLM 池）")
+        _prepare_comments_block(raw_text)
         llm_ex = get_llm_executor()
         merged_raw = compose_summary_input(raw_text, comments_block)
         f_s = llm_ex.submit(lambda: do_summarize(merged_raw))
@@ -677,5 +721,7 @@ def run_document_consolidation(
         "ai_summary": ai_summary,
         "article": article_text,
         "article_source": article_source,
+        "comments_viewpoint": comments_viewpoint,
+        "comments_summary_mode": comments_summary_mode,
         "llm_meta": llm_meta,
     }

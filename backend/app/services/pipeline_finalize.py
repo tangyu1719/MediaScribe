@@ -29,30 +29,89 @@ def _sum_tokens_from_logs(task: Dict[str, Any]) -> int:
     return total
 
 
-def sync_pipeline_task_metrics(task_id: str) -> Dict[str, int]:
-    """汇总流水线总耗时(ms)与 Token（SPAN 优先，日志 token_count= 兜底）。"""
-    task = get_task(task_id) or {}
+def _empty_task_metrics() -> Dict[str, int]:
+    return {
+        "total_duration_ms": 0,
+        "total_token_count": 0,
+        "article_char_count": 0,
+        "summary_char_count": 0,
+    }
+
+
+def _resolve_md_char_counts(task: Dict[str, Any], tracker: Optional[PipelineStageTracker] = None) -> tuple[int, int]:
+    """从断点上下文 / 阶段结果 / 日志解析原文字数与摘要字数。"""
+    ai_ctx: Dict[str, Any] = {}
+    if tracker is not None:
+        ai_ctx = tracker.ctx_get("ai_analysis") or {}
+    if not ai_ctx:
+        rc = task.get("resume_context") or {}
+        ai_ctx = rc.get("ai_analysis") or {}
+    article = len(str(ai_ctx.get("article") or ""))
+    summary = len(str(ai_ctx.get("ai_summary") or ""))
+    if article or summary:
+        return article, summary
+
+    ps = (task.get("pipeline_stages") or {}).get("ai_analysis") or {}
+    res = ps.get("result") or {}
+    summary = int(res.get("ai_summary_len") or 0)
+    article = int(res.get("article_len") or 0)
+    if article or summary:
+        return article, summary
+
+    for ln in reversed(task.get("logs") or []):
+        msg = str(ln.get("message") or "")
+        m = re.search(r"ai_summary_len=(\d+).*article_len=(\d+)", msg)
+        if m:
+            return int(m.group(2)), int(m.group(1))
+    return 0, 0
+
+
+def _compute_md_duration_ms(task: Dict[str, Any], *, end_dt: Optional[datetime] = None) -> int:
+    """仅计算「开始分析链接 → MD 产出」耗时，不含 HTML/飞书后台。"""
     started = _parse_iso_dt(task.get("pipeline_started_at") or task.get("created_at") or "")
-    elapsed_ms = 0
-    if started:
-        elapsed_ms = max(0, int((datetime.now() - started.replace(tzinfo=None)).total_seconds() * 1000))
+    if not started:
+        return 0
 
-    total_tokens = 0
-    try:
-        from .span_audit import get_task as span_get_task
+    end = end_dt
+    if end is None:
+        end = _parse_iso_dt(str(task.get("md_completed_at") or ""))
+    if end is None:
+        ps = (task.get("pipeline_stages") or {}).get("generate_md") or {}
+        end = _parse_iso_dt(str(ps.get("updated_at") or ""))
+    if end is None:
+        return 0
 
-        span = span_get_task(task_id) or {}
-        total_tokens = int(span.get("total_token_count") or 0)
-        span_ms = int(span.get("total_duration_ms") or 0)
-        if span_ms > 0:
-            elapsed_ms = span_ms
-    except Exception:
-        pass
+    return max(
+        0,
+        int((end.replace(tzinfo=None) - started.replace(tzinfo=None)).total_seconds() * 1000),
+    )
 
+
+def sync_pipeline_task_metrics(task_id: str) -> Dict[str, int]:
+    """仅 completed 任务返回卡片指标；耗时冻结至 MD 产出，Token 不含 HTML/飞书。"""
+    task = get_task(task_id) or {}
+    if str(task.get("status") or "").lower() != "completed":
+        return _empty_task_metrics()
+
+    duration_ms = int(task.get("total_duration_ms") or 0)
+    if duration_ms <= 0:
+        duration_ms = _compute_md_duration_ms(task)
+
+    total_tokens = int(task.get("total_token_count") or 0)
     if total_tokens <= 0:
         total_tokens = _sum_tokens_from_logs(task)
 
-    return {"total_duration_ms": elapsed_ms, "total_token_count": total_tokens}
+    article_chars = int(task.get("article_char_count") or 0)
+    summary_chars = int(task.get("summary_char_count") or 0)
+    if article_chars <= 0 and summary_chars <= 0:
+        article_chars, summary_chars = _resolve_md_char_counts(task)
+
+    return {
+        "total_duration_ms": duration_ms,
+        "total_token_count": total_tokens,
+        "article_char_count": article_chars,
+        "summary_char_count": summary_chars,
+    }
 
 
 def apply_task_card_metrics(task_id: str, *, persist: bool = False) -> Dict[str, int]:
@@ -61,6 +120,28 @@ def apply_task_card_metrics(task_id: str, *, persist: bool = False) -> Dict[str,
     if persist:
         update_task(task_id, **metrics)
     return metrics
+
+
+def enrich_completed_task_metrics(task: Dict[str, Any]) -> Dict[str, Any]:
+    """为历史/队列条目回填 MD 阶段指标（completed 专用，不修改非完成态）。"""
+    out = dict(task)
+    if str(out.get("status") or "").lower() != "completed":
+        out.update(_empty_task_metrics())
+        return out
+
+    duration_ms = int(out.get("total_duration_ms") or 0)
+    if duration_ms <= 0:
+        duration_ms = _compute_md_duration_ms(out)
+        out["total_duration_ms"] = duration_ms
+
+    article_chars = int(out.get("article_char_count") or 0)
+    summary_chars = int(out.get("summary_char_count") or 0)
+    if article_chars <= 0 and summary_chars <= 0:
+        article_chars, summary_chars = _resolve_md_char_counts(out)
+        out["article_char_count"] = article_chars
+        out["summary_char_count"] = summary_chars
+
+    return out
 
 
 def mark_pipeline_running(task_id: str) -> None:
@@ -88,8 +169,24 @@ def complete_task_after_md(
     from .file_naming import output_basename
     from .history_manager import add_or_update_task_in_history
     from .video_pipeline import start_html_generation
+    from .pipeline_options_util import skip_html as _skip_html
 
-    metrics = sync_pipeline_task_metrics(task_id)
+    now = datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
+    task = get_task(task_id) or {}
+    article_chars, summary_chars = _resolve_md_char_counts(task, tracker)
+    duration_ms = _compute_md_duration_ms({**task, "md_completed_at": now_iso}, end_dt=now)
+    total_tokens = int(task.get("total_token_count") or 0)
+    if total_tokens <= 0:
+        total_tokens = _sum_tokens_from_logs(task)
+
+    metrics = {
+        "md_completed_at": now_iso,
+        "total_duration_ms": duration_ms,
+        "total_token_count": total_tokens,
+        "article_char_count": article_chars,
+        "summary_char_count": summary_chars,
+    }
     update_task(
         task_id,
         status="completed",
@@ -101,26 +198,31 @@ def complete_task_after_md(
         failed_stage_label="",
         resume_from="",
         error=None,
-        feishu_status=(get_task(task_id) or {}).get("feishu_status") or "",
+        feishu_status=task.get("feishu_status") or "",
         **metrics,
     )
     add_log(
         task_id,
         f"MD 已生成，任务完成；耗时 {metrics['total_duration_ms']}ms，"
-        f"Token {metrics['total_token_count']}（飞书/HTML 后台继续）",
+        f"Token {metrics['total_token_count']}（{article_chars}+{summary_chars} 字；飞书/HTML 后台继续）",
         "INFO",
     )
 
-    start_html_generation(
-        doc_path,
-        task_id,
-        title=title,
-        platform=platform,
-        link=link,
-        html_step_id=html_step_id or "",
-    )
-    if tracker:
-        tracker.complete("html", {"html_status": "async_pending"})
+    if not _skip_html(task):
+        start_html_generation(
+            doc_path,
+            task_id,
+            title=title,
+            platform=platform,
+            link=link,
+            html_step_id=html_step_id or "",
+        )
+        if tracker:
+            tracker.complete("html", {"html_status": "async_pending"})
+    else:
+        add_log(task_id, "[流水线选项] 跳过 HTML 长页生成", "INFO")
+        if tracker:
+            tracker.complete("html", {"html_status": "skipped"})
         tracker.finish_success()
     if url_hash:
         clear_pipeline_cache(url_hash)

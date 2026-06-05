@@ -76,10 +76,11 @@ def _load_config() -> Dict:
 
 # ─── 类型检测 ───
 def _detect_douyin_type(link: str, html: str = "") -> str:
-    """检测抖音链接类型：article / note / video"""
-    if "/article/" in link:
+    """检测抖音链接类型：article / note / video（含短链重定向）。"""
+    link_low = (link or "").lower()
+    if "/article/" in link_low:
         return "article"
-    if "/note/" in link or "modal_id=" in link:
+    if "/note/" in link_low or "modal_id=" in link_low:
         return "note"
     # 尝试从 SSR 数据判断
     if html:
@@ -87,6 +88,35 @@ def _detect_douyin_type(link: str, html: str = "") -> str:
             return "note"  # 图文笔记
         if "images" in html and '"images":[' in html:
             return "note"
+    # 短链 v.douyin.com 等：委托 LinkAnalyzer 解析重定向后 URL
+    try:
+        from link_analyzer import LinkAnalyzer
+
+        dtype = LinkAnalyzer()._detect_douyin_type(link)
+        if dtype == "douyin_image":
+            try:
+                import requests
+
+                resp = requests.get(
+                    link,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+                        ),
+                        "Referer": "https://www.douyin.com/",
+                    },
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                final = (resp.url or link).lower()
+                if "/article/" in final:
+                    return "article"
+            except Exception:
+                pass
+            return "note"
+    except Exception:
+        pass
     return "video"
 
 
@@ -308,7 +338,7 @@ def _ocr_compensation(result: Dict, task_id: str) -> Dict:
     for idx, img_url in enumerate(image_links, 1):
         try:
             _log(task_id, f"[OCR] {idx}/{len(image_links)}: {img_url[:80]}...")
-            img_data = analyzer.download_image(img_url)
+            img_data = self.download_image(img_url, referer="https://www.douyin.com/")
             if not img_data: continue
             ocr_result = analyzer.ocr_image(img_data)
             if not ocr_result: continue
@@ -363,19 +393,48 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
     ai_summary = result_data.get("ai_summary", "")
     article = result_data.get("article", ai_summary)
     link_title = (result_data.get("link_title") or "").strip()
+    comments_viewpoint = (result_data.get("comments_viewpoint") or "").strip()
+    comments_file_path = (result_data.get("comments_file_path") or "").strip()
 
     content_type = result_data.get("content_type", "图文")
     doc_name = (title or "抖音内容").strip()
     transcribe_source = (result_data.get("transcribe_source") or "").strip() or "link_analyzer"
     naming_rule = (cfg.get("file_naming_rule") or "").strip()
-    from .file_naming import build_output_md_path
+    from .file_naming import build_output_md_path, render_output_template
+    from .pipeline_comments import (
+        append_comments_section_to_md,
+        format_comments_file_link,
+        render_comments_section,
+    )
+
     doc_path, _ = build_output_md_path(
         doc_name,
         content_type,
         naming_rule=naming_rule if "{doc_title}" in naming_rule else "",
     )
 
-    md = f"""# 抖音{content_type}分析
+    comments_section = render_comments_section(
+        cfg.get("comments_section_template") or "",
+        comments_analysis=comments_viewpoint,
+        comments_file_path=comments_file_path,
+    )
+    output_tpl = (cfg.get("output_template") or "").strip()
+    md = render_output_template(
+        output_tpl,
+        platform="抖音",
+        link=link,
+        article=article,
+        summary=ai_summary,
+        content_type=content_type,
+        transcribe_source=transcribe_source,
+        link_title=link_title,
+        doc_title=title,
+        comments_section=comments_section,
+        comments_analysis=comments_viewpoint,
+        comments_file_link=format_comments_file_link(comments_file_path),
+    )
+    if not md.strip():
+        md = f"""# 抖音{content_type}分析
 
 ## 分析信息
 - 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -390,7 +449,14 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
 
 ## AI分析摘要
 {ai_summary}
-
+"""
+    md = append_comments_section_to_md(
+        md,
+        cfg,
+        comments_analysis=comments_viewpoint,
+        comments_file_path=comments_file_path,
+    )
+    md += """
 ---
 *由多模态文档化助手自动生成*
 """
@@ -464,10 +530,14 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
             except Exception:
                 pass
 
+        from .pipeline_comments import resolve_comments_text
+
+        comments_text = resolve_comments_text(comments_data=comments_data)
         consolidation = await loop.run_in_executor(
             _llm_executor(), lambda: run_document_consolidation(
                 text=source_text, llm_cfg=cfg,
                 stage_label="抖音图文沉淀",
+                comments_text=comments_text,
                 log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
                 ops_cb=_ops_cb,
             ))
@@ -501,6 +571,8 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
             "article": consolidation.get("article", ""),
             "title": title,
             "link_title": link_title,
+            "comments_viewpoint": (consolidation.get("comments_viewpoint") or "").strip(),
+            "comments_file_path": str((task.get("comments") or {}).get("comments_file_path") or ""),
         }
         doc_path = await loop.run_in_executor(
             _io_executor(), lambda: _generate_md(result_data, link, task_id, cfg=cfg))

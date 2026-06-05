@@ -43,6 +43,9 @@ def render_output_template(
     transcribe_source: str = "",
     link_title: str = "",
     doc_title: str = "",
+    comments_section: str = "",
+    comments_analysis: str = "",
+    comments_file_link: str = "",
 ) -> str:
     """按 config output_template 渲染成品 Markdown。"""
     tpl = (template or "").strip()
@@ -60,6 +63,9 @@ def render_output_template(
         "transcribe_source": (transcribe_source or "").strip() or "unknown",
         "link_title": link_title,
         "doc_title": doc_title,
+        "comments_section": (comments_section or "").strip(),
+        "comments_analysis": (comments_analysis or "").strip(),
+        "comments_file_link": (comments_file_link or "").strip(),
     }
     return apply_naming_template(tpl, **ctx)
 
@@ -189,7 +195,7 @@ def _detect_content_kind(link: str, platform: str, html: str = "", route_type: s
     if plat == "抖音":
         if "/note/" in link_low or "douyin.com/note" in link_low:
             return "图文"
-        if re.search(r'"awemeType"\s*:\s*68', html or ""):
+        if re.search(r'"awemeType"\s*:\s*(?:2|68)', html or ""):
             return "图文"
         return "视频"
     if plat == "B站":

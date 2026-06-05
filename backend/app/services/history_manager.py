@@ -275,7 +275,10 @@ def add_or_update_task_in_history(task_data: Dict[str, Any]):
         "feishu_doc_token": task_data.get("feishu_doc_token"),
         "total_duration_ms": int(task_data.get("total_duration_ms") or 0),
         "total_token_count": int(task_data.get("total_token_count") or 0),
+        "article_char_count": int(task_data.get("article_char_count") or 0),
+        "summary_char_count": int(task_data.get("summary_char_count") or 0),
         "pipeline_started_at": task_data.get("pipeline_started_at", ""),
+        "md_completed_at": task_data.get("md_completed_at", ""),
         "error": task_data.get("error"),
         "logs": _merged_logs_for_history(task_id, task_data),
         "created_at": task_data.get("created_at", datetime.now().isoformat()),
@@ -527,6 +530,24 @@ def _public_span_task(t: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _public_span_step(s: Dict[str, Any]) -> Dict[str, Any]:
+    inp = s.get("input_payload")
+    out = s.get("output_payload")
+    tool_io = s.get("tool_io_brief")
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except Exception:
+            pass
+    if isinstance(out, str):
+        try:
+            out = json.loads(out)
+        except Exception:
+            pass
+    if isinstance(tool_io, str):
+        try:
+            tool_io = json.loads(tool_io)
+        except Exception:
+            pass
     return {
         "task_id": s.get("task_id"),
         "step_id": s.get("step_id"),
@@ -540,9 +561,11 @@ def _public_span_step(s: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": s.get("confidence"),
         "error_code": s.get("error_code"),
         "error_message": s.get("error_message"),
-        "input_payload": s.get("input_payload"),
-        "output_payload": s.get("output_payload"),
+        "input_payload": inp,
+        "output_payload": out,
+        "tool_io_brief": tool_io if isinstance(tool_io, dict) else {},
         "decision": s.get("decision"),
+        "session_id": s.get("session_id"),
     }
 
 

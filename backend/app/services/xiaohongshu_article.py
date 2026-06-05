@@ -264,7 +264,8 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
     title = (result_data.get("title") or "小红书内容").strip()
     ai_summary = result_data.get("ai_summary", "")
     article = result_data.get("article", ai_summary)
-    comments_text = result_data.get("comments_text", "")
+    comments_viewpoint = (result_data.get("comments_viewpoint") or "").strip()
+    comments_file_path = (result_data.get("comments_file_path") or "").strip()
     link_title = (result_data.get("link_title") or "").strip()
 
     content_type = result_data.get("content_type", "图文")
@@ -275,6 +276,17 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         naming_rule=naming_rule if "{doc_title}" in naming_rule else "",
     )
     transcribe_source = (result_data.get("transcribe_source") or "").strip() or "link_analyzer"
+    from .pipeline_comments import (
+        append_comments_section_to_md,
+        format_comments_file_link,
+        render_comments_section,
+    )
+
+    comments_section = render_comments_section(
+        cfg.get("comments_section_template") or "",
+        comments_analysis=comments_viewpoint,
+        comments_file_path=comments_file_path,
+    )
     output_tpl = (cfg.get("output_template") or "").strip()
     md = render_output_template(
         output_tpl,
@@ -286,6 +298,9 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         transcribe_source=transcribe_source,
         link_title=link_title,
         doc_title=title,
+        comments_section=comments_section,
+        comments_analysis=comments_viewpoint,
+        comments_file_link=format_comments_file_link(comments_file_path),
     )
     if not md.strip():
         md = f"""# {platform}{content_type}分析
@@ -304,13 +319,12 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
 ## AI分析摘要
 {ai_summary}
 """
-    if comments_text:
-        md += f"""
-## 评论区
-
-{comments_text}
-"""
-
+    md = append_comments_section_to_md(
+        md,
+        cfg,
+        comments_analysis=comments_viewpoint,
+        comments_file_path=comments_file_path,
+    )
     md += """
 ---
 *由多模态文档化助手自动生成*
@@ -476,6 +490,15 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                 except Exception:
                     pass
 
+            from .pipeline_comments import resolve_comments_text
+            from .pipeline_options_util import is_article_only
+
+            comments_text = resolve_comments_text(
+                comments_data=result.get("comments"),
+                comments_text=str(result.get("comments_text") or ""),
+            )
+            task_snap = _tm.get_task(task_id) or {}
+            _article_only = is_article_only(task_snap)
             consolidation = await loop.run_in_executor(
                 _llm_executor(),
                 lambda: run_document_consolidation(
@@ -483,28 +506,38 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                     llm_cfg=cfg,
                     user_prompt=user_prompt,
                     stage_label="小红书图文沉淀",
+                    comments_text=comments_text,
+                    skip_summary=_article_only,
                     log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
                     ops_cb=_ops_cb,
                 ),
             )
             ai_summary = (consolidation.get("ai_summary") or "").strip()
             article_text = (consolidation.get("article") or "").strip()
-            ok_sum = bool(ai_summary)
+            comments_viewpoint = (consolidation.get("comments_viewpoint") or "").strip()
+            ok_sum = bool(ai_summary) or _article_only
             _end_span(consolidate_span, status="completed" if ok_sum else "failed", task_id=task_id, error_code="" if ok_sum else "XHS_SUMMARY_FAILED")
             if not ok_sum:
                 tracker.fail("ai_analysis", "AI摘要失败")
                 return
             title_span = _begin_span(task_id, session_id, "summary", "标题提取", {})
-            title = await loop.run_in_executor(
-                _io_executor(),
-                lambda: resolve_doc_title(ai_summary, link, link_title=link_title, fallback=(result.get("title") or "小红书内容"), log_cb=lambda msg: _log(task_id, msg), platform="小红书"),
-            )
+            if _article_only:
+                title = link_title or (result.get("title") or "小红书内容")
+            else:
+                title = await loop.run_in_executor(
+                    _io_executor(),
+                    lambda: resolve_doc_title(ai_summary, link, link_title=link_title, fallback=(result.get("title") or "小红书内容"), log_cb=lambda msg: _log(task_id, msg), platform="小红书"),
+                )
             _tm.update_task(task_id, doc_title=title)
             _end_span(title_span, status="completed", task_id=task_id, output_payload={"doc_title": title})
             tracker.complete(
                 "ai_analysis",
-                {"ai_summary_len": len(ai_summary), "doc_title": title},
-                persist_payload={"ai_summary": ai_summary, "article": article_text or source_text, "title": title, "link_title": link_title},
+                {
+                    "ai_summary_len": len(ai_summary),
+                    "article_len": len(article_text or source_text),
+                    "doc_title": title,
+                },
+                persist_payload={"ai_summary": ai_summary, "article": article_text or source_text, "title": title, "link_title": link_title, "comments_viewpoint": comments_viewpoint},
             )
         else:
             tracker.log_skip("ai_analysis")
@@ -513,6 +546,7 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             article_text = (ck.get("article") or "").strip()
             title = (ck.get("title") or "").strip()
             link_title = (ck.get("link_title") or link_title or "").strip()
+            comments_viewpoint = (ck.get("comments_viewpoint") or "").strip()
             if not ai_summary:
                 tracker.fail("ai_analysis", "断点缺少摘要缓存，无法恢复")
                 return
@@ -533,6 +567,8 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                         "title": title,
                         "link_title": link_title,
                         "content_type": (task.get("content_type") or "图文"),
+                        "comments_viewpoint": comments_viewpoint,
+                        "comments_file_path": (task.get("comments") or {}).get("comments_file_path") or "",
                     },
                     link,
                     "小红书",
@@ -573,15 +609,21 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             url_hash=task.get("url_hash") or "",
         )
         if tracker.should_run("feishu_upload"):
-            start_feishu_upload_async(
-                doc_path,
-                task_id,
-                link=link,
-                user_prompt=user_prompt,
-                cfg=cfg,
-                log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
-                pipeline_route="xiaohongshu_graphic",
-            )
+            from .pipeline_options_util import skip_feishu as _skip_feishu
+
+            if not _skip_feishu(_tm.get_task(task_id)):
+                start_feishu_upload_async(
+                    doc_path,
+                    task_id,
+                    link=link,
+                    user_prompt=user_prompt,
+                    cfg=cfg,
+                    log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
+                    pipeline_route="xiaohongshu_graphic",
+                )
+            else:
+                tracker.log_skip("feishu_upload")
+                _log(task_id, "[流水线选项] 跳过飞书上传")
         else:
             tracker.log_skip("feishu_upload")
         _span_patch_task(task_id, open_layer={"current_assessment": "流程完成", "decision": "stop"})

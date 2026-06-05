@@ -15,6 +15,8 @@ _llm_pool: Optional[ThreadPoolExecutor] = None
 _llm_size: int = 0
 _bg_pool: Optional[ThreadPoolExecutor] = None
 _bg_size: int = 0
+_profile_pool: Optional[ThreadPoolExecutor] = None
+_profile_size: int = 0
 _lock = threading.Lock()
 
 _DEFAULT_LLM_WORKERS = 256
@@ -92,6 +94,19 @@ def get_llm_executor() -> ThreadPoolExecutor:
 def get_background_executor() -> ThreadPoolExecutor:
     """HTML 长页等后台任务 —— 与主流水线解耦，并发由 LLM 网关决定。"""
     return _get_or_resize("_bg_pool", "_bg_size", background_pool_size(), "pipeline-bg")
+
+
+def profile_pool_size() -> int:
+    import os
+
+    cfg = load_config()
+    default = int(os.environ.get("PROFILE_PIPELINE_WORKERS", "2") or "2")
+    return _cfg_int(cfg, "profile_pipeline_workers", default, minimum=1, cap=8)
+
+
+def get_profile_executor() -> ThreadPoolExecutor:
+    """UP 画像深度采样 —— 与前端主链路线程池隔离，避免抢槽位。"""
+    return _get_or_resize("_profile_pool", "_profile_size", profile_pool_size(), "profile-run")
 
 
 def get_pipeline_executor() -> ThreadPoolExecutor:

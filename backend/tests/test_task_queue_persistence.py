@@ -11,6 +11,9 @@ def _tm():
 def test_merge_history_restores_completed_card():
     tm = _tm()
     tm._task_store.clear()
+    tm._dismissed_task_ids.clear()
+    tm._dismissed_url_hashes.clear()
+    tm._queue_persist_loaded = True
     tid = "hist001"
     hist = {
         "id": tid,
@@ -21,8 +24,8 @@ def test_merge_history_restores_completed_card():
         "status": "completed",
         "stage": "完成",
         "progress": 100,
-        "created_at": "2026-05-25T10:00:00",
-        "updated_at": "2026-05-25T10:05:00",
+        "created_at": "2026-06-06T10:00:00",
+        "updated_at": "2026-06-06T10:05:00",
         "link_title": "测试笔记",
     }
 
@@ -66,4 +69,40 @@ def test_consolidate_keeps_running_over_newer_pending():
     assert removed == 1
     assert "run1" in tm._task_store
     assert "pend1" not in tm._task_store
+    tm._task_store.clear()
+
+
+def test_cleanup_dismisses_prevents_reimport():
+    tm = _tm()
+    tm._task_store.clear()
+    tm._dismissed_task_ids.clear()
+    tm._dismissed_url_hashes.clear()
+    tm._read_status_map.clear()
+    tm._queue_persist_loaded = True
+    tid = "cleanup001"
+    tm._task_store[tid] = {
+        "task_id": tid,
+        "link": "https://www.xiaohongshu.com/explore/cleanup001",
+        "url_hash": "uh_cleanup",
+        "status": "completed",
+        "created_at": "2026-06-06T10:00:00",
+        "updated_at": "2026-06-06T10:05:00",
+    }
+    removed = tm.cleanup_completed_tasks()
+    assert removed == 1
+    assert tid not in tm._task_store
+    assert tid in tm._dismissed_task_ids
+    tm._task_store.clear()
+
+
+def test_mark_task_read_one_way():
+    tm = _tm()
+    tm._task_store.clear()
+    tm._read_status_map.clear()
+    tm._queue_persist_loaded = True
+    tid = "read001"
+    tm._task_store[tid] = {"task_id": tid, "status": "completed", "link": "https://x.test/a"}
+    assert tm.mark_task_read(tid) is True
+    assert tm._task_store[tid]["read_status"] == "read"
+    assert tm.mark_task_read(tid) is True
     tm._task_store.clear()

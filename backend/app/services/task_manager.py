@@ -22,6 +22,12 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 _OUTPUT_OVERRIDE = _OUTPUT_ROOT / ".web_output_dir.json"
 
 _task_store: Dict[str, Dict] = {}
+_queue_tick: int = 0
+_QUEUE_PERSIST_FILE = _OUTPUT_ROOT / ".web_queue_cards.json"
+_dismissed_task_ids: set = set()
+_dismissed_url_hashes: set = set()
+_read_status_map: Dict[str, str] = {}
+_queue_persist_loaded = False
 
 # 仍在执行中的状态（同 url_hash 禁止再开新卡片）
 _PIPELINE_ACTIVE_STATUSES = frozenset({
@@ -31,6 +37,137 @@ _PIPELINE_ACTIVE_STATUSES = frozenset({
 })
 # 真正跑流水线中的状态（pending 仅排队，允许在同卡片上断点恢复/重跑）
 _PIPELINE_RUNNING_STATUSES = _PIPELINE_ACTIVE_STATUSES - {"pending"}
+
+
+def _task_for_persist(task: Dict[str, Any]) -> Dict[str, Any]:
+    """持久化队列卡片（不含 logs，避免文件过大）。"""
+    row = {k: v for k, v in task.items() if k != "logs"}
+    tid = str(row.get("task_id") or "")
+    if tid and tid in _read_status_map:
+        row["read_status"] = _read_status_map[tid]
+    return row
+
+
+def _ensure_queue_persistence_loaded() -> None:
+    global _queue_persist_loaded, _dismissed_task_ids, _dismissed_url_hashes, _read_status_map
+    if _queue_persist_loaded:
+        return
+    _queue_persist_loaded = True
+    path = _QUEUE_PERSIST_FILE
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        _dismissed_task_ids = set(data.get("dismissed_task_ids") or [])
+        _dismissed_url_hashes = set(data.get("dismissed_url_hashes") or [])
+        _read_status_map = {
+            str(k): str(v)
+            for k, v in (data.get("read_status") or {}).items()
+            if str(v) in ("read", "unread")
+        }
+        for tid, card in (data.get("cards") or {}).items():
+            tid = str(tid or "").strip()
+            if not tid or tid in _dismissed_task_ids or not isinstance(card, dict):
+                continue
+            uh = (card.get("url_hash") or "").strip() or link_url_hash(card.get("link") or "")
+            if uh and uh in _dismissed_url_hashes:
+                continue
+            if tid not in _task_store:
+                restored = dict(card)
+                restored["task_id"] = tid
+                restored["logs"] = []
+                if tid in _read_status_map:
+                    restored["read_status"] = _read_status_map[tid]
+                _task_store[tid] = restored
+    except Exception:
+        pass
+
+
+def _save_queue_persistence() -> None:
+    _ensure_queue_persistence_loaded()
+    try:
+        cards = {
+            tid: _task_for_persist(task)
+            for tid, task in _task_store.items()
+            if tid not in _dismissed_task_ids
+        }
+        payload = {
+            "version": 1,
+            "dismissed_task_ids": sorted(_dismissed_task_ids),
+            "dismissed_url_hashes": sorted(_dismissed_url_hashes),
+            "read_status": dict(_read_status_map),
+            "cards": cards,
+        }
+        _QUEUE_PERSIST_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _is_task_dismissed(*, task_id: str = "", url_hash: str = "") -> bool:
+    _ensure_queue_persistence_loaded()
+    tid = (task_id or "").strip()
+    uh = (url_hash or "").strip()
+    if tid and tid in _dismissed_task_ids:
+        return True
+    if uh and uh in _dismissed_url_hashes:
+        return True
+    return False
+
+
+def _apply_read_status_to_task(task: Dict[str, Any]) -> None:
+    tid = str(task.get("task_id") or "")
+    if not tid:
+        return
+    rs = _read_status_map.get(tid)
+    if not rs and (task.get("status") or "") == "completed":
+        rs = "unread"
+    if rs:
+        task["read_status"] = rs
+
+
+def _set_task_read_status(task_id: str, status: str) -> None:
+    _ensure_queue_persistence_loaded()
+    st = (status or "").strip()
+    if st not in ("read", "unread"):
+        return
+    _read_status_map[task_id] = st
+    task = _task_store.get(task_id)
+    if task:
+        task["read_status"] = st
+
+
+def mark_task_read(task_id: str) -> bool:
+    """将已完成任务标记为已读（单向，不可撤销）。"""
+    _ensure_queue_persistence_loaded()
+    task = _task_store.get(task_id)
+    if not task or (task.get("status") or "") != "completed":
+        return False
+    if (task.get("read_status") or _read_status_map.get(task_id)) == "read":
+        return True
+    _set_task_read_status(task_id, "read")
+    _save_queue_persistence()
+    return True
+
+
+def dismiss_queue_task(task_id: str) -> bool:
+    """从队列移除卡片并记录 dismiss，防止历史回填再次显示。"""
+    _ensure_queue_persistence_loaded()
+    task = _task_store.get(task_id)
+    tid = (task_id or "").strip()
+    if not tid:
+        return False
+    _dismissed_task_ids.add(tid)
+    if task:
+        uh = (task.get("url_hash") or "").strip() or link_url_hash(task.get("link") or "")
+        if uh:
+            _dismissed_url_hashes.add(uh)
+    existed = _task_store.pop(tid, None) is not None
+    _read_status_map.pop(tid, None)
+    _save_queue_persistence()
+    return existed or tid in _dismissed_task_ids
 
 
 def get_output_dir() -> Path:
@@ -91,6 +228,7 @@ def create_task(
     resume_context: Optional[Dict] = None,
     pipeline_stages: Optional[Dict] = None,
     pipeline_route: Optional[str] = None,
+    pipeline_options: Optional[Dict] = None,
 ) -> str:
     norm = normalize_link_for_hash(link)
     uh = link_url_hash(link)
@@ -108,6 +246,7 @@ def create_task(
             resume_context=resume_context,
             pipeline_stages=pipeline_stages,
             pipeline_route=pipeline_route,
+            pipeline_options=pipeline_options,
             full_rerun=False,
         )
 
@@ -132,9 +271,8 @@ def create_task(
     except Exception:
         pass
 
-    # 计算优先级：新任务默认优先级为当前最高优先级+1
-    existing_tasks = list_tasks()
-    max_priority = max([t.get("priority", 0) for t in existing_tasks], default=0)
+    # 入队序号：每次提交/重跑刷新 queue_seq，卡片排到最左
+    now = datetime.now().isoformat()
     
     _task_store[task_id] = {
         "task_id": task_id,
@@ -160,21 +298,29 @@ def create_task(
         "feishu_status": "",
         "feishu_message": "",
         "pipeline_started_at": "",
+        "md_completed_at": "",
         "total_duration_ms": 0,
         "total_token_count": 0,
+        "article_char_count": 0,
+        "summary_char_count": 0,
         "error": None,
         "user_prompt": user_prompt,
         "comments": comments or {"enabled": False, "count": 10, "sort": "hot"},
         "pipeline_route": pipeline_route or route_type_boot or "",
+        "pipeline_options": pipeline_options or {},
         "pipeline_stages": pipeline_stages or {},
         "failed_stage": "",
         "failed_stage_label": "",
         "resume_from": resume_from or "",
         "resume_context": resume_context or {},
-        "priority": max_priority + 1,  # 新任务默认最高优先级
-        "created_at": datetime.now().isoformat(),
+        "priority": 0,
+        "queue_seq": 0,
+        "created_at": now,
+        "updated_at": now,
         "logs": [],
     }
+    _touch_task_queue(_task_store[task_id])
+    _save_queue_persistence()
     return task_id
 
 
@@ -210,14 +356,78 @@ def add_log(task_id: str, message: str, level: str = "INFO"):
 def update_task(task_id: str, **kwargs):
     task = _task_store.get(task_id)
     if task:
+        old_status = (task.get("status") or "").strip()
+        bump = bool(kwargs.pop("bump_queue", False))
         task.update(kwargs)
+        new_status = (task.get("status") or "").strip()
+        task["updated_at"] = datetime.now().isoformat()
+        if new_status == "completed" and old_status != "completed":
+            _set_task_read_status(task_id, "unread")
+        _apply_read_status_to_task(task)
+        if bump:
+            _touch_task_queue(task)
+        _save_queue_persistence()
+
+
+def _touch_task_queue(task: Dict[str, Any]) -> int:
+    """提交/重新执行时刷新队列序号，使卡片排到最左（queue_seq 越大越靠前）。"""
+    global _queue_tick
+    existing = [int(t.get("queue_seq") or t.get("priority") or 0) for t in _task_store.values()]
+    _queue_tick = max(_queue_tick, max(existing, default=0)) + 1
+    task["queue_seq"] = _queue_tick
+    task["priority"] = _queue_tick
+    task["updated_at"] = datetime.now().isoformat()
+    return _queue_tick
+
+
+def _task_queue_sort_key(t: Dict[str, Any]) -> Tuple[int, str, str]:
+    """最近提交/重新执行（queue_seq 大、updated_at 新）排在最左。"""
+    qs = t.get("queue_seq")
+    if qs is None:
+        qs = t.get("priority")
+    try:
+        seq = int(qs) if qs is not None else 0
+    except (TypeError, ValueError):
+        seq = 0
+    if seq <= 0:
+        dt = _parse_iso_dt(str(t.get("updated_at") or t.get("created_at") or ""))
+        if dt:
+            seq = int(dt.timestamp() * 1000)
+    # 负号 → 降序：序号大的在左
+    return (-seq, str(t.get("updated_at") or t.get("created_at") or ""), str(t.get("task_id") or ""))
+
+
+def _normalize_queue_seqs() -> None:
+    """为缺 queue_seq 的任务按 created_at 补序号（幂等）。"""
+    tasks = list(_task_store.values())
+    if not tasks:
+        return
+    missing = [t for t in tasks if t.get("queue_seq") is None]
+    if not missing:
+        return
+    have_seq = [int(t.get("queue_seq") or 0) for t in tasks if t.get("queue_seq") is not None]
+    next_seq = max(have_seq, default=0) + 1
+    missing.sort(key=lambda t: (str(t.get("created_at") or ""), str(t.get("task_id") or "")))
+    for t in missing:
+        legacy_p = t.get("priority")
+        if legacy_p is not None:
+            try:
+                seq = int(legacy_p)
+            except (TypeError, ValueError):
+                seq = next_seq
+                next_seq += 1
+        else:
+            seq = next_seq
+            next_seq += 1
+        t["queue_seq"] = seq
+        t["priority"] = seq
 
 
 def list_tasks() -> list:
-    """返回任务列表，按优先级和创建时间排序"""
+    """返回任务列表：最近提交/重新执行的在最左（queue_seq 降序）。"""
+    _normalize_queue_seqs()
     tasks = list(_task_store.values())
-    # 按优先级降序，然后按创建时间降序
-    return sorted(tasks, key=lambda t: (t.get("priority", 0), t.get("created_at", "")), reverse=True)
+    return sorted(tasks, key=_task_queue_sort_key)
 
 
 # 终态任务在队列中保留可见的时长（小时）
@@ -273,9 +483,13 @@ def import_history_task_to_queue(hist: Dict[str, Any]) -> Optional[str]:
     link = (hist.get("link") or "").strip()
     if not task_id or not link:
         return None
+    if _is_task_dismissed(task_id=task_id, url_hash=(hist.get("url_hash") or "")):
+        return None
     if task_id in _task_store:
         return None
     uh = (hist.get("url_hash") or "").strip() or link_url_hash(link)
+    if _is_task_dismissed(url_hash=uh):
+        return None
     if find_task_by_url_hash(uh):
         return None
 
@@ -288,8 +502,9 @@ def import_history_task_to_queue(hist: Dict[str, Any]) -> Optional[str]:
         error = error or "后端重启或热重载导致任务中断，请点「重新执行」"
 
     norm = hist.get("normalized_link") or normalize_link_for_hash(link)
-    existing_tasks = list_tasks()
-    max_priority = max([t.get("priority", 0) for t in existing_tasks], default=0)
+    existing_tasks = list(_task_store.values())
+    max_seq = max([int(t.get("queue_seq") or t.get("priority") or 0) for t in existing_tasks], default=0)
+    queue_seq = max_seq + 1
 
     _task_store[task_id] = {
         "task_id": task_id,
@@ -321,10 +536,13 @@ def import_history_task_to_queue(hist: Dict[str, Any]) -> Optional[str]:
         "failed_stage_label": hist.get("failed_stage_label") or "",
         "resume_from": hist.get("resume_from") or "",
         "resume_context": hist.get("resume_context") or {},
-        "priority": max_priority + 1,
+        "priority": queue_seq,
+        "queue_seq": queue_seq,
         "created_at": hist.get("created_at") or datetime.now().isoformat(),
+        "updated_at": hist.get("updated_at") or hist.get("created_at") or datetime.now().isoformat(),
         "logs": list(hist.get("logs") or [])[-400:],
     }
+    _apply_read_status_to_task(_task_store[task_id])
     return task_id
 
 
@@ -344,15 +562,21 @@ def merge_history_into_queue(*, limit: int = 80) -> int:
 
 def init_queue_from_history() -> int:
     """启动时恢复队列可见任务。"""
+    _ensure_queue_persistence_loaded()
     n = merge_history_into_queue(limit=100)
     consolidate_queue_by_url_hash()
+    _save_queue_persistence()
     return n
 
 
 def list_queue_tasks() -> list:
     """供 /api/process/queue 使用：先回填历史再返回内存列表。"""
+    _ensure_queue_persistence_loaded()
     merge_history_into_queue(limit=80)
-    return list_tasks()
+    tasks = list_tasks()
+    for t in tasks:
+        _apply_read_status_to_task(t)
+    return tasks
 
 
 def list_pending_tasks() -> list:
@@ -361,12 +585,15 @@ def list_pending_tasks() -> list:
 
 
 def list_running_tasks() -> list:
-    """返回运行中的任务列表"""
-    return [t for t in list_tasks() if t.get("status") in ("started", "running")]
+    """返回运行中的任务列表（与 _PIPELINE_RUNNING_STATUSES 对齐，不含 pending）"""
+    return [t for t in list_tasks() if (t.get("status") or "") in _PIPELINE_RUNNING_STATUSES]
 
 
 def delete_task(task_id: str) -> bool:
-    return _task_store.pop(task_id, None) is not None
+    ok = _task_store.pop(task_id, None) is not None
+    if ok:
+        _save_queue_persistence()
+    return ok
 
 
 def cancel_task(task_id: str) -> bool:
@@ -376,48 +603,57 @@ def cancel_task(task_id: str) -> bool:
         task["status"] = "cancelled"
         task["stage"] = "已取消"
         task["error"] = "用户取消"
+        task["updated_at"] = datetime.now().isoformat()
+        _save_queue_persistence()
         return True
     return False
 
 
 def move_task_priority(task_id: str, direction: str) -> bool:
     """
-    移动任务优先级（仅对 pending 状态的任务有效）
-    direction: 'up' 或 'down'
+    调整 pending 任务在队列中的左右位置（仅 pending）。
+    direction: 'up' 向左（更靠前）、'down' 向右。
     """
     task = _task_store.get(task_id)
     if not task or task.get("status") != "pending":
         return False
-    
+
     pending = list_pending_tasks()
     if len(pending) < 2:
         return False
-    
-    # 找到当前任务在 pending 列表中的位置
+
     idx = None
     for i, t in enumerate(pending):
         if t.get("task_id") == task_id:
             idx = i
             break
-    
+
     if idx is None:
         return False
-    
-    # 调整优先级
-    current_priority = task.get("priority", 0)
+
     if direction == "up" and idx > 0:
-        # 与前面的任务交换优先级
         other = pending[idx - 1]
-        other_priority = other.get("priority", 0)
-        task["priority"] = other_priority + 1
+        a_seq = int(task.get("queue_seq") or task.get("priority") or 0)
+        b_seq = int(other.get("queue_seq") or other.get("priority") or 0)
+        task["queue_seq"] = b_seq
+        task["priority"] = b_seq
+        other["queue_seq"] = a_seq
+        other["priority"] = a_seq
+        task["updated_at"] = datetime.now().isoformat()
+        _save_queue_persistence()
         return True
-    elif direction == "down" and idx < len(pending) - 1:
-        # 与后面的任务交换优先级
+    if direction == "down" and idx < len(pending) - 1:
         other = pending[idx + 1]
-        other_priority = other.get("priority", 0)
-        task["priority"] = other_priority - 1
+        a_seq = int(task.get("queue_seq") or task.get("priority") or 0)
+        b_seq = int(other.get("queue_seq") or other.get("priority") or 0)
+        task["queue_seq"] = b_seq
+        task["priority"] = b_seq
+        other["queue_seq"] = a_seq
+        other["priority"] = a_seq
+        task["updated_at"] = datetime.now().isoformat()
+        _save_queue_persistence()
         return True
-    
+
     return False
 
 
@@ -457,8 +693,11 @@ def remove_duplicate_tasks(url_hash: str, keep_task_id: str) -> int:
         if tid == keep_task_id:
             continue
         if link_url_hash((_task_store.get(tid) or {}).get("link") or "") == uh:
+            _dismissed_task_ids.add(tid)
             del _task_store[tid]
             removed += 1
+    if removed:
+        _save_queue_persistence()
     return removed
 
 
@@ -536,9 +775,11 @@ def restart_existing_task(
         "html_message": "",
     })
     _sync_link_identity_fields(task, link)
+    _touch_task_queue(task)
     mode = "全量重跑" if full_rerun else ("断点恢复" if task.get("resume_from") else "重新执行")
     _append_restart_log(task, f"[{mode}] 复用本卡片 task_id={task_id}")
     remove_duplicate_tasks(uh, task_id)
+    _save_queue_persistence()
     return task_id
 
 
@@ -573,8 +814,9 @@ def rehydrate_task_from_history(
             full_rerun=full_rerun,
         )
 
-    existing = list_tasks()
-    max_priority = max([t.get("priority", 0) for t in existing], default=0)
+    existing = list(_task_store.values())
+    max_seq = max([int(t.get("queue_seq") or t.get("priority") or 0) for t in existing], default=0)
+    queue_seq = max_seq + 1
     _task_store[task_id] = {
         "task_id": task_id,
         "status": "pending",
@@ -605,8 +847,10 @@ def rehydrate_task_from_history(
         "failed_stage_label": "" if full_rerun else (hist.get("failed_stage_label") or ""),
         "resume_from": "" if full_rerun else (resume_from or hist.get("resume_from") or ""),
         "resume_context": {} if full_rerun else (resume_context or hist.get("resume_context") or {}),
-        "priority": max_priority + 1,
+        "priority": queue_seq,
+        "queue_seq": queue_seq,
         "created_at": hist.get("created_at") or datetime.now().isoformat(),
+        "updated_at": hist.get("updated_at") or hist.get("created_at") or datetime.now().isoformat(),
         "logs": list(hist.get("logs") or [])[-400:],
     }
     return restart_existing_task(
@@ -750,13 +994,13 @@ def consolidate_queue_by_url_hash() -> int:
 
 
 def cleanup_completed_tasks() -> int:
-    """清理已完成的任务（从内存中移除）"""
+    """清理已完成的任务（从内存中移除，并标记 dismiss 防止历史回填）"""
     to_remove = []
     for task_id, task in _task_store.items():
         if task.get("status") in ("completed", "failed", "cancelled"):
             to_remove.append(task_id)
-    
+
     for task_id in to_remove:
-        del _task_store[task_id]
-    
+        dismiss_queue_task(task_id)
+
     return len(to_remove)

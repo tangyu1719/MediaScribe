@@ -72,9 +72,12 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
     only_xhs_id = bool(xhs_id) and not urls and has_social_kw
     link_doc_relevant = bool(urls) or only_xhs_id or (has_social_kw and (has_link_doc_kw or wants_comments or wants_crawl))
 
-    # 评论抓取不在路由层自动执行，仅 LLM 在用户勾选 read_comments 后调用 scrape_comments 工具
+    # 评论抓取：用户勾选 read_comments 或话术含「评论」时在流水线内抓取；不在路由层单独跑 scrape
     run_comment_scrape = False
-    run_link_pipeline = False
+    doc_intent = bool(
+        wants_pipeline or wants_crawl or has_link_doc_kw or read_comments or wants_comments
+    )
+    run_link_pipeline = bool(urls) and not only_xhs_id and doc_intent
 
     skip_web_search = link_doc_relevant and (
         bool(urls) or only_xhs_id or wants_comments or wants_crawl
@@ -107,3 +110,63 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
         "wants_comments": wants_comments,
         "read_comments": read_comments,
     }
+
+
+async def enqueue_link_pipeline_from_chat(
+    link_ctx: Dict[str, Any],
+    *,
+    user_prompt: str = "",
+    read_comments: bool = False,
+    comment_count: int = 10,
+    comment_sort: str = "hot",
+    session_id: str = "",
+) -> Dict[str, Any]:
+    """对话路由检测到 URL+文档化意图时，自动提交链接沉淀流水线。"""
+    if not link_ctx.get("run_link_pipeline") or not link_ctx.get("urls"):
+        return {"ok": False, "reason": "no_auto_start"}
+    url = str(link_ctx["urls"][0]).strip()
+    plat = (link_ctx.get("platform") or "").strip() or platform_from_url(url) or "未知"
+    try:
+        from .pipeline_comments import normalize_comments_count
+        from .task_manager import reuse_or_enqueue_task, add_log
+        from .pipeline_scheduler import run_pipeline_with_slot
+        from .video_pipeline import process_video_pipeline
+        import asyncio
+
+        count = normalize_comments_count(comment_count, default=10)
+        sort = (comment_sort or "hot").strip() or "hot"
+        comments_cfg = {
+            "enabled": bool(read_comments),
+            "count": count if read_comments else 10,
+            "sort": sort,
+        }
+        tid, reused = reuse_or_enqueue_task(
+            plat,
+            url,
+            user_prompt=(user_prompt or "")[:500],
+            comments=comments_cfg,
+            action="start",
+        )
+        add_log(
+            tid,
+            f"[链接文档化-对话自动启流水线|link_doc_routing.enqueue_link_pipeline_from_chat|{url}|Agent执行|提交] "
+            f"read_comments={read_comments}; count={comments_cfg['count']}; reused={reused}",
+        )
+
+        async def _run_one():
+            await run_pipeline_with_slot(tid, lambda: process_video_pipeline(tid))
+
+        asyncio.create_task(_run_one())
+        return {
+            "ok": True,
+            "async": True,
+            "task_id": tid,
+            "reused": reused,
+            "platform": plat,
+            "url": url,
+            "read_comments": read_comments,
+            "comment_count": comments_cfg["count"],
+            "hint": "已在链接文档化队列启动；可在任务卡片查看进度与 MD 产出",
+        }
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)[:500]}

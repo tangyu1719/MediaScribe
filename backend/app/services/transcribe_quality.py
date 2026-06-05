@@ -78,6 +78,95 @@ def _normalize_phrase(phrase: str) -> str:
     return re.sub(r"\s+", "", (phrase or "").strip())
 
 
+def _compact_index_to_raw_prefix(raw: str, compact_keep: int) -> str:
+    """将紧凑文本保留长度映射回原始字符串前缀。"""
+    if compact_keep <= 0:
+        return ""
+    kept = 0
+    out: List[str] = []
+    for ch in raw:
+        if not ch.isspace():
+            if kept >= compact_keep:
+                break
+            kept += 1
+        if kept < compact_keep:
+            out.append(ch)
+    cleaned = "".join(out).strip()
+    compact = _normalize_phrase(raw)
+    if len(cleaned) < MIN_TRANSCRIPT_CHARS and len(compact[:compact_keep]) >= MIN_TRANSCRIPT_CHARS:
+        return compact[:compact_keep]
+    return cleaned
+
+
+def _find_longest_clean_prefix_cut(compact: str) -> int:
+    """从尾部收缩，找重复率低于阈值的最长前缀（处理滑动错位幻听）。"""
+    n = len(compact)
+    if n < MIN_TRANSCRIPT_CHARS:
+        return n
+    min_keep = max(MIN_TRANSCRIPT_CHARS, int(n * 0.15))
+    step = max(8, n // 80)
+    cut = n
+    while cut >= min_keep:
+        ratio, _ = compute_repetition_ratio(compact[:cut])
+        if ratio < REPETITION_RATIO_THRESHOLD:
+            return cut
+        cut -= step
+    ratio, _ = compute_repetition_ratio(compact[:min_keep])
+    if ratio < REPETITION_RATIO_THRESHOLD:
+        return min_keep
+    return n
+
+
+def strip_whisper_hallucination_tail(text: str) -> Tuple[str, int]:
+    """
+    剔除 Whisper 尾部短语循环幻听（如「小伙伴们」连排），保留前文有效转写。
+    返回 (清洗后文本, 剔除的紧凑字符数)。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return raw, 0
+    compact = _normalize_phrase(raw)
+    n = len(compact)
+    if n < 60:
+        return raw, 0
+
+    full_ratio, _ = compute_repetition_ratio(compact)
+    if full_ratio < REPETITION_RATIO_THRESHOLD:
+        return raw, 0
+
+    best_cut = n
+    max_period = min(40, max(REPEAT_PHRASE_MIN_LEN, n // REPEAT_PHRASE_MIN_COUNT))
+    for period in range(REPEAT_PHRASE_MIN_LEN, max_period + 1):
+        unit = compact[n - period : n]
+        if len(unit) < REPEAT_PHRASE_MIN_LEN:
+            continue
+        pos = n - period
+        cnt = 1
+        while pos >= period:
+            if compact[pos - period : pos] == unit:
+                cnt += 1
+                pos -= period
+            else:
+                break
+        if cnt >= REPEAT_PHRASE_MIN_COUNT and pos < best_cut:
+            best_cut = pos
+
+    prefix_cut = _find_longest_clean_prefix_cut(compact)
+    best_cut = min(best_cut, prefix_cut)
+
+    if best_cut >= n:
+        return raw, 0
+
+    stripped = n - best_cut
+    cleaned = _compact_index_to_raw_prefix(raw, best_cut)
+    return cleaned, stripped
+
+
+def sanitize_transcript_for_pipeline(text: str) -> Tuple[str, int]:
+    """生产路径：先剔除尾部幻听再进入门禁与 LLM 沉淀。"""
+    return strip_whisper_hallucination_tail(text)
+
+
 def compute_repetition_ratio(text: str) -> Tuple[float, List[str]]:
     """按句/短语及 n-gram 统计重复占比，识别 Whisper 幻听循环。"""
     raw = (text or "").strip()
@@ -138,6 +227,10 @@ def assess_transcript(
     """生产路径转写门禁。"""
     meta = dict(transcript_meta or {})
     raw = (text or "").strip()
+    stripped_tail = 0
+    cleaned, stripped_tail = sanitize_transcript_for_pipeline(raw)
+    if stripped_tail > 0 and cleaned:
+        raw = cleaned
     char_len = len(raw)
 
     if meta.get("ok") is False or meta.get("error_code"):
@@ -199,9 +292,11 @@ def assess_transcript(
             transcribe_degraded=True,
         )
 
+    degraded = bool(stripped_tail > 0 and ratio < REPETITION_RATIO_THRESHOLD)
     return TranscriptAssessment(
         ok=True,
         char_len=char_len,
         repetition_ratio=ratio,
         repeated_samples=tuple(samples),
+        transcribe_degraded=degraded,
     )
