@@ -11,7 +11,7 @@
     PUBLIC_PAGES: ['/login.html', '/register.html', '/forgot-password.html'],
     PUBLIC_API_PREFIXES: ['/api/auth/login', '/api/auth/register', '/api/auth/send-code', '/api/health', '/output/'],
     ADMIN_PAGES: ['iag', 'settings'],
-    REQUIRES_AUTH_PAGES: ['video', 'orch', 'chat', 'agpz', 'rag', 'multimodal', 'cache', 'ops', 'profile']
+    REQUIRES_AUTH_PAGES: ['video', 'orch', 'chat', 'tasks', 'agpz', 'rag', 'multimodal', 'cache', 'ops', 'profile', 'settings']
   };
 
   // ==================== 状态管理 ====================

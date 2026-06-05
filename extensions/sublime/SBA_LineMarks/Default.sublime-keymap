@@ -1,0 +1,5 @@
+[
+  { "keys": ["ctrl+q"], "command": "sba_toggle_line_mark" },
+  { "keys": ["f2"], "command": "sba_goto_line_mark", "args": { "where": "next" } },
+  { "keys": ["shift+f2"], "command": "sba_goto_line_mark", "args": { "where": "prev" } }
+]

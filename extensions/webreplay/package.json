@@ -1,0 +1,15 @@
+{
+  "name": "webreplay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "开源 DOM 录制重放扩展（webXport 思路复刻，无付费墙）",
+  "scripts": {
+    "build": "node scripts/gen-icons.mjs && node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

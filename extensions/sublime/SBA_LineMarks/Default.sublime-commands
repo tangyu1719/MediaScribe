@@ -1,0 +1,6 @@
+[
+  { "caption": "SBA: Toggle Line Mark", "command": "sba_toggle_line_mark" },
+  { "caption": "SBA: Next Line Mark", "command": "sba_goto_line_mark", "args": { "where": "next" } },
+  { "caption": "SBA: Previous Line Mark", "command": "sba_goto_line_mark", "args": { "where": "prev" } },
+  { "caption": "SBA: Reload Line Marks", "command": "sba_reload_line_marks" }
+]

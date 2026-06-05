@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WebReplay</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>WebReplay</h1>
+    <p class="sub">开源录制重放 · 无付费墙</p>
+  </header>
+
+  <section id="rec-section">
+    <input id="script-name" type="text" placeholder="新脚本名称（如：千帆笔记）" maxlength="40" />
+    <button id="btn-start-rec" type="button">开始录制</button>
+    <p id="rec-status" class="hint hidden"></p>
+  </section>
+
+  <section>
+    <h2>已保存脚本 <span id="script-count">(0)</span></h2>
+    <ul id="script-list"></ul>
+    <p id="empty-hint" class="hint">还没有脚本，在当前网页点「开始录制」</p>
+  </section>
+
+  <footer>
+    <button id="btn-export" type="button">导出全部</button>
+    <label class="import-btn">
+      导入
+      <input id="file-import" type="file" accept="application/json" hidden />
+    </label>
+  </footer>
+
+  <p id="toast" class="toast hidden"></p>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

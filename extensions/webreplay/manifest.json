@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "WebReplay",
+  "version": "0.1.0",
+  "description": "开源 DOM 录制与重放；可选 API 请求记录；本地 MCP 消息接口（无付费墙）",
+  "action": {
+    "default_title": "WebReplay",
+    "default_popup": "popup/index.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background/index.js",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "downloads",
+    "scripting",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "http://127.0.0.1/*",
+      "http://localhost:*/*",
+      "http://127.0.0.1:*/*"
+    ]
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content/fetch-hook.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

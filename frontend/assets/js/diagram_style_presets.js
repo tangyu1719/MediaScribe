@@ -5,24 +5,25 @@
 (function (global) {
   const MERMAID_THEME_VARIABLES = {
     fontFamily: 'Inter, "Microsoft YaHei UI", "PingFang SC", sans-serif',
+    fontSize: "16px",
     primaryColor: "#ffffff",
-    primaryBorderColor: "#2a2a2a",
+    primaryBorderColor: "rgba(0,0,0,.08)",
     primaryTextColor: "#141414",
     secondaryColor: "#fafaf7",
     secondaryBorderColor: "#cbd5e1",
     secondaryTextColor: "#141414",
     tertiaryColor: "#f5f4ed",
-    lineColor: "#94a3b8",
+    lineColor: "#cbd5e1",
     noteBkgColor: "#fafaf7",
     noteTextColor: "#141414",
   };
 
   const MERMAID_INIT = {
     startOnLoad: false,
-    securityLevel: "loose",
+    securityLevel: "strict",
     theme: "base",
     look: "classic",
-    flowchart: { curve: "basis", padding: 18, htmlLabels: true, nodeSpacing: 50, rankSpacing: 48 },
+    flowchart: { curve: "basis", padding: 24, htmlLabels: true, nodeSpacing: 52, rankSpacing: 72 },
     themeVariables: { ...MERMAID_THEME_VARIABLES },
   };
 
@@ -55,8 +56,19 @@
   const TOOL_FLOW_PILL_CSS = {
     boardBackground: "linear-gradient(180deg,#fafbfc 0%,#f4f6f8 100%)",
     dotGrid: "radial-gradient(circle,rgba(15,23,42,.06) 1px,transparent 1px)",
+    dotGridSize: "12px 12px",
+    boardBorder: "1px solid rgba(0,0,0,.12)",
+    boardRadius: "14px",
+    boardPadding: "18px 14px 12px",
     pillRadius: "999px",
+    pillBackground: "#ffffff",
+    pillShadow: "0 2px 8px rgba(15,23,42,.06)",
+    pillBorder: "1px solid rgba(0,0,0,.12)",
     lineColor: "#cbd5e1",
+    lineWidth: "2px",
+    pillFontSize: "16px",
+    dotAccentFirst: "#f7591f",
+    mermaidNodeRx: "22",
   };
 
   const DIAGRAM_TYPE_META = [
