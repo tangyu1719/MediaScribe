@@ -46,8 +46,24 @@ _WHITELIST_PREFIXES = (
     "/favicon",
 )
 
-# 精确白名单（根路径 + 登录页 + 所有前端页面路由）
-_WHITELIST_EXACT = frozenset({"/", "/login.html", "/video", "/orch", "/chat", "/agpz", "/rag", "/multimodal", "/cache", "/ops", "/iag"})
+# 精确白名单（根路径 + 登录页 + 所有前端 SPA 页面路由；鉴权由前端 RBAC 遮罩/API 401 处理）
+_SPA_PAGE_PATHS = (
+    "/video",
+    "/orch",
+    "/chat",
+    "/tasks",
+    "/agpz",
+    "/rag",
+    "/rss",
+    "/multimodal",
+    "/cache",
+    "/ops",
+    "/profile",
+    "/settings",
+    "/iag",
+    "/webreplay",
+)
+_WHITELIST_EXACT = frozenset({"/", "/login.html", *_SPA_PAGE_PATHS})
 
 
 def _is_whitelisted(path: str) -> bool:
@@ -81,6 +97,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         if _is_whitelisted(path):
+            return await call_next(request)
+
+        # MD 预览：output 内正文/标记读写（侧车与 ST3 互通，路径校验在 service 层）
+        if path.startswith("/api/output/file") and request.method.upper() in ("GET", "PUT", "POST"):
             return await call_next(request)
 
         token = _get_token(request)

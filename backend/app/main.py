@@ -356,6 +356,12 @@ def _startup_auth_and_db():
         start_scheduler()
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("creator subscription scheduler: %s", e)
+    try:
+        from .services.rss_scheduler import start_scheduler as start_rss_scheduler
+
+        start_rss_scheduler()
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("rss scheduler startup: %s", e)
 
 
 @app.on_event("shutdown")
@@ -364,6 +370,12 @@ def _shutdown_creator_scheduler():
         from .services.creator_scheduler import stop_scheduler
 
         stop_scheduler()
+    except Exception:
+        pass
+    try:
+        from .services.rss_scheduler import stop_scheduler as stop_rss_scheduler
+
+        stop_rss_scheduler()
     except Exception:
         pass
     try:
@@ -551,6 +563,7 @@ def route_process_queue():
         "queue_seq",
         "created_at",
         "updated_at",
+        "read_status",
         "pipeline_started_at",
         "md_completed_at",
         "total_duration_ms",
@@ -619,6 +632,34 @@ def route_queue_cleanup():
     return {"ok": True, "removed": removed}
 
 
+@app.post("/api/process/queue/read")
+async def route_queue_mark_read(request: Request):
+    """将已完成任务标记为已读（单向）。"""
+    body = await request.json()
+    task_id = (body.get("task_id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "缺少 task_id")
+    from .services.task_manager import mark_task_read
+
+    ok = mark_task_read(task_id)
+    if not ok:
+        raise HTTPException(400, "仅已完成的卡片可标记为已读")
+    return {"ok": True, "read_status": "read"}
+
+
+@app.post("/api/process/queue/delete")
+async def route_queue_delete(request: Request):
+    """手动移除队列卡片（不会删除历史记录与产出文件）。"""
+    body = await request.json()
+    task_id = (body.get("task_id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "缺少 task_id")
+    from .services.task_manager import dismiss_queue_task
+
+    ok = dismiss_queue_task(task_id)
+    return {"ok": ok}
+
+
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 1: 链接文档化
 # ═══════════════════════════════════════════════════════════════════
@@ -677,6 +718,102 @@ async def route_output_open_local(request: Request):
     except Exception as e:
         raise HTTPException(500, f"无法打开本地文件: {e}") from e
     return {"ok": True, "path": str(abs_p), "action": action}
+
+
+@app.get("/api/output/file")
+def route_output_file_read(file: str = Query(..., description="output 目录内 basename")):
+    """读取 output 内 Markdown 正文与行标记（预览/编辑用）。"""
+    from .services.output_file_io import read_output_file
+
+    try:
+        return read_output_file(file)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/output/file/save")
+async def route_output_file_save(request: Request):
+    """保存 output 内 Markdown（覆盖或另存为）。"""
+    from .services.output_file_io import save_output_file
+
+    body = await request.json()
+    name = (body.get("file") or body.get("name") or "").strip()
+    content = body.get("content")
+    if content is None:
+        raise HTTPException(400, "缺少 content")
+    save_as = (body.get("save_as") or body.get("saveAs") or "").strip()
+    if not name:
+        raise HTTPException(400, "缺少 file")
+    try:
+        return save_output_file(name, str(content), save_as=save_as)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except FileExistsError as e:
+        raise HTTPException(409, str(e)) from e
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/output/file/marks")
+def route_output_file_marks_get(file: str = Query(...)):
+    """读取行标记侧车 JSON。"""
+    from .services.output_file_io import enrich_marks_with_labels, read_marks, resolve_output_file
+
+    try:
+        abs_p = resolve_output_file(file)
+        marks = enrich_marks_with_labels(abs_p, read_marks(abs_p))
+        return {"ok": True, "file": abs_p.name, "marks": marks}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.put("/api/output/file/marks")
+async def route_output_file_marks_put(request: Request):
+    """写入行标记侧车 JSON（与 ST3 SBA_LineMarks 互通）。"""
+    from .services.output_file_io import save_marks
+
+    body = await request.json()
+    name = (body.get("file") or body.get("name") or "").strip()
+    marks = body.get("marks")
+    if not name:
+        raise HTTPException(400, "缺少 file")
+    if not isinstance(marks, list):
+        raise HTTPException(400, "marks 须为数组")
+    try:
+        return save_marks(name, marks)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/output/file/marks/remap")
+async def route_output_file_marks_remap(request: Request):
+    """编辑正文后按行内容锚点传递标记（与 ST3 侧车同步）。"""
+    from .services.output_file_io import remap_marks_on_text_change, save_marks
+
+    body = await request.json()
+    name = (body.get("file") or body.get("name") or "").strip()
+    old_text = body.get("old_text")
+    new_text = body.get("new_text")
+    marks = body.get("marks")
+    if not name:
+        raise HTTPException(400, "缺少 file")
+    if old_text is None or new_text is None:
+        raise HTTPException(400, "缺少 old_text / new_text")
+    if not isinstance(marks, list):
+        raise HTTPException(400, "marks 须为数组")
+    try:
+        remapped = remap_marks_on_text_change(str(old_text), str(new_text), marks)
+        return save_marks(name, remapped)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.post("/api/output/config")
@@ -1078,6 +1215,9 @@ from .services.creator_subscription_api import (
     api_list_sync_runs,
     api_get_digest,
     api_get_latest_digest,
+    api_run_creator_profile,
+    api_get_latest_creator_profile,
+    api_get_creator_profile_run,
 )
 from .services.creator_scheduler import get_scheduler_status
 
@@ -1253,6 +1393,51 @@ def route_subscriptions_digest_get(digest_id: str):
 @app.get("/api/subscriptions/scheduler/status")
 def route_subscriptions_scheduler_status():
     return get_scheduler_status()
+
+
+@app.post("/api/subscriptions/{subscription_id}/profile/run")
+async def route_subscriptions_profile_run(subscription_id: str):
+    try:
+        result = await api_run_creator_profile(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not result.get("ok") and result.get("error_code") == "SUB_NOT_FOUND":
+        raise HTTPException(404, result.get("error"))
+    return result
+
+
+@app.get("/api/subscriptions/{subscription_id}/profile/latest")
+def route_subscriptions_profile_latest(subscription_id: str):
+    try:
+        row = api_get_latest_creator_profile(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not row:
+        raise HTTPException(404, "暂无 UP 画像")
+    return row
+
+
+@app.get("/api/subscriptions/profile-runs/{profile_run_id}")
+def route_subscriptions_profile_run_get(profile_run_id: str):
+    try:
+        row = api_get_creator_profile_run(profile_run_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not row:
+        raise HTTPException(404, "画像运行记录不存在")
+    return row
 
 
 @app.post("/api/history/regenerate-html")
@@ -1811,6 +1996,7 @@ async def route_chat_stream(request: Request):
     rag_prefetch = bool(body.get("rag_prefetch", False))
     web_search = bool(body.get("web_search", False))
     read_comments = bool(body.get("read_comments", False))
+    include_rss = bool(body.get("include_rss", False))
     deep_think = bool(body.get("deep_think", False))
     chat_max_tool_rounds = body.get("chat_max_tool_rounds")
     chat_tool_timeout_sec = body.get("chat_tool_timeout_sec")
@@ -1831,12 +2017,15 @@ async def route_chat_stream(request: Request):
         try:
             st = get_warmup_status()
             warmup_task = None
-            if not st.get("ready"):
+            # 工具/MCP：页面预热应已完成；仅 RAG 嵌入未就绪时再阻塞（避免重复 list_tools）
+            need_rag_embed = bool(rag_prefetch and not st.get("rag_embed_ready"))
+            need_tools = not st.get("ready")
+            if need_tools or need_rag_embed or st.get("warming"):
                 warmup_task = asyncio.create_task(
                     wait_for_chat_warmup(
                         read_comments=read_comments,
-                        include_rag=rag_prefetch,
-                        timeout_sec=45.0,
+                        include_rag=need_rag_embed or need_tools,
+                        timeout_sec=60.0 if need_rag_embed else 30.0,
                     )
                 )
             elif not st.get("warming"):
@@ -1933,6 +2122,7 @@ async def route_chat_stream(request: Request):
             async for event in _svc_chat_stream(
                 msg, sid, model=model, agent_id=agent_id, agent_profile=agent_profile, user_id=user_id,
                 rag_prefetch=rag_prefetch, web_search=web_search, read_comments=read_comments,
+                include_rss=include_rss,
                 deep_think=deep_think,
                 chat_max_tool_rounds=chat_max_tool_rounds,
                 chat_tool_timeout_sec=chat_tool_timeout_sec,
@@ -3229,6 +3419,183 @@ async def route_webreplay_run_log(request: Request):
         raise HTTPException(400, "缺少 scriptId")
     webreplay_append_run(_webreplay_user_id(request), script_id, body)
     return {"ok": True}
+
+
+# ─── RSS 订阅阅读 ───
+from .services.rss_reader import (
+    add_feed as rss_add_feed,
+    delete_feed as rss_delete_feed,
+    export_opml as rss_export_opml,
+    import_opml as rss_import_opml,
+    list_feeds as rss_list_feeds,
+    list_items as rss_list_items,
+    rss_stats as rss_stats_fn,
+    set_item_read as rss_set_item_read,
+    set_item_starred as rss_set_item_starred,
+    sync_all_feeds as rss_sync_all,
+    sync_feed as rss_sync_feed,
+    enqueue_item_document as rss_enqueue_item_document,
+)
+from .services.rss_scheduler import get_scheduler_status as rss_scheduler_status
+
+
+def _rss_user_id(request: Request) -> str:
+    uid = getattr(request.state, "user_id", None)
+    return str(uid) if uid else "anonymous"
+
+
+@app.get("/api/rss/health")
+def route_rss_health():
+    return {"ok": True, "service": "rss", "storage": "local-json"}
+
+
+@app.get("/api/rss/stats")
+def route_rss_stats(request: Request):
+    return rss_stats_fn(_rss_user_id(request))
+
+
+@app.get("/api/rss/feeds")
+def route_rss_list_feeds(request: Request):
+    return {"feeds": rss_list_feeds(_rss_user_id(request))}
+
+
+@app.post("/api/rss/feeds")
+async def route_rss_add_feed(request: Request):
+    body = await request.json()
+    url = str(body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "缺少 url")
+    try:
+        feed = rss_add_feed(_rss_user_id(request), url)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, "feed": feed}
+
+
+@app.delete("/api/rss/feeds/{feed_id}")
+def route_rss_delete_feed(feed_id: str, request: Request):
+    ok = rss_delete_feed(_rss_user_id(request), feed_id)
+    if not ok:
+        raise HTTPException(404, "订阅不存在")
+    return {"ok": True}
+
+
+@app.post("/api/rss/feeds/{feed_id}/sync")
+def route_rss_sync_one(feed_id: str, request: Request):
+    try:
+        feed = rss_sync_feed(_rss_user_id(request), feed_id)
+    except ValueError as ex:
+        msg = str(ex)
+        code = 404 if "不存在" in msg else 400
+        raise HTTPException(code, msg)
+    return {"ok": True, "feed": feed}
+
+
+@app.post("/api/rss/sync")
+def route_rss_sync_all(request: Request):
+    return rss_sync_all(_rss_user_id(request))
+
+
+@app.get("/api/rss/items")
+def route_rss_items(
+    request: Request,
+    feed_id: str = Query("", alias="feed_id"),
+    unread_only: bool = Query(False),
+    starred_only: bool = Query(False),
+    q: str = Query("", description="标题/摘要关键词"),
+):
+    return {
+        "items": rss_list_items(
+            _rss_user_id(request),
+            feed_id=feed_id,
+            unread_only=unread_only,
+            starred_only=starred_only,
+            query=q,
+        )
+    }
+
+
+@app.post("/api/rss/items/{item_id}/read")
+async def route_rss_item_read(item_id: str, request: Request):
+    body = await request.json()
+    read = bool(body.get("read", True))
+    try:
+        item = rss_set_item_read(_rss_user_id(request), item_id, read=read)
+    except ValueError as ex:
+        raise HTTPException(404, str(ex))
+    return {"ok": True, "item": item}
+
+
+@app.post("/api/rss/items/{item_id}/star")
+async def route_rss_item_star(item_id: str, request: Request):
+    body = await request.json()
+    starred = bool(body.get("starred", True))
+    try:
+        item = rss_set_item_starred(_rss_user_id(request), item_id, starred=starred)
+    except ValueError as ex:
+        raise HTTPException(404, str(ex))
+    return {"ok": True, "item": item}
+
+
+@app.get("/api/rss/opml/export")
+def route_rss_opml_export(request: Request):
+    from fastapi.responses import Response
+
+    xml_text = rss_export_opml(_rss_user_id(request))
+    return Response(content=xml_text, media_type="application/xml; charset=utf-8")
+
+
+@app.post("/api/rss/opml/import")
+async def route_rss_opml_import(request: Request):
+    body = await request.json()
+    content = str(body.get("content") or body.get("opml") or "")
+    try:
+        result = rss_import_opml(_rss_user_id(request), content)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, **result}
+
+
+@app.get("/api/rss/scheduler/status")
+def route_rss_scheduler_status():
+    return rss_scheduler_status()
+
+
+@app.post("/api/rss/items/{item_id}/document")
+async def route_rss_item_document(item_id: str, request: Request):
+    """RSS 文章全文抓取 → 摘要 MD → 链接沉淀任务卡片。"""
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_prompt = str((body or {}).get("user_prompt") or "")
+    uid = _rss_user_id(request)
+    try:
+        meta = rss_enqueue_item_document(uid, item_id, user_prompt=user_prompt)
+    except ValueError as ex:
+        msg = str(ex)
+        code = 404 if "不存在" in msg else 400
+        raise HTTPException(code, msg) from ex
+
+    from .services.pipeline_scheduler import run_pipeline_with_slot
+    from .services.rss_article_pipeline import process_rss_article_pipeline
+
+    task_id = str(meta.get("task_id") or "")
+    rss_iid = str(meta.get("item_id") or item_id)
+
+    async def _run_rss_doc() -> None:
+        await run_pipeline_with_slot(
+            task_id,
+            lambda: process_rss_article_pipeline(
+                task_id,
+                rss_item_id=rss_iid,
+                user_id=uid,
+            ),
+        )
+
+    asyncio.create_task(_run_rss_doc())
+    return {"ok": True, **meta}
 
 
 # SPA Frontend Routes (must be after all API routes)
