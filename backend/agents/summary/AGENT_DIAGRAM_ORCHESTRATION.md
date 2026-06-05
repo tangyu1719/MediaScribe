@@ -24,10 +24,28 @@
 | `longpage_legend_agent_enabled` | 是否调用图例侧翼网关（默认 true）。 |
 | `longpage_legend_llm_required` | true：图例必须由 LLM 产出；失败插入显式提示，禁止规则兜底顶替图例区。 |
 
-## 样式契约
+## 样式契约（单一真相源）
 
-长页壳 CSS 已对齐 **light-diagram-html-suite / diagram-design**：暖纸底、`Instrument Serif` 标题、`Inter` 正文；图例块 `.legend-suite`；Mermaid 主题变量（浅色线 `#2a2a2a`、纸白节点）。
+| 层 | 路径 | 用途 |
+|----|------|------|
+| Python | `src/agent/diagram_style_presets.py` | `build_longpage_diagram_css_rules`、`mermaid_initialize_js_object`、`attach_diagram_style_meta` |
+| 前端 | `web_rebuild_v2/frontend/assets/js/diagram_style_presets.js` | 网关配置页、`SBA_DIAGRAM_STYLES.applyMermaidInitialize`、工具页药丸流 |
+| 配置 | `config.json` 的 `diagram_style_*_json` | 覆盖 Mermaid / `.legend-suite` / `.diag-slot` 等 |
+
+长页 HTML **禁止**在 `longpage_html.py` 内再硬编码图例/Mermaid 槽样式；`finalize_longpage_html` 与 `_build_html_document` 均从 `meta.diagram_style_config`（交付时由 `attach_diagram_style_meta` 写入）读取。
+
+**药丸流流程图**：`flowchart` 图自动加 class `sba-pill-flow-board`；Mermaid 渲染后由 `stylizePillFlowBoards()` 设置圆角。
+
+## Mermaid 生产校验（写入 HTML 前）
+
+| 阶段 | 模块 | 行为 |
+|------|------|------|
+| 绘制后 | `ensure_drawings_dsl_valid` | 硬校验 + diagram_drawer 修复重试 |
+| 写槽位 | `build_diagram_section_html` | `encode_mermaid_for_html_attr` → `data-diagram-b64` |
+| 浏览器 | `finalize_longpage_html` | UTF-8 解码失败槽位内报错；`mermaid.run({ nodes })` 仅非空节点 |
+
+详见 `src/agent/agents/summary/AGENT_DIAGRAM_ORCHESTRATION.md` 与 `test_longpage_mermaid_validate.py`。
 
 ## 文档回归
 
-范式 ID、`diagram_mining_hints`、`overview_lead_ui` 与附录范例 JSON 的**单一真相源**为同目录 **`AGENT_LONGPAGE_IR_V1.md`**（文末含「文档回归」联动表）；本文件仅维护 **编排图项扩展键** 与网关路由说明。
+范式 ID、`diagram_mining_hints`、`overview_lead_ui` 与附录范例 JSON 的**单一真相源**为 **`AGENT_LONGPAGE_IR_V1.md`**；本文件维护编排图项扩展键与网关路由说明。

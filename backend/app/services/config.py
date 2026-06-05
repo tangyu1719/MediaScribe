@@ -153,6 +153,28 @@ def save_agent_routing(rules: Dict) -> Dict:
     return {"ok": True}
 
 
+def get_link_pipeline_prefs() -> Dict:
+    """链接文档化页：飞书/HTML 等快捷开关（读写 config.json）。"""
+    cfg = load_config()
+    return {
+        "feishu_sync_enabled": bool(cfg.get("feishu_sync_enabled")),
+        "feishu_default_folder_path": str(cfg.get("feishu_default_folder_path") or ""),
+        "longpage_html_enabled": bool(cfg.get("longpage_html_enabled", True)),
+    }
+
+
+def save_link_pipeline_prefs(prefs: Dict) -> Dict:
+    cfg = load_config()
+    if "feishu_sync_enabled" in prefs:
+        cfg["feishu_sync_enabled"] = bool(prefs.get("feishu_sync_enabled"))
+    if "feishu_default_folder_path" in prefs:
+        cfg["feishu_default_folder_path"] = str(prefs.get("feishu_default_folder_path") or "").strip()
+    if "longpage_html_enabled" in prefs:
+        cfg["longpage_html_enabled"] = bool(prefs.get("longpage_html_enabled"))
+    save_config(cfg)
+    return {"ok": True, **get_link_pipeline_prefs()}
+
+
 # ─── Agent 提示词 / 输出控制（按内部 agent_key 白名单读写 config.json）───
 
 _AGENT_PROMPT_FIELDS: Dict[str, List[str]] = {

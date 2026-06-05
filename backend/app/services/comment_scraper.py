@@ -210,6 +210,27 @@ def format_comments_as_text(result: CommentResult) -> str:
     return "\n".join(lines)
 
 
+def merge_text_with_comments(
+    body: str,
+    *,
+    comments_data: Optional["CommentResult"] = None,
+    comments_text: str = "",
+) -> str:
+    """将评论区文本并入摘要/原文整理输入（正文+评论一起给 Agent）。"""
+    base = (body or "").strip()
+    ct = (comments_text or "").strip()
+    if not ct and comments_data is not None:
+        try:
+            if getattr(comments_data, "comments", None):
+                ct = format_comments_as_text(comments_data).strip()
+        except Exception:
+            ct = ""
+    if not ct:
+        return base
+    block = f"## 评论区\n\n{ct}"
+    return f"{base}\n\n{block}" if base else block
+
+
 def format_comments_as_json(result: CommentResult) -> str:
     """评论结果格式化为 JSON。"""
     _assign_thread_indices(result.comments)
@@ -369,11 +390,268 @@ def _extract_comments_from_dom(page) -> List[CommentItem]:
     return comments
 
 
+def _parse_xhs_api_comment_item(raw: Dict) -> Optional[CommentItem]:
+    """解析小红书 comment/page 或 sub/page 单条评论。"""
+    if not isinstance(raw, dict):
+        return None
+    user = raw.get("user_info") or raw.get("user") or {}
+    text = _clean_text(raw.get("content") or raw.get("text"))
+    if not text:
+        return None
+    sub_raw = raw.get("sub_comments") or raw.get("subComments") or []
+    if isinstance(sub_raw, dict):
+        sub_raw = sub_raw.get("list") or sub_raw.get("comments") or []
+    replies: List[ReplyItem] = []
+    for s in (sub_raw if isinstance(sub_raw, list) else []):
+        if not isinstance(s, dict):
+            continue
+        su = s.get("user_info") or s.get("user") or {}
+        stext = _clean_text(s.get("content") or s.get("text"))
+        if not stext:
+            continue
+        replies.append(ReplyItem(
+            author=_clean_text(su.get("nickname") or su.get("userName") or su.get("name")),
+            text=stext,
+            time_str=_format_time_str(s.get("create_time") or s.get("createTime")),
+            location=_clean_text(s.get("ip_location") or s.get("ipLocation")),
+            likes=_safe_int(s.get("like_count") or s.get("likeCount")),
+            reply_to=_clean_text(
+                (s.get("target_comment") or {}).get("user_info", {}).get("nickname")
+                or s.get("targetUserName") or s.get("reply_to") or ""
+            ),
+        ))
+    return CommentItem(
+        author=_clean_text(user.get("nickname") or user.get("userName") or user.get("name")),
+        text=text,
+        time_str=_format_time_str(raw.get("create_time") or raw.get("createTime")),
+        location=_clean_text(raw.get("ip_location") or raw.get("ipLocation")),
+        likes=_safe_int(raw.get("like_count") or raw.get("likeCount")),
+        reply_count=_safe_int(raw.get("sub_comment_count") or raw.get("subCommentCount") or len(replies)),
+        replies=replies,
+    )
+
+
+def _xhs_comment_quality_score(item: CommentItem) -> int:
+    """评论完整度评分，合并时保留信息更全的一条。"""
+    score = 0
+    if item.time_str:
+        score += 3
+    score += len(item.replies or []) * 12
+    if item.reply_count:
+        score += min(item.reply_count, 20) * 4
+    if item.likes:
+        score += 1
+    if len(item.text or "") > 20:
+        score += 1
+    return score
+
+
+def _merge_xhs_comment_lists(*lists: List[CommentItem]) -> List[CommentItem]:
+    """按作者+正文去重合并多源评论，保留信息更完整的一条。"""
+    merged: Dict[tuple, CommentItem] = {}
+    order: List[tuple] = []
+    for items in lists:
+        for c in items or []:
+            key = (c.author, (c.text or "")[:120])
+            if key not in merged:
+                merged[key] = c
+                order.append(key)
+                continue
+            if _xhs_comment_quality_score(c) > _xhs_comment_quality_score(merged[key]):
+                merged[key] = c
+    return [merged[k] for k in order]
+
+
+def _click_xhs_reply_expand(page) -> int:
+    """仅点击「展开 N 条回复」类按钮，避免误点页面其它「展开」。"""
+    clicked = 0
+    patterns = (
+        re.compile(r"展开\s*\d+\s*条回复"),
+        re.compile(r"查看\s*\d+\s*条回复"),
+        re.compile(r"查看更多回复"),
+    )
+    try:
+        scope = page.locator('[class*="comment"], [class*="Comment"], .comments-container').first
+        if scope.count() == 0:
+            scope = page.locator("body")
+    except Exception:
+        scope = page.locator("body")
+    for pat in patterns:
+        try:
+            loc = scope.locator("span, div, button, a, p").filter(has_text=pat)
+            count = min(loc.count(), 30)
+            for i in range(count):
+                try:
+                    loc.nth(i).click(timeout=800)
+                    clicked += 1
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return clicked
+
+
+def _click_expand_buttons(page, patterns: tuple = ("查看更多", "更多评论", "展开更多")) -> int:
+    """点击评论区「查看更多/更多评论」按钮，返回本轮点击次数。"""
+    clicked = 0
+    try:
+        scope = page.locator(
+            '[class*="comment"], [class*="Comment"], .comments-container, .note-scroller'
+        ).first
+        if scope.count() == 0:
+            scope = page.locator("body")
+    except Exception:
+        scope = page.locator("body")
+
+    for pattern in patterns:
+        try:
+            loc = scope.locator("span, div, button, a, p").filter(has_text=pattern)
+            count = min(loc.count(), 25)
+            for i in range(count):
+                try:
+                    loc.nth(i).click(timeout=800)
+                    clicked += 1
+                except Exception:
+                    try:
+                        loc.nth(i).dispatch_event("click")
+                        clicked += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return clicked
+
+
+def _scroll_comment_containers(page) -> None:
+    """滚动页面及评论区独立滚动容器，触发懒加载。"""
+    page.evaluate("""
+        (function(){
+            window.scrollTo(0, document.body.scrollHeight || document.documentElement.scrollHeight);
+            var nodes = document.querySelectorAll(
+                '[class*="comment"], [class*="Comment"], [class*="scroll"], [class*="Scroller"], .note-scroller'
+            );
+            nodes.forEach(function(el){
+                try {
+                    if (el.scrollHeight > el.clientHeight + 20) {
+                        el.scrollTop = el.scrollHeight;
+                    }
+                } catch(e) {}
+            });
+        })()
+    """)
+
+
+def _extract_xhs_from_page_js(page) -> List[CommentItem]:
+    """从渲染后的 DOM 提取小红书评论（含嵌套回复）。"""
+    try:
+        raw = page.evaluate("""
+            (function(){
+                var selectors = [
+                    '.comment-item', '[class*="commentItem"]', '[class*="CommentItem"]',
+                    '.parent-comment', '[class*="parent-comment"]'
+                ];
+                var nodes = [];
+                selectors.forEach(function(sel){
+                    document.querySelectorAll(sel).forEach(function(el){ nodes.push(el); });
+                });
+                if (!nodes.length) {
+                    document.querySelectorAll('[class*="comment"]').forEach(function(el){
+                        if ((el.innerText || '').trim().length > 5) nodes.push(el);
+                    });
+                }
+                var out = [];
+                nodes.forEach(function(el){
+                    var text = (el.innerText || el.textContent || '').trim();
+                    if (text.length < 3) return;
+                    var lines = text.split('\\n').map(function(x){ return x.trim(); }).filter(Boolean);
+                    var author = (lines[0] || '').replace(/(\\d+)?\\s*(小时前|分钟前|天前|刚刚).*$/, '').trim();
+                    if (author.includes('·')) author = author.split('·')[0].trim();
+                    var contentLines = [];
+                    var timeStr = '', location = '', likes = 0;
+                    for (var i = 1; i < lines.length; i++) {
+                        var line = lines[i];
+                        if (/展开\\s*\\d+\\s*条回复/.test(line) || line === '收起') continue;
+                        if (line.includes('小时前') || line.includes('分钟前') || line.includes('天前') || line.includes('刚刚')) {
+                            timeStr = line;
+                            if (line.includes('·')) {
+                                line.split('·').forEach(function(p){
+                                    p = p.trim();
+                                    if (/^[\\u4e00-\\u9fa5]{2,8}$/.test(p)) location = p;
+                                });
+                            }
+                            if (i + 1 < lines.length && /^\\d+$/.test(lines[i + 1])) likes = parseInt(lines[i + 1], 10) || 0;
+                            break;
+                        }
+                        contentLines.push(line);
+                    }
+                    var content = contentLines.join(' ').trim();
+                    if (!content && lines.length > 1) content = lines.slice(1, 3).join(' ').trim();
+                    var replies = [];
+                    el.querySelectorAll('[class*="reply"], [class*="sub-comment"], [class*="SubComment"]').forEach(function(sub){
+                        var st = (sub.innerText || sub.textContent || '').trim();
+                        if (st.length > 3 && st.length < 2000 && !/展开\\s*\\d+\\s*条回复/.test(st)) {
+                            replies.push({text: st});
+                        }
+                    });
+                    out.push({
+                        author: author.slice(0, 50),
+                        text: content.slice(0, 2000),
+                        time: timeStr,
+                        location: location,
+                        likes: likes,
+                        reply_count: replies.length
+                    });
+                });
+                return JSON.stringify(out);
+            })()
+        """)
+        parsed = json.loads(raw)
+        return [
+            CommentItem(
+                author=c.get("author", ""),
+                text=c.get("text", ""),
+                time_str=c.get("time", ""),
+                location=c.get("location", ""),
+                likes=c.get("likes", 0),
+                reply_count=c.get("reply_count", 0),
+            )
+            for c in parsed
+            if (c.get("text") or "").strip()
+        ]
+    except Exception as e:
+        _log.warning("JS 提取小红书评论失败: %s", e)
+        return []
+
+
 def _extract_xhs_via_playwright(url: str, note_id: str, max_count: Optional[int], cookies: Dict) -> CommentResult:
     result = CommentResult(platform="xiaohongshu", note_id=note_id)
     try: from playwright.sync_api import sync_playwright
     except ImportError:
         result.error = "Playwright 未安装"; return result
+
+    api_by_id: Dict[str, CommentItem] = {}
+
+    def _on_response(response) -> None:
+        req_url = response.url or ""
+        if "comment/page" not in req_url and "comment/sub/page" not in req_url:
+            return
+        try:
+            body = response.json()
+        except Exception:
+            return
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, dict):
+            return
+        for raw in data.get("comments") or []:
+            item = _parse_xhs_api_comment_item(raw)
+            if not item:
+                continue
+            cid = str((raw or {}).get("id") or f"{item.author}:{item.text[:40]}")
+            prev = api_by_id.get(cid)
+            if prev and len(prev.replies) >= len(item.replies):
+                continue
+            api_by_id[cid] = item
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -388,8 +666,9 @@ def _extract_xhs_via_playwright(url: str, note_id: str, max_count: Optional[int]
                 for k, v in cookies.items()
             ])
         page = context.new_page()
+        page.on("response", _on_response)
         try:
-            _log.info("Playwright 加载: %s", url[:120])
+            _log.info("[评论抓取-小红书|comment_scraper._extract_xhs_via_playwright|%s|Agent执行|加载] Playwright 打开页面; url=%s", note_id, url[:120])
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(5)
 
@@ -397,27 +676,58 @@ def _extract_xhs_via_playwright(url: str, note_id: str, max_count: Optional[int]
             if "/404" in final_url:
                 result.error = "页面需要有效 Cookie + xsec_token"; return result
 
-            # 滚动加载评论
-            for _ in range(10):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(1.5)
+            # 滚动 + 展开回复，直到评论数量稳定
+            prev_count = 0
+            same_rounds = 0
+            for round_num in range(18):
+                _scroll_comment_containers(page)
+                time.sleep(1.2)
+                clicked = _click_xhs_reply_expand(page) + _click_expand_buttons(page)
+                if clicked:
+                    time.sleep(1.2)
+
+                dom_count = page.evaluate("""
+                    document.querySelectorAll(
+                        '.comment-item, [class*="commentItem"], [class*="CommentItem"], [class*="parent-comment"]'
+                    ).length
+                """)
+                api_count = len(api_by_id)
+                count = max(dom_count or 0, api_count)
+                _log.info("[评论抓取-小红书|comment_scraper._extract_xhs_via_playwright|%s|Agent执行|滚动] 第%s轮; dom=%s; api=%s; clicked=%s",
+                          note_id, round_num + 1, dom_count, api_count, clicked)
+
+                if count == prev_count:
+                    same_rounds += 1
+                    if same_rounds >= 3:
+                        break
+                else:
+                    same_rounds = 0
+                prev_count = count
 
             html = page.content()
             init_comments, total = _extract_comments_from_init_state(
                 _parse_xiaohongshu_init_state(html) or {}, note_id
             )
-            if not init_comments:
-                init_comments = _extract_comments_from_dom(page)
+            js_comments = _extract_xhs_from_page_js(page)
+            api_comments = list(api_by_id.values())
+            dom_comments = _extract_comments_from_dom(page)
+            if api_comments:
+                init_comments = _merge_xhs_comment_lists(api_comments, init_comments)
+            else:
+                init_comments = _merge_xhs_comment_lists(init_comments, js_comments, dom_comments)
+            if not total:
                 total = len(init_comments)
 
             if init_comments:
                 if max_count and max_count > 0:
                     init_comments = init_comments[:max_count]
                 result.comments = init_comments
-                result.total_count = total
+                result.total_count = total or len(init_comments)
                 result.fetched_count = len(init_comments)
+                _log.info("[评论抓取-小红书|comment_scraper._extract_xhs_via_playwright|%s|Agent执行|完成] 抓取完成; fetched=%s; total=%s",
+                          note_id, result.fetched_count, result.total_count)
             else:
-                result.error = "未找到评论数据"
+                result.error = "未找到评论数据（请检查 Cookie 与 xsec_token，或评论区需登录）"
         except Exception as e:
             result.error = f"Playwright 异常: {e}"
         finally:
@@ -464,17 +774,30 @@ def extract_xiaohongshu_comments(
 #  B站评论抓取 (api.bilibili.com)
 # ═══════════════════════════════════════════════════════════════════
 
+def _resolve_bilibili_url(url: str) -> str:
+    """展开 B 站短链 b23.tv。"""
+    if "b23.tv" not in url.lower():
+        return url
+    try:
+        session = _get_session()
+        resp = session.get(url, timeout=15, allow_redirects=True)
+        if resp.url and "bilibili.com" in resp.url:
+            _log.info("[评论抓取-B站|comment_scraper._resolve_bilibili_url|b23.tv|硬编执行|展开] 短链已解析; target=%s", resp.url[:120])
+            return resp.url
+    except Exception as e:
+        _log.warning("B站短链展开失败: %s", e)
+    return url
+
+
 def _extract_bilibili_oid(url: str) -> str:
     """从 B站链接提取视频 ID。"""
+    url = _resolve_bilibili_url(url)
     # BV号: /video/BV1t95k6TEGw/
     m = re.search(r"/video/(BV[a-zA-Z0-9]+)", url)
     if m: return m.group(1)
     # av号: /video/av123456/
     m = re.search(r"/video/av(\d+)", url)
     if m: return f"av{m.group(1)}"
-    # 短链: b23.tv
-    m = re.search(r"b23\.tv/([a-zA-Z0-9]+)", url)
-    if m: return m.group(1)  # 需要展开, 暂返回短链ID
     return ""
 
 
@@ -555,7 +878,7 @@ def _extract_bilibili_comments_via_api(oid: str, max_count: Optional[int]) -> Co
                 # 先取内嵌的子回复，不够则递归拉取
                 sub_replies = _extract_bilibili_sub_replies(r.get("replies", []))
                 if len(sub_replies) < rcount and rpid:
-                    more = _fetch_bilibili_all_sub_replies(oid, rpid, rcount)
+                    more = _fetch_bilibili_all_sub_replies(av_id, rpid, rcount)
                     if more:
                         sub_replies = more
 
@@ -591,17 +914,18 @@ def _extract_bilibili_comments_via_api(oid: str, max_count: Optional[int]) -> Co
     return result
 
 
-def _fetch_bilibili_all_sub_replies(oid: str, root_rpid: int, rcount: int) -> List[ReplyItem]:
+def _fetch_bilibili_all_sub_replies(av_id: str, root_rpid: int, rcount: int) -> List[ReplyItem]:
     """递归拉取 B站楼中楼全部子回复。"""
     all_replies: List[ReplyItem] = []
     session = _get_session()
+    oid = str(av_id).replace("av", "")
     page = 1
     while len(all_replies) < rcount and page <= 10:
         try:
             resp = session.get(
                 "https://api.bilibili.com/x/v2/reply/reply",
                 params={"type": "1", "oid": oid, "root": root_rpid, "pn": page, "ps": 20},
-                headers={"Referer": f"https://www.bilibili.com/video/{oid}/"},
+                headers={"Referer": "https://www.bilibili.com/"},
                 timeout=15,
             )
             data = resp.json()
@@ -724,14 +1048,18 @@ def _extract_douyin_via_playwright(
                 page.evaluate("window.scrollTo(0, (document.documentElement.scrollHeight || document.body.scrollHeight))")
                 time.sleep(1.5)
 
-                # 展开回复——用 Playwright 原生 dispatch 事件
+                # 展开回复
                 try:
-                    btns = page.locator("button").filter(has_text="条回复")
-                    for i in range(min(btns.count(), 20)):
-                        try:
-                            btns.nth(i).dispatch_event("click")
-                        except: pass
-                except: pass
+                    clicked = _click_expand_buttons(page, ("条回复", "展开", "展开更多", "查看更多"))
+                    if not clicked:
+                        btns = page.locator("button").filter(has_text="条回复")
+                        for i in range(min(btns.count(), 20)):
+                            try:
+                                btns.nth(i).dispatch_event("click")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
                 time.sleep(1.5)
 
                 count = page.evaluate("document.querySelectorAll('[data-e2e=comment-item]').length")

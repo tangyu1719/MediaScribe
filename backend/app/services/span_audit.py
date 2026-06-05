@@ -78,6 +78,21 @@ def _span_redis_client():
         return None
 
 
+def _span_redis_get(key_suffix: str) -> Optional[Dict[str, Any]]:
+    """从 Redis 读取 SPAN 热快照（读路径优先于本地/DB）。"""
+    client = _span_redis_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(f"{_SPAN_REDIS_PREFIX}:{key_suffix}")
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def _span_redis_put(key_suffix: str, payload: Dict[str, Any]) -> bool:
     """写入 Redis 热快照；失败则回退本地，禁止同步 MariaDB。"""
     global _span_redis_probe_ok
@@ -208,16 +223,39 @@ def update_task(task_id: str, **kwargs) -> Optional[Dict]:
     return task
 
 
+def _attach_steps_if_missing(task: Optional[Dict]) -> Optional[Dict]:
+    """热缓存任务可能缺 steps；从 span_hot / MariaDB 回填。"""
+    if not task:
+        return task
+    tid = str(task.get("task_id") or "").strip()
+    if not tid or task.get("steps"):
+        return task
+    steps = _load_steps_from_db(tid)
+    if not steps:
+        return task
+    merged = dict(task)
+    merged["steps"] = steps
+    merged["total_steps"] = len(steps)
+    with _cache_lock:
+        _redis_cache[f"task:{tid}"] = merged
+    return merged
+
+
 def get_task(task_id: str) -> Optional[Dict]:
-    """获取主任务（含所有步骤）：内存 → 本地 SPAN → MariaDB（只读，不同步写）。"""
+    """获取主任务（含所有步骤）：内存 → Redis → 本地 SPAN → MariaDB（只读，不同步写）。"""
     task = _redis_cache.get(f"task:{task_id}")
     if task:
-        return task
+        return _attach_steps_if_missing(task)
+    task = _span_redis_get(f"task:{task_id}")
+    if task:
+        with _cache_lock:
+            _redis_cache[f"task:{task_id}"] = task
+        return _attach_steps_if_missing(task)
     task = _load_span_local(f"task:{task_id}")
     if task:
         with _cache_lock:
             _redis_cache[f"task:{task_id}"] = task
-        return task
+        return _attach_steps_if_missing(task)
     return _load_task_from_db(task_id)
 
 
@@ -582,36 +620,98 @@ def _row_to_step(row: Dict) -> Dict:
     return s
 
 
+def _is_pipeline_span_task(task: Dict[str, Any]) -> bool:
+    """链接沉淀 / 视频流水线任务（主任务 session_id 常为空，不能仅靠 pipeline: 前缀）。"""
+    if not task or not task.get("task_id"):
+        return False
+    sid = str(task.get("session_id") or "")
+    if sid.startswith("pipeline:"):
+        return True
+    uq = str(task.get("user_query") or "").strip().lower()
+    if uq.startswith("http://") or uq.startswith("https://"):
+        return True
+    for s in task.get("steps") or []:
+        if not isinstance(s, dict):
+            continue
+        ssid = str(s.get("session_id") or "")
+        if ssid.startswith("pipeline:"):
+            return True
+        name = str(s.get("step_name") or "")
+        stype = str(s.get("step_type") or "")
+        if name in (
+            "链接识别/内容提取",
+            "OCR补偿",
+            "原文装配",
+            "生成Markdown",
+            "AI润色+摘要",
+            "内容提取",
+        ) or (stype == "retrieval" and "链接" in name):
+            return True
+    return False
+
+
+def _collect_span_tasks_from_local(*, max_files: int = 200) -> List[Dict]:
+    """进程重启后从 span_hot/task/*.json 恢复任务列表。"""
+    root = _SPAN_LOCAL_ROOT / "task"
+    if not root.is_dir():
+        return []
+    files = sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    out: List[Dict] = []
+    for fp in files[:max_files]:
+        tid = fp.stem
+        task = _load_span_local(f"task:{tid}")
+        if task:
+            with _cache_lock:
+                _redis_cache[f"task:{tid}"] = task
+            out.append(task)
+    return out
+
+
 def list_pipeline_span_tasks(*, limit: int = 80) -> List[Dict]:
-    """列出链接沉淀类 SPAN 主任务（session_id 以 pipeline: 开头）。"""
+    """列出链接沉淀类 SPAN 主任务（热缓存 + 本地 JSON + MariaDB）。"""
     limit = max(1, min(int(limit or 80), 200))
-    rows: List[Dict] = []
+    by_id: Dict[str, Dict] = {}
+
+    def _merge(task: Optional[Dict]) -> None:
+        if not task or not _is_pipeline_span_task(task):
+            return
+        tid = str(task.get("task_id") or "")
+        if not tid:
+            return
+        prev = by_id.get(tid)
+        if not prev:
+            by_id[tid] = dict(task)
+            return
+        for k, v in task.items():
+            if v is not None and v != "" and (not prev.get(k) or k == "steps"):
+                prev[k] = v
+
     with _cache_lock:
         for k, t in _redis_cache.items():
-            if not k.startswith("task:"):
-                continue
-            sid = str(t.get("session_id") or "")
-            if sid.startswith("pipeline:"):
-                rows.append(dict(t))
+            if k.startswith("task:"):
+                _merge(t)
+
+    for t in _collect_span_tasks_from_local(max_files=limit * 3):
+        _merge(t)
+
     if _db_available:
         try:
             import db as _db
 
             db_rows = _db.execute_query(
-                "SELECT * FROM span_tasks WHERE session_id LIKE 'pipeline:%' "
-                "ORDER BY updated_at DESC LIMIT %s",
-                (limit,),
+                "SELECT * FROM span_tasks ORDER BY updated_at DESC LIMIT %s",
+                (limit * 2,),
             )
-            seen = {r.get("task_id") for r in rows}
             for r in db_rows:
-                tid = r.get("task_id")
-                if tid in seen:
-                    continue
                 task = _row_to_task(r)
-                task["steps"] = _load_steps_from_db(tid)
-                rows.append(task)
+                tid = task.get("task_id")
+                if tid and not task.get("steps"):
+                    task["steps"] = _load_steps_from_db(tid)
+                _merge(task)
         except Exception:
             pass
+
+    rows = list(by_id.values())
     rows.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
     return rows[:limit]
 
@@ -641,6 +741,15 @@ def list_exception_steps(*, limit: int = 100, task_id: str = "") -> List[Dict]:
             for k, s in _redis_cache.items():
                 if k.startswith("step:") and s.get("status") in ("failed", "timeout"):
                     out.append(dict(s))
+        if not out:
+            step_dir = _SPAN_LOCAL_ROOT / "step"
+            if step_dir.is_dir():
+                for fp in sorted(step_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                    s = _load_span_local(f"step:{fp.stem}")
+                    if s and s.get("status") in ("failed", "timeout"):
+                        out.append(s)
+                    if len(out) >= limit:
+                        break
         out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
         out = out[:limit]
     return out
@@ -694,3 +803,64 @@ def _enqueue_db_flush_step(step: Dict[str, Any]) -> None:
         _db_executor.submit(_run)
     except Exception:
         pass
+
+
+def is_task_in_span_db(task_id: str) -> bool:
+    """检查主任务是否已写入 span_tasks 表。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return False
+    _ensure_db_async_ready()
+    if not _db_available:
+        return False
+    try:
+        import db as _db
+
+        rows = _db.execute_query(
+            "SELECT task_id FROM span_tasks WHERE task_id=%s LIMIT 1", (tid,)
+        )
+        return bool(rows)
+    except Exception:
+        return False
+
+
+def force_sync_task_to_mysql(task_id: str) -> Dict[str, Any]:
+    """手动将主任务 SPAN 同步到 span_tasks（Redis/热缓存优先取数）。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return {"ok": False, "error": "task_id 为空"}
+    _ensure_db_async_ready()
+    if not _db_available:
+        return {"ok": False, "error": "MariaDB span 模块不可用，请检查数据库配置"}
+    task = (
+        _redis_cache.get(f"task:{tid}")
+        or _span_redis_get(f"task:{tid}")
+        or _load_span_local(f"task:{tid}")
+        or _load_task_from_db(tid)
+    )
+    if not task:
+        return {"ok": False, "error": f"未找到主任务 {tid}"}
+    with _cache_lock:
+        _redis_cache[f"task:{tid}"] = task
+    _flush_task_to_db(task)
+    steps = list(task.get("steps") or [])
+    if not steps:
+        steps = _load_steps_from_db(tid)
+    for step in steps:
+        if isinstance(step, dict) and step.get("step_id"):
+            _flush_step_to_db(step)
+    _log.info(
+        "[AI问答-任务同步|span_audit.force_sync_task_to_mysql|span_tasks|硬编执行|手动] "
+        "完成; ok=true; task_id=%s; step_count=%s",
+        tid,
+        len(steps),
+    )
+    return {
+        "ok": True,
+        "task_id": tid,
+        "task_kind": "main",
+        "mysql_table": "span_tasks",
+        "mysql_synced": True,
+        "synced_at": _now_dt(),
+        "step_count": len(steps),
+    }

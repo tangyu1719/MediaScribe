@@ -853,26 +853,64 @@ def find_by_slash_command(message_first_token: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def slash_suggestions(prefix: str) -> List[Dict[str, str]]:
-    """prefix 为 '/xx' 或 '/'；返回匹配 command 的 SKILL 摘要。"""
+SLASH_SUGGEST_LIMIT = 12
+
+
+def _slash_match_score(prefix: str, cmd: str, name: str, desc: str) -> int:
+    """命令前缀 > 名称前缀 > 名称首字母 > 子串匹配。"""
+    raw = (prefix or "").strip().lower()
+    if not raw.startswith("/"):
+        raw = "/" + raw.lstrip("/")
+    bare = raw.lstrip("/")
+    c = (cmd or "").strip().lower()
+    n = (name or "").strip().lower()
+    d = (desc or "").strip().lower()
+    if not bare:
+        return 1000
+    if c == raw:
+        return 2000
+    if c.startswith(raw) or c.lstrip("/").startswith(bare):
+        return 1800 - len(bare)
+    if n.startswith(bare):
+        return 1500
+    initials = "".join(w[0] for w in re.split(r"[\s\-_/]+", n) if w and w[0].isalnum())
+    if initials and initials.startswith(bare):
+        return 1300
+    if bare in c.lstrip("/"):
+        return 1100
+    if bare in n:
+        return 900
+    if bare in d:
+        return 700
+    return 0
+
+
+def slash_suggestions(prefix: str, limit: int = 12) -> List[Dict[str, str]]:
+    """prefix 为 '/xx' 或 '/'；按匹配度排序，返回 SKILL 命令摘要。"""
+    return slash_suggestions_with_total(prefix, limit=limit).get("suggestions") or []
+
+
+def slash_suggestions_with_total(prefix: str, limit: int = 12) -> Dict[str, Any]:
+    """带 total 的 slash 建议（供 API 分页提示）。"""
     p = (prefix or "").strip().lower()
     if not p.startswith("/"):
         p = "/" + p.lstrip("/")
-    out: List[Dict[str, str]] = []
+    all_rows: List[Dict[str, str]] = []
     for s in _load_raw().get("skills") or []:
         cmd = (s.get("command") or "").strip().lower()
         if not cmd:
             continue
-        if cmd.startswith(p) or p == "/":
-            out.append(
-                {
-                    "command": cmd,
-                    "name": s.get("name", ""),
-                    "description": (s.get("description") or "")[:160],
-                }
-            )
-    out.sort(key=lambda x: x["command"])
-    return out[:30]
+        name = s.get("name", "")
+        desc = (s.get("description") or "")[:160]
+        score = _slash_match_score(p, cmd, name, desc)
+        if score <= 0 and p != "/":
+            continue
+        all_rows.append({"command": cmd, "name": name, "description": desc, "_score": score})
+    all_rows.sort(key=lambda x: (-int(x.get("_score") or 0), x["command"]))
+    for row in all_rows:
+        row.pop("_score", None)
+    cap = max(1, min(int(limit or 12), 30))
+    return {"suggestions": all_rows[:cap], "total": len(all_rows)}
 
 
 def expand_message_with_skill_meta(user_message: str) -> Tuple[str, Optional[Dict[str, Any]]]:
