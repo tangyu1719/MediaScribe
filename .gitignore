@@ -35,10 +35,12 @@ venv/
 
 # ── 后端进程运行时 ──
 backend/.run/
+backend/app/services/data/rss/
 
 # ── 临时文件 ──
 *.tmp
 *.log
+.web_queue_cards.json
 .DS_Store
 Thumbs.db
 

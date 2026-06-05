@@ -16,7 +16,40 @@ set "SBA_AGENT_CONFIG=%~dp0..\src\agent\config.json"
 rem 必须开启 LangGraph 编排（Query改写/粒度对齐/ReAct handoff）；勿在系统环境里设 CHAT_USE_LANGGRAPH=0
 set "CHAT_USE_LANGGRAPH=1"
 
-echo [1/2] 选择 Python 环境...
+if not defined SBA_REDIS_DIR set "SBA_REDIS_DIR=D:\redis"
+set "REDIS_CONF=%SBA_REDIS_DIR%\redis.windows.conf"
+
+echo [1/4] 检查/启动 Redis (%SBA_REDIS_DIR%)...
+if exist "%SBA_REDIS_DIR%\redis-cli.exe" (
+    "%SBA_REDIS_DIR%\redis-cli.exe" ping 2>nul | findstr /i "PONG" >nul
+    if errorlevel 1 (
+        if exist "%SBA_REDIS_DIR%\redis-server.exe" (
+            echo        正在启动 redis-server...
+            start "" /B "%SBA_REDIS_DIR%\redis-server.exe" "%REDIS_CONF%"
+            timeout /t 2 /nobreak >nul
+            "%SBA_REDIS_DIR%\redis-cli.exe" ping 2>nul | findstr /i "PONG" >nul
+            if errorlevel 1 (
+                echo [警告] Redis 启动后仍未响应 PONG，后端将降级为本地缓存
+            ) else (
+                echo        Redis 已就绪 (127.0.0.1:6379)
+            )
+        ) else (
+            echo [警告] 未找到 %SBA_REDIS_DIR%\redis-server.exe
+        )
+    ) else (
+        echo        Redis 已在运行 (127.0.0.1:6379)
+    )
+) else (
+    echo [警告] 未找到 %SBA_REDIS_DIR%\redis-cli.exe，跳过 Redis 自启
+)
+
+echo [2/4] 释放 8000 端口（结束占用中的旧 uvicorn）...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING"') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
+timeout /t 2 /nobreak >nul
+
+echo [3/4] 选择 Python 环境...
 set "PYTHON=py -3"
 if exist "%~dp0..\.venv\Scripts\python.exe" (
     "%~dp0..\.venv\Scripts\python.exe" -c "import uvicorn; import app.main" 2>nul
@@ -30,13 +63,7 @@ if exist "%~dp0..\.venv\Scripts\python.exe" (
     echo        使用系统 Python ^(py -3^)
 )
 
-echo [1.5/2] 释放 8000 端口（结束占用中的旧 uvicorn）...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING"') do (
-    taskkill /F /PID %%a >nul 2>&1
-)
-timeout /t 2 /nobreak >nul
-
-echo [2/2] 启动 FastAPI 后端...
+echo [4/4] 启动 FastAPI 后端...
 echo    LLM 配置:  %SBA_AGENT_CONFIG%
 if not exist "%SBA_AGENT_CONFIG%" (
     echo [警告] 未找到 config.json，问答页将提示「未配置 LLM」
