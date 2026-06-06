@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 from xml.dom import minidom
 
@@ -111,11 +111,119 @@ def _merge_item_states(old_items: list[dict[str, Any]], new_items: list[dict[str
         if prev:
             row["read"] = bool(prev.get("read"))
             row["starred"] = bool(prev.get("starred"))
+            for key in ("doc_path", "doc_filename", "doc_task_id", "doc_status"):
+                if prev.get(key):
+                    row[key] = prev[key]
         else:
             row["read"] = False
             row["starred"] = False
         merged.append(row)
     return merged
+
+
+def _doc_file_exists(path_or_name: str) -> bool:
+    if not (path_or_name or "").strip():
+        return False
+    try:
+        from .file_naming import resolve_output_abs
+
+        p = resolve_output_abs(path_or_name)
+        return bool(p and p.is_file())
+    except Exception:
+        return False
+
+
+def _link_existing_task_document(item: dict[str, Any]) -> dict[str, Any]:
+    """若同链接已有完成的链接沉淀任务，复用其 MD 映射。"""
+    link = (item.get("link") or "").strip()
+    if not link:
+        return item
+    from .link_hash import url_hash as link_url_hash
+    from .task_manager import find_task_by_url_hash
+
+    task = find_task_by_url_hash(link_url_hash(link)) or {}
+    if str(task.get("status") or "").lower() != "completed":
+        return item
+    doc_fn = (task.get("doc_filename") or "").strip()
+    if not doc_fn or not _doc_file_exists(doc_fn):
+        return item
+    row = dict(item)
+    row["doc_filename"] = doc_fn
+    row["doc_path"] = (task.get("doc_path") or "").strip()
+    row["doc_task_id"] = (task.get("task_id") or "").strip()
+    row["doc_status"] = "completed"
+    return row
+
+
+def _write_rss_stub_document(item: dict[str, Any], *, feed_title: str = "") -> dict[str, Any]:
+    """为 RSS 条目写入摘录型本地 MD，供 AI 问答读取。"""
+    title = (item.get("title") or "RSS文章").strip()
+    summary = (item.get("summary") or "").strip()
+    published = (item.get("published") or "")[:10]
+    link = (item.get("link") or "").strip()
+    feed = (feed_title or "").strip()
+    lines = [f"# {title}", ""]
+    if feed or published:
+        lines.append(f"> RSS 订阅摘录 · {feed or '订阅源'} · {published or '未知日期'}")
+        lines.append("")
+    if summary:
+        lines.extend(["## 摘要", "", summary, ""])
+    if link:
+        lines.extend(["## 原文链接", "", link, ""])
+    from .file_naming import build_output_md_path
+
+    doc_path, basename = build_output_md_path(title, "文章", use_serial=True)
+    Path(doc_path).write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    row = dict(item)
+    row["doc_path"] = doc_path
+    row["doc_filename"] = basename
+    row["doc_status"] = "stub"
+    return row
+
+
+def ensure_item_document(
+    item: dict[str, Any],
+    *,
+    feed_title: str = "",
+    force_stub: bool = False,
+) -> tuple[dict[str, Any], str]:
+    """确保条目有可读本地 MD。返回 (更新后条目, 动作: skip|linked|stub)。"""
+    row = dict(item)
+    if not force_stub and (row.get("doc_filename") or "").strip() and _doc_file_exists(row["doc_filename"]):
+        return row, "skip"
+    row = _link_existing_task_document(row)
+    if (row.get("doc_filename") or "").strip() and _doc_file_exists(row["doc_filename"]):
+        return row, "linked"
+    row = _write_rss_stub_document(row, feed_title=feed_title)
+    return row, "stub"
+
+
+def map_feed_item_documents(
+    items: list[dict[str, Any]],
+    *,
+    feed_title: str = "",
+    progress_cb: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """为一批 RSS 条目补齐本地 MD 映射。"""
+    out: list[dict[str, Any]] = []
+    stats = {"skip": 0, "linked": 0, "stub": 0}
+    total = len(items)
+    for idx, item in enumerate(items):
+        updated, action = ensure_item_document(item, feed_title=feed_title)
+        stats[action] = stats.get(action, 0) + 1
+        out.append(updated)
+        if progress_cb:
+            progress_cb(
+                {
+                    "index": idx + 1,
+                    "total": total,
+                    "item_id": updated.get("id"),
+                    "title": updated.get("title"),
+                    "action": action,
+                    "doc_filename": updated.get("doc_filename"),
+                }
+            )
+    return out, stats
 
 
 def list_all_user_ids() -> list[str]:
@@ -297,6 +405,10 @@ def sync_feed(user_id: str, feed_id: str) -> dict[str, Any]:
             raise ValueError(f"Feed 解析失败: {bozo_exc or 'unknown'}")
         updated, new_items = _parse_feed_entries(feed_row, parsed)
         new_items = _merge_item_states(old_items, new_items)
+        new_items, _doc_stats = map_feed_item_documents(
+            new_items,
+            feed_title=updated.get("title") or feed_row.get("url") or "",
+        )
     except Exception as ex:
         err = str(ex) or ex.__class__.__name__
         with _LOCK:
@@ -499,6 +611,11 @@ def build_chat_context_block(
         link = (it.get("link") or "").strip()
         if link:
             lines.append(f"   链接: {link}")
+        doc_fn = (it.get("doc_filename") or "").strip()
+        if doc_fn:
+            lines.append(f"   本地文档: {doc_fn}")
+            if it.get("doc_status") == "stub":
+                lines.append("   （摘录型 MD，可用 read_output_file 读取全文）")
         lines.append("")
     return "\n".join(lines).strip()
 

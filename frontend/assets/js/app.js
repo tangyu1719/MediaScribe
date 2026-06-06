@@ -170,7 +170,7 @@ AuthManager.state.subscribe(function(state){
 const page=ref("video");
 
 // 需要登录的页面
-const REQUIRES_AUTH_PAGES=['video','orch','chat','tasks','agpz','rag','rss','multimodal','cache','ops','webreplay','profile','settings'];
+const REQUIRES_AUTH_PAGES=['video','subscribe','orch','chat','tasks','agpz','rag','rss','multimodal','cache','ops','webreplay','profile','settings'];
 // 管理员页面
 const ADMIN_PAGES=['iag'];
 
@@ -387,6 +387,11 @@ function updateMenuMain(){
 watch(isAdmin, updateMenuMain, {immediate: true});
 const settingsOpen=ref((()=>{try{return localStorage.getItem("sba_settings_open")==="1"}catch(_){return false}})());
 const webreplayOpen=ref((()=>{try{return localStorage.getItem("sba_webreplay_open")==="1"}catch(_){return true}})());
+const subscribeOpen=ref((()=>{try{return localStorage.getItem("sba_subscribe_open")==="1"}catch(_){return true}})());
+const subscribeXhsOpen=ref((()=>{try{return localStorage.getItem("sba_subscribe_xhs_open")==="1"}catch(_){return true}})());
+const sub=reactive({
+  sec:(()=>{try{const s=localStorage.getItem("sba_sub_sec");return s==="fav"?"fav":"up"}catch(_){return "up"}})(),
+});
 const wr=reactive({
   sec:(()=>{try{return localStorage.getItem("sba_webreplay_sec")||"scripts"}catch(_){return "scripts"}})(),
   scripts:[],
@@ -419,7 +424,107 @@ const rss=reactive({
   loading:false,
   busy:false,
   err:"",
+  syncActive:false,
+  syncStage:"",
+  syncDetail:"",
+  syncSteps:[],
+  syncItemProgress:null,
 });
+function rssSyncStepClass(st){
+  const s=String(st||"").toLowerCase();
+  if(s==="running"||s==="thinking")return"run";
+  if(s==="failed"||s==="error")return"fail";
+  if(s==="completed"||s==="done")return"ok";
+  return"";
+}
+function rssSyncActionLabel(action){
+  if(action==="linked")return"复用已有 MD";
+  if(action==="stub")return"新建摘录 MD";
+  if(action==="skip")return"已有文档";
+  return action||"";
+}
+function rssIngestSyncSseEvent(ev,d){
+  if(ev==="thought_step_start"){
+    const sid=d.step_id||("");
+    const row=rss.syncSteps.find(x=>x.step_id===sid);
+    const stub={
+      step_id:sid,
+      step_name:d.step_name||"同步",
+      status:d.status||"running",
+      description:d.description||"",
+      output_text:"",
+    };
+    if(row)Object.assign(row,stub);else rss.syncSteps.push(stub);
+    rss.syncStage=d.step_name||"正在同步";
+    rss.syncDetail=d.description||d.input_text||"";
+    return;
+  }
+  if(ev==="thought_step_end"){
+    const sid=d.step_id||"";
+    const row=rss.syncSteps.find(x=>x.step_id===sid);
+    if(row){
+      row.status=d.status||"completed";
+      row.output_text=d.output_text||"";
+      if(d.description)row.description=d.description;
+    }else{
+      rss.syncSteps.push({
+        step_id:sid,
+        step_name:d.step_name||"同步",
+        status:d.status||"completed",
+        description:d.description||"",
+        output_text:d.output_text||"",
+      });
+    }
+    if(d.status==="failed"){
+      rss.syncStage=(d.step_name||"同步")+"失败";
+      rss.syncDetail=d.output_text||"";
+    }else{
+      rss.syncStage=d.step_name||"同步";
+      rss.syncDetail=d.output_text||"";
+    }
+    return;
+  }
+  if(ev==="sync_item_progress"){
+    rss.syncItemProgress={
+      index:d.index||0,
+      total:d.total||0,
+      title:d.title||"",
+      action:d.action||"",
+      doc_filename:d.doc_filename||"",
+    };
+    rss.syncDetail="映射文档 "+(d.index||0)+"/"+(d.total||0)+"："+(d.title||"");
+    return;
+  }
+  if(ev==="sync_complete"){
+    rss.syncStage="同步完成";
+    rss.syncDetail=d.item_count!=null?("共 "+d.item_count+" 篇文章"):(
+      d.ok_count!=null?("成功 "+d.ok_count+" 个源，失败 "+(d.fail_count||0)+" 个"):""
+    );
+    return;
+  }
+  if(ev==="error"){
+    throw new Error(d.error||"同步失败");
+  }
+}
+async function runRssSyncSse(url){
+  const headers={"Content-Type":"application/json",...authBearerHeaders()};
+  const r=await fetch(url,{method:"POST",headers});
+  if(!r.ok){
+    const d=await parseApiJson(r).catch(()=>({}));
+    throw new Error(d.detail||d.error||("同步失败 HTTP "+r.status));
+  }
+  if(!r.body)throw new Error("同步未返回流式进度");
+  const reader=r.body.getReader();
+  const decoder=new TextDecoder();
+  let buf="";
+  while(true){
+    const{value,done}=await reader.read();
+    if(done)break;
+    buf+=decoder.decode(value,{stream:true});
+    buf=parseSseBuffer(buf,(ev,d)=>{rssIngestSyncSseEvent(ev,d)});
+  }
+  if(buf.trim())parseSseBuffer(buf+"\n\n",(ev,d)=>{rssIngestSyncSseEvent(ev,d)});
+}
 function rssFmtTime(iso){
   if(!iso)return "";
   try{
@@ -619,26 +724,29 @@ async function rssDeleteFeed(feedId){
 }
 async function rssSyncOne(feedId){
   if(!feedId||rss.busy)return;
-  rss.busy=true;rss.err="";
+  rss.busy=true;rss.syncActive=true;rss.err="";
+  rss.syncSteps=[];rss.syncStage="准备同步";rss.syncDetail="";rss.syncItemProgress=null;
   try{
-    const r=await fetch("/api/rss/feeds/"+encodeURIComponent(feedId)+"/sync",{method:"POST",headers:authBearerHeaders()});
-    const d=await parseApiJson(r);
-    if(!r.ok)throw new Error(d.detail||"同步失败");
+    await runRssSyncSse("/api/rss/feeds/"+encodeURIComponent(feedId)+"/sync/stream");
     await ldRssAll();
-    showToastMsg("同步完成");
-  }catch(e){rss.err=e.message||String(e)}finally{rss.busy=false}
+    showToastMsg("同步完成，本地文档已映射");
+  }catch(e){rss.err=e.message||String(e);showToastMsg(rss.err)}finally{
+    rss.busy=false;
+    setTimeout(()=>{rss.syncActive=false;rss.syncItemProgress=null},1200);
+  }
 }
 async function rssSyncAll(){
   if(rss.busy)return;
-  rss.busy=true;rss.err="";
+  rss.busy=true;rss.syncActive=true;rss.err="";
+  rss.syncSteps=[];rss.syncStage="全部同步";rss.syncDetail="";rss.syncItemProgress=null;
   try{
-    const r=await fetch("/api/rss/sync",{method:"POST",headers:authBearerHeaders()});
-    const d=await parseApiJson(r);
-    if(!r.ok)throw new Error(d.detail||"同步失败");
+    await runRssSyncSse("/api/rss/sync/stream");
     await ldRssAll();
-    const fail=d.fail_count||0;
-    showToastMsg(fail?("同步完成，"+fail+" 个源失败"):("已同步 "+(d.ok_count||0)+" 个源"));
-  }catch(e){rss.err=e.message||String(e)}finally{rss.busy=false}
+    showToastMsg("全部订阅已同步");
+  }catch(e){rss.err=e.message||String(e);showToastMsg(rss.err)}finally{
+    rss.busy=false;
+    setTimeout(()=>{rss.syncActive=false;rss.syncItemProgress=null},1200);
+  }
 }
 const navCollapsed=ref((()=>{try{return localStorage.getItem("sba_nav_collapsed")==="1"}catch(_){return false}})());
 function toggleNav(){
@@ -658,13 +766,99 @@ const wfs=ref([]);async function ldWfs(){try{const r=await fetch('/api/workflow/
 
 /* ══ P1 链接文档化 ══ */
 const v=reactive({wf:"",link:"",fs:true,fp:"",html:true,submitting:false,submitPulse:false,pg:0,stage:"就绪",stxt:"就绪",sd:"i",qs:"0",pr:"",sp:false,rd:null,htmlStat:"",htmlMsg:"",subtitle:true,cookies:"",comments:{enabled:false,count:10,sort:"hot"}});
-const videoSubTab=ref("single");
+const videoSubTab=ref("single"); // 保留兼容；UP/收藏夹已迁至 subscribe 页
 const subForm=reactive({profile_url:"",display_name:"",submitting:false,error:""});
 const subList=ref([]);
 const subSelId=ref("");
 const subDigest=reactive({digest_md:"",rag_degraded:false,digest_id:""});
-const subProfile=reactive({profile_md:"",profile_md_path:"",busy:false,profile_doc_id:""});
+const subProfile=reactive({
+  hasData:false,busy:false,
+  profile_md:"",profile_md_path:"",profile_doc_id:"",profile_run_id:"",
+  display_name:"",red_id:"",creator_id:"",llm_model:"",
+  industry:"",domain:"",niche:"",persona_summary:"",target_audience:"",content_style:"",
+  deep_directions:[],recent_topics:[],selected_notes:[],sampled_articles:[],
+  run_status:"",catalog_count:0,selected_count:0,deep_ok_count:0,deep_fail_count:0,
+  finished_at:"",error_code:"",error_message:""
+});
+const subProfileViewMode=ref("summary");
 const subViewTab=ref("digest");
+const favForm=reactive({syncing:false,error:""});
+const favSub=reactive({subscription_id:"",display_name:"",status:"",red_id:"",initial_backfill_done:false});
+const favSession=reactive({chrome_profile_ok:false,chrome_gaia:"",xhs_nickname:"",xhs_owner_ok:false,cdp_ready:false,expected_gaia:"有光"});
+const favDigest=reactive({digest_md:"",rag_degraded:false,digest_id:""});
+const favHabit=reactive({top_authors:[],interest_topics:[],preferred_content_types:[],persona_md:"",total_analyzed:0});
+function resetSubProfile(){
+  Object.assign(subProfile,{
+    hasData:false,busy:false,
+    profile_md:"",profile_md_path:"",profile_doc_id:"",profile_run_id:"",
+    display_name:"",red_id:"",creator_id:"",llm_model:"",
+    industry:"",domain:"",niche:"",persona_summary:"",target_audience:"",content_style:"",
+    deep_directions:[],recent_topics:[],selected_notes:[],sampled_articles:[],
+    run_status:"",catalog_count:0,selected_count:0,deep_ok_count:0,deep_fail_count:0,
+    finished_at:"",error_code:"",error_message:""
+  });
+}
+function applySubProfileFromApi(d){
+  const doc=(d&&d.profile_doc)||{};
+  const run=(d&&d.latest_run)||{};
+  const dirs=Array.isArray(doc.deep_directions)?doc.deep_directions:(doc.deep_directions?[doc.deep_directions]:[]);
+  const notes=Array.isArray(doc.selected_notes)?doc.selected_notes:[];
+  const sampled=Array.isArray(doc.sampled_articles)?doc.sampled_articles:(doc.profile_json&&doc.profile_json.sampled_articles)||[];
+  const byId={};
+  for(const a of sampled){if(a&&a.note_id)byId[String(a.note_id)]=a;}
+  const mergedNotes=notes.map(n=>{
+    const ex=byId[String(n.note_id||"")]||{};
+    const charLen=ex.char_len!=null?ex.char_len:n.char_len;
+    const fetchOk=ex.fetch_ok!=null?ex.fetch_ok:n.fetch_ok;
+    return {...n,...ex,char_len:charLen,fetch_ok:fetchOk===false?false:(fetchOk===true?true:!(charLen>0&&charLen<400))};
+  });
+  const topics=Array.isArray(doc.recent_topics)?doc.recent_topics:[];
+  Object.assign(subProfile,{
+    hasData:!!(doc.profile_md||doc.persona_summary||doc.industry),
+    profile_md:doc.profile_md||"",
+    profile_md_path:doc.profile_md_path||"",
+    profile_doc_id:doc.profile_doc_id||"",
+    profile_run_id:doc.profile_run_id||run.profile_run_id||"",
+    display_name:doc.display_name||"",
+    red_id:doc.red_id||"",
+    creator_id:doc.creator_id||"",
+    llm_model:doc.llm_model||run.llm_model||"",
+    industry:doc.industry||"",
+    domain:doc.domain||"",
+    niche:doc.niche||"",
+    persona_summary:doc.persona_summary||"",
+    target_audience:doc.target_audience||"",
+    content_style:doc.content_style||"",
+    deep_directions:dirs.filter(Boolean),
+    recent_topics:topics.filter(Boolean),
+    selected_notes:mergedNotes,
+    sampled_articles:sampled,
+    run_status:run.status||"",
+    catalog_count:Number(run.catalog_count)||0,
+    selected_count:Number(run.selected_count)||0,
+    deep_ok_count:Number(run.deep_ok_count)||0,
+    deep_fail_count:Number(run.deep_fail_count)||0,
+    finished_at:run.finished_at||doc.created_at||"",
+    error_code:run.error_code||"",
+    error_message:run.error_message||""
+  });
+}
+function subProfileRunLabel(){
+  const s=subProfile.run_status||"";
+  if(s==="completed")return"已完成";
+  if(s==="partial")return"部分完成";
+  if(s==="failed")return"失败";
+  if(s==="running")return"运行中";
+  return s||"—";
+}
+function subProfileRunClass(){
+  const s=subProfile.run_status||"";
+  if(s==="completed")return"ok";
+  if(s==="partial")return"warn";
+  if(s==="failed")return"err";
+  if(s==="running")return"run";
+  return"";
+}
 const subSelRow=computed(()=>(subList.value||[]).find(s=>s.subscription_id===subSelId.value)||null);
 function subFmtTime(iso){
   if(!iso)return"";
@@ -676,7 +870,8 @@ function subFmtTime(iso){
 }
 async function selectSubscription(id){
   subSelId.value=id;
-  await loadSubDigest(id);
+  await Promise.all([loadSubDigest(id),loadSubProfile(id)]);
+  if(subProfile.hasData)subViewTab.value="profile";
 }
 async function ldSubscriptions(){
   subForm.error="";
@@ -684,7 +879,7 @@ async function ldSubscriptions(){
     const r=await fetch("/api/subscriptions",{headers:authBearerHeaders()});
     if(!r.ok){const e=await r.json().catch(()=>({}));subForm.error=(e.detail&&e.detail.message)||e.detail||("HTTP "+r.status);return;}
     const d=await r.json();
-    subList.value=d.items||[];
+    subList.value=(d.items||[]).filter(s=>s.platform==="xiaohongshu");
   }catch(e){subForm.error=String(e);}
 }
 async function addSubscription(){
@@ -734,25 +929,23 @@ async function loadSubDigest(subscriptionId){
   }catch(e){console.error(e);}
 }
 async function loadSubProfile(subscriptionId){
+  if(!subscriptionId){resetSubProfile();return;}
   try{
     const r=await fetch("/api/subscriptions/"+encodeURIComponent(subscriptionId)+"/profile/latest",{headers:authBearerHeaders()});
-    if(!r.ok){subProfile.profile_md="";subProfile.profile_md_path="";return;}
+    if(!r.ok){resetSubProfile();return;}
     const d=await r.json();
-    const doc=(d.profile_doc)||{};
-    subProfile.profile_md=doc.profile_md||"";
-    subProfile.profile_md_path=doc.profile_md_path||"";
-    subProfile.profile_doc_id=doc.profile_doc_id||"";
-  }catch(e){console.error(e);}
+    applySubProfileFromApi(d);
+  }catch(e){console.error(e);resetSubProfile();}
 }
 async function runCreatorProfile(subscriptionId){
   if(subProfile.busy)return;
-  subProfile.busy=true;subViewTab.value="profile";
+  subProfile.busy=true;subViewTab.value="profile";subProfileViewMode.value="summary";
   try{
     showToastMsg("UP 画像流水线已启动（五阶段）…");
     const r=await fetch("/api/subscriptions/"+encodeURIComponent(subscriptionId)+"/profile/run",{method:"POST",headers:authBearerHeaders()});
     const d=await r.json();
     if(!r.ok){alert((d.detail&&d.detail.message)||d.error||d.detail||"画像失败");return;}
-    showToastMsg("画像完成："+(d.status||""));
+    showToastMsg("画像完成：目录"+(d.catalog_count||"?")+"篇 · 深度"+(d.deep_ok_count||"?")+"/"+(d.selected_count||"?"));
     await loadSubProfile(subscriptionId);
   }catch(e){alert(String(e));}finally{subProfile.busy=false;}
 }
@@ -768,6 +961,54 @@ async function deleteSubscription(id){
   if(!confirm("确定删除该订阅？"))return;
   await fetch("/api/subscriptions/"+encodeURIComponent(id),{method:"DELETE",headers:authBearerHeaders()});
   await ldSubscriptions();
+}
+async function ldFavorites(){
+  favForm.error="";
+  try{
+    const r=await fetch("/api/favorites/subscription",{headers:authBearerHeaders()});
+    if(!r.ok){const e=await r.json().catch(()=>({}));favForm.error=(e.detail&&e.detail.message)||e.detail||("HTTP "+r.status);return;}
+    const d=await r.json();
+    const sub=d.subscription||{};
+    Object.assign(favSub,{
+      subscription_id:sub.subscription_id||"",
+      display_name:sub.display_name||"",
+      status:sub.status||"",
+      initial_backfill_done:!!sub.initial_backfill_done,
+      red_id:((sub.tags||[]).find(t=>String(t).startsWith("red_id:"))||"").replace(/^red_id:/,"")||"9545679835"
+    });
+    const habit=(d.habit&&d.habit.habit_json)||{};
+    Object.assign(favHabit,{
+      top_authors:habit.top_authors||[],
+      interest_topics:habit.interest_topics||[],
+      preferred_content_types:habit.preferred_content_types||[],
+      persona_md:(d.habit&&d.habit.persona_md)||"",
+      total_analyzed:habit.total_analyzed||0
+    });
+    const dig=d.latest_digest||{};
+    favDigest.digest_md=dig.digest_md||"";
+    favDigest.rag_degraded=!!dig.rag_degraded;
+    favDigest.digest_id=dig.digest_id||"";
+    const sess=d.owner_session||{};
+    Object.assign(favSession,{
+      chrome_profile_ok:!!sess.chrome_profile_ok,
+      chrome_gaia:sess.chrome_gaia||"",
+      xhs_nickname:sess.xhs_nickname||"",
+      xhs_owner_ok:!!sess.xhs_owner_ok,
+      cdp_ready:!!sess.cdp_ready,
+      expected_gaia:sess.expected_gaia||"有光"
+    });
+  }catch(e){favForm.error=String(e);}
+}
+async function syncFavorites(forceLatest=0){
+  favForm.syncing=true;favForm.error="";
+  try{
+    showToastMsg("收藏夹同步已启动…");
+    const r=await fetch("/api/favorites/sync",{method:"POST",headers:authJsonHeaders(),body:JSON.stringify({force_analyze_latest:forceLatest})});
+    const d=await r.json();
+    if(!r.ok){favForm.error=(d.detail&&d.detail.message)||d.detail||"同步失败";return;}
+    showToastMsg("收藏同步完成："+(d.status||"")+" 新增 "+(d.new_count??"?"));
+    await ldFavorites();
+  }catch(e){favForm.error=String(e);}finally{favForm.syncing=false;}
 }
 function renderSubDigestMd(md){
   const raw=String(md||"");
@@ -1485,10 +1726,11 @@ function mcpDiscKey(mt,i){
   return String((mt&&mt.server)||'')+'::'+String((mt&&mt.name)||'')+'::'+i;
 }
 const PAGE_CRUMB_LABELS={
-  video:"链接文档化",orch:"工具",chat:"AI 问答",tasks:"任务中心",agpz:"Agent 个性化设置",
+  video:"链接文档化",subscribe:"订阅",orch:"工具",chat:"AI 问答",tasks:"任务中心",agpz:"Agent 个性化设置",
   iag:"内部 Agent 配置",rag:"RAG 知识库",rss:"RSS 阅读",multimodal:"多模态文档",cache:"Redis 缓存",
   ops:"OPS 运维",webreplay:"浏览器自动化",settings:"设置",profile:"个人信息"
 };
+const SUB_SEC_CRUMB={up:"UP订阅",fav:"收藏夹"};
 // 顶栏标签定义（key → 展示元数据）；iag 仅管理员可见
 const ALL_TAB_DEFS={
   video:{key:"video",label:"链接文档化"},
@@ -1504,6 +1746,7 @@ const ALL_TAB_DEFS={
   cache:{key:"cache",label:"Redis 缓存"},
   ops:{key:"ops",label:"OPS 运维"},
   webreplay:{key:"webreplay",label:"浏览器自动化"},
+  subscribe:{key:"subscribe",label:"订阅"},
   profile:{key:"profile",label:"个人信息"}
 };
 const openTabs=ref(["video","chat"]);
@@ -1795,6 +2038,9 @@ const appBreadcrumbs=computed(()=>{
     }else{
       crumbs[crumbs.length-1].isLast=true;
     }
+  }else if(p==="subscribe"){
+    crumbs.push({key:"sub-xhs",label:"小红书",isLast:false});
+    crumbs.push({key:"sub-sec-"+sub.sec,label:SUB_SEC_CRUMB[sub.sec]||sub.sec,isLast:true});
   }else{
     crumbs[0].isLast=true;
   }
@@ -1811,6 +2057,10 @@ function goAppBreadcrumb(c){
     return;
   }
   if(c.key==="orch-skill-detail")return;
+  if(c.key&&String(c.key).startsWith("sub-sec-")){
+    openSubscribeSec(String(c.key).replace("sub-sec-",""));
+    return;
+  }
   if(ORCH_SEC_CRUMB[c.key]){
     if(orchStage.fullscreen&&orchRail.kind==="skill")switchOrchSubTab(c.key);
     else scrollOrchTo(c.key);
@@ -2704,7 +2954,7 @@ function mergeOrchPipelineNodes(src){
   }
   return m;
 }
-const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:true,readComments:false,includeRss:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskHistFilterSession:"",taskHistFilterStatus:"",taskHistFilterKind:"all",taskHistLoading:false,taskHistRemoteList:[],taskHistTotal:0,taskHistStats:null,taskHistMysqlInfo:null,taskHistSyncingId:"",taskHistDetailCache:{},taskHistDetailLoading:"",taskHistModalOpen:false,taskHistModalRow:null,taskHistModalFromChat:false,taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatWarmup:{loading:false,ready:false,warming:false,readCommentsCached:false,toolsTotal:0,elapsedMs:0,phases:{},error:''},chatConnect:{active:false,doneFlash:false},chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
+const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:true,readComments:false,includeRss:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskHistFilterSession:"",taskHistFilterStatus:"",taskHistFilterKind:"all",taskHistLoading:false,taskHistRemoteList:[],taskHistTotal:0,taskHistStats:null,taskHistMysqlInfo:null,taskHistSyncingId:"",taskHistDetailCache:{},taskHistDetailLoading:"",taskHistModalOpen:false,taskHistModalRow:null,taskHistModalFromChat:false,taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatWarmup:{loading:false,ready:false,warming:false,readCommentsCached:false,toolsTotal:0,elapsedMs:0,phases:{},error:''},chatConnect:{active:false,doneFlash:false,stallWarn:false,stallDetail:''},chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
 function switchChatPanel(tab){
   const t=tab==="config"?"config":"room";
   c.chatPanelTab=t;
@@ -2973,7 +3223,7 @@ async function loadPlatformHealth(refresh){
     if(m)qs.set('chat_model',m);
     const q=qs.toString();
     const url='/api/platform/health'+(q?'?'+q:'');
-    const r=await fetch(url,{headers:authBearerHeaders()});
+    const r=await fetchWithTimeout(url,{headers:authBearerHeaders()},20000);
     const d=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(fmtApiErr(d,r));
     c.platformHealth=d&&typeof d==='object'?d:null;
@@ -3112,6 +3362,24 @@ function formatOrchStepInputDisplay(s){
 function ragSliceParentName(sl){
   if(!sl||typeof sl!=="object")return"知识库片段";
   return String(sl.parent_document||sl.title||"知识库片段").trim()||"知识库片段";
+}
+const ragSliceModal=reactive({show:false,slice:null});
+function openRagSliceDetail(sl){
+  if(!sl||typeof sl!=="object")return;
+  ragSliceModal.slice=sl;
+  ragSliceModal.show=true;
+}
+function closeRagSliceDetail(){
+  ragSliceModal.show=false;
+  ragSliceModal.slice=null;
+}
+async function openRagParentInKb(sl){
+  const path=String(sl&&sl.source_file||"").trim();
+  if(!path){showToastMsg("无父文档路径");return;}
+  closeRagSliceDetail();
+  openPage("rag");
+  await nextTick();
+  try{await openKbFileDetail({path,name:ragSliceParentName(sl)});}catch(e){showToastMsg(e.message||String(e));}
 }
 function extractRagSlicesFromStep(s){
   const j=parseStepJson(s&&s.output_text);
@@ -3864,6 +4132,70 @@ const chatTopKpi=computed(()=>{
 });
 const chatCurrentSubtask=computed(()=>{const t=c.curTask;if(!t||!t.steps||!t.steps.length)return"（尚无子步骤）";const run=t.steps.filter(s=>(s.status||"")==="running");if(run.length)return run[run.length-1].step_name||"执行中";const last=t.steps[t.steps.length-1];return last?(last.step_name+" · "+(last.status||"")):"—"});
 function persistChatPrefs(){try{localStorage.setItem("sba_chat_prefs",JSON.stringify({model:c.model,agentId:c.agentId,deepThink:c.deepThink,webSearch:c.webSearch,ragPrefetch:c.ragPrefetch,readComments:c.readComments,includeRss:c.includeRss,chatPrefs:c.chatPrefs}))}catch(_){}}
+const CHAT_FETCH_TIMEOUT_MS=12000;
+const CHAT_SSE_HEADERS_TIMEOUT_MS=22000;
+const CHAT_SSE_FIRST_EVENT_TIMEOUT_MS=35000;
+const CHAT_CONNECT_STALL_MS=45000;
+function bindAbortForward(targetAc,source){
+  if(!source)return;
+  if(source.aborted){targetAc.abort(source.reason);return;}
+  source.addEventListener('abort',()=>targetAc.abort(source.reason),{once:true});
+}
+async function fetchWithTimeout(url,opts={},timeoutMs=CHAT_FETCH_TIMEOUT_MS){
+  const ms=Math.max(1000,Number(timeoutMs)||CHAT_FETCH_TIMEOUT_MS);
+  const timeoutAc=new AbortController();
+  const mergedAc=new AbortController();
+  bindAbortForward(mergedAc,opts.signal);
+  const timer=setTimeout(()=>{
+    const ex=new Error('请求超时（'+ms+'ms）');
+    ex.name='TimeoutError';
+    ex.code='fetch_timeout';
+    timeoutAc.abort(ex);
+  },ms);
+  bindAbortForward(mergedAc,timeoutAc.signal);
+  try{
+    return await fetch(url,{...opts,signal:mergedAc.signal});
+  }catch(e){
+    if(timeoutAc.signal.aborted){
+      throw timeoutAc.signal.reason||Object.assign(new Error('请求超时'),{name:'TimeoutError',code:'fetch_timeout'});
+    }
+    throw e;
+  }finally{clearTimeout(timer);}
+}
+async function probeBackendQuick(timeoutMs=3500){
+  try{
+    const r=await fetchWithTimeout('/api/health',{},timeoutMs);
+    if(!r.ok)return false;
+    const d=await r.json().catch(()=>({}));
+    return!!(d&&d.ok);
+  }catch(_){return false;}
+}
+function collectChatDependencyHints(){
+  const hints=[];
+  if(c.chatWarmup.error)hints.push('预热：'+c.chatWarmup.error);
+  if(c.platformHealth&&c.platformHealth.error)hints.push('健康检查：'+c.platformHealth.error);
+  const bad=(c.platformHealth&&c.platformHealth.items||[]).filter(i=>i.status==='error');
+  if(bad.length)hints.push('异常依赖：'+bad.map(i=>i.label||i.id).join('、'));
+  return hints;
+}
+async function buildChatStreamFailureMessage(err,aiMsg){
+  const code=String(err&&err.code||'');
+  const name=String(err&&err.name||'');
+  const msg=String(err&&err.message||err||'');
+  const isTimeout=name==='TimeoutError'||code==='fetch_timeout'||code==='sse_first_event_timeout'||code==='sse_headers_timeout';
+  const isConnFail=isTimeout||name==='TypeError'||/Failed to fetch|NetworkError|load failed/i.test(msg);
+  if(!isConnFail)return'请求未能完成：'+msg.slice(0,300);
+  const backendOk=await probeBackendQuick(4000);
+  const hints=collectChatDependencyHints();
+  let text='**连接 AI 问答服务失败或超时**\n\n';
+  if(!backendOk)text+='后端 `http://127.0.0.1:8000` 当前无响应，请重启 `uvicorn` 或 `start_backend.bat`。\n\n';
+  else text+='后端健康检查可达，但 SSE 流未在时限内返回首包（可能线程池被 RAG/Milvus 探测拖死）。\n\n';
+  text+='常见原因：Docker/Milvus 未启动、并发 RAG 页探测、预热未完成。\n\n建议：\n1. 启动 Docker 与 Milvus（RAG 检索需要）\n2. 刷新页面；可暂时关闭「RAG 预取」后重试\n3. 仍失败则重启后端进程';
+  if(hints.length)text+='\n\n**诊断**：'+hints.join('；');
+  if(code==='sse_first_event_timeout'&&isChatLoadingPlaceholder(aiMsg&&aiMsg.content))
+    text+='\n\n（已等待 '+Math.round(CHAT_SSE_FIRST_EVENT_TIMEOUT_MS/1000)+'s，未收到 stream_open 事件）';
+  return text;
+}
 function applyChatWarmupStatus(d){
   if(!d||typeof d!=='object')return;
   c.chatWarmup.ready=!!d.ready;
@@ -3879,14 +4211,33 @@ function applyChatWarmupStatus(d){
   maybeFinishChatConnect();
 }
 let _chatConnectDoneTimer=null;
+let _chatConnectStallTimer=null;
+function resetChatConnectStall(){
+  c.chatConnect.stallWarn=false;
+  c.chatConnect.stallDetail='';
+  if(_chatConnectStallTimer){clearTimeout(_chatConnectStallTimer);_chatConnectStallTimer=null;}
+}
+function markChatConnectStall(detail){
+  c.chatConnect.stallWarn=true;
+  c.chatConnect.stallDetail=String(detail||'连接预热超时，请检查后端与 Milvus').slice(0,140);
+  showToastMsg(c.chatConnect.stallDetail);
+}
 function beginChatConnect(){
   if(c.chatWarmup.ready&&!c.chatWarmup.warming&&!c.chatWarmup.loading&&!c.platformHealthLoading&&c.platformHealth&&c.platformHealth.ready)return;
+  resetChatConnectStall();
   c.chatConnect.active=true;
   c.chatConnect.doneFlash=false;
   if(_chatConnectDoneTimer){clearTimeout(_chatConnectDoneTimer);_chatConnectDoneTimer=null;}
+  if(_chatConnectStallTimer)clearTimeout(_chatConnectStallTimer);
+  _chatConnectStallTimer=setTimeout(()=>{
+    if(!c.chatConnect.active||c.chatConnect.doneFlash)return;
+    const hints=collectChatDependencyHints();
+    markChatConnectStall('连接预热超时'+(hints.length?'：'+hints[0]:'，请检查后端/Milvus'));
+  },CHAT_CONNECT_STALL_MS);
 }
 function finishChatConnect(){
   if(!c.chatConnect.active)return;
+  resetChatConnectStall();
   c.chatConnect.doneFlash=true;
   if(_chatConnectDoneTimer)clearTimeout(_chatConnectDoneTimer);
   _chatConnectDoneTimer=setTimeout(()=>{
@@ -3916,11 +4267,13 @@ function startWarmupPoll(){
         wait:'false',
         force:'false',
       });
-      const r=await fetch('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()});
+      const r=await fetchWithTimeout('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()},CHAT_FETCH_TIMEOUT_MS);
       const d=await r.json().catch(()=>({}));
       applyChatWarmupStatus(d);
       if(!c.chatWarmup.warming&&c.chatWarmup.ready)stopWarmupPoll();
-    }catch(_){}
+    }catch(e){
+      c.chatWarmup.error=String(e&&e.message||e||'warmup_poll_failed').slice(0,120);
+    }
   },700);
 }
 const CHAT_CONNECT_STEPS=[
@@ -3931,8 +4284,13 @@ const CHAT_CONNECT_STEPS=[
   {phase:'llm',label:'LLM',needsRag:false,isHealth:true},
 ];
 const chatConnectVisible=computed(()=>!!c.chatConnect.active);
-const chatConnectClass=computed(()=>c.chatConnect.doneFlash?'cc-done':'cc-loading');
+const chatConnectClass=computed(()=>{
+  if(c.chatConnect.stallWarn)return'cc-stall';
+  if(c.chatConnect.doneFlash)return'cc-done';
+  return'cc-loading';
+});
 const chatConnectLabel=computed(()=>{
+  if(c.chatConnect.stallWarn)return c.chatConnect.stallDetail||'连接超时';
   if(c.chatConnect.doneFlash)return'连接完成';
   const phases=c.chatWarmup.phases||{};
   const warming=!!(c.chatWarmup.warming||c.chatWarmup.loading);
@@ -3964,12 +4322,13 @@ async function requestChatWarmup(opts={}){
       force:force?'true':'false',
       wait:wait?'true':'false',
     });
-    const r=await fetch('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()});
+    const r=await fetchWithTimeout('/api/chat/warmup?'+q.toString(),{headers:authBearerHeaders()},wait?90000:CHAT_FETCH_TIMEOUT_MS);
     const d=await r.json().catch(()=>({}));
     applyChatWarmupStatus(d);
     return d;
   }catch(e){
     console.warn('[SBA chat warmup]',e);
+    c.chatWarmup.error=String(e&&e.message||e||'warmup_fetch_failed').slice(0,200);
     return null;
   }finally{
     c.chatWarmup.loading=false;
@@ -5143,9 +5502,9 @@ async function runRepeatableChatSseStream(payload,aiMsg,{signal,url='/api/chat/s
   const headers={'Content-Type':'application/json'};
   const auth=authBearerHeaders&&authBearerHeaders();
   if(auth&&auth.Authorization)Object.assign(headers,auth);
-  const r=await fetch(url,{
+  const r=await fetchWithTimeout(url,{
     method:'POST',headers,body:JSON.stringify(payload),signal,
-  });
+  },CHAT_SSE_HEADERS_TIMEOUT_MS);
   if(!r.ok){
     let detail='';
     try{detail=await r.text()}catch(_){}
@@ -5157,13 +5516,41 @@ async function runRepeatableChatSseStream(payload,aiMsg,{signal,url='/api/chat/s
   const reader=r.body.getReader();
   const decoder=new TextDecoder();
   let buf='';
+  let gotFirst=false;
+  const firstDeadline=Date.now()+CHAT_SSE_FIRST_EVENT_TIMEOUT_MS;
+  const readWithFirstDeadline=()=>{
+    const readP=reader.read();
+    if(gotFirst)return readP;
+    const remain=Math.max(400,firstDeadline-Date.now());
+    return Promise.race([
+      readP,
+      new Promise((_,rej)=>setTimeout(()=>{
+        const ex=new Error('等待服务端 SSE 首包超时');
+        ex.name='TimeoutError';
+        ex.code='sse_first_event_timeout';
+        rej(ex);
+      },remain)),
+    ]);
+  };
   while(true){
-    const{value,done}=await reader.read();
+    const{value,done}=await readWithFirstDeadline();
     if(done)break;
     buf+=decoder.decode(value,{stream:true});
-    buf=parseSseBuffer(buf,(ev,d)=>ingestChatSseEvent(ev,d,aiMsg));
+    buf=parseSseBuffer(buf,(ev,d)=>{
+      if(!gotFirst){gotFirst=true;}
+      ingestChatSseEvent(ev,d,aiMsg);
+    });
   }
-  if(buf.trim())parseSseBuffer(buf+'\n\n',(ev,d)=>ingestChatSseEvent(ev,d,aiMsg));
+  if(buf.trim())parseSseBuffer(buf+'\n\n',(ev,d)=>{
+    if(!gotFirst){gotFirst=true;}
+    ingestChatSseEvent(ev,d,aiMsg);
+  });
+  if(!gotFirst){
+    const ex=new Error('服务端未返回任何 SSE 事件');
+    ex.name='TimeoutError';
+    ex.code='sse_first_event_timeout';
+    throw ex;
+  }
 }
 async function solidifyClosedTask(taskId){
   if(!c.sid||!taskId)return;
@@ -5347,7 +5734,17 @@ async function chatSend(){
     const ap=getAgentProfilePayload();
     if(ap)payload.agent_profile=ap;
     await runRepeatableChatSseStream(payload,aiMsg,{signal:ac.signal});
-  }catch(e){if(e&&e.name==="AbortError"){aiMsg.content=(aiMsg.content||"")+"\n\n[已暂停]";if(c.curTask)c.curTask.status="paused"}else{aiMsg.content='请求未能完成，请检查网络连接或稍后重试'}}
+  }catch(e){
+    if(e&&e.name==="AbortError"&&!(e.code)){
+      aiMsg.content=(aiMsg.content||"")+"\n\n[已暂停]";
+      if(c.curTask)c.curTask.status="paused";
+    }else{
+      aiMsg.content=await buildChatStreamFailureMessage(e,aiMsg);
+      aiMsg.result_status='error';
+      if(c.curTask&&['planning','executing','created','summarizing'].includes(String(c.curTask.status||'')))
+        c.curTask.status='abnormal';
+    }
+  }
   finally{c.chatStreaming=false;c.chatAbort=null;c.th='';syncMainTaskResultIndex(aiMsg);scheduleChatPersist()}
 }
 function chatKeydown(e){
@@ -5888,9 +6285,10 @@ async function saveKbLibCfg(){
   }catch(e){alert(e.message||String(e))}
 }
 async function ldKbMetaOpts(){try{const r=await fetch("/api/doc/rag/metadata/options");const d=await parseApiJson(r);if(d.ok){kb.metaOpts.domains=d.domains||[];kb.metaOpts.modules=d.modules||[];kb.metaOpts.doc_types=d.doc_types||[];}}catch(_){}}
-async function ldKbS(){
+async function ldKbS(refresh){
   try{
-    const r=await fetch('/api/doc/rag/stats',{headers:authBearerHeaders()});
+    const q=refresh?'?refresh=1':'';
+    const r=await fetch('/api/doc/rag/stats'+q,{headers:authBearerHeaders()});
     const d=await parseApiJson(r);
     if(!d.ok){showToastMsg('知识库统计加载失败');return;}
     const data=d.data||{};
@@ -5901,6 +6299,7 @@ async function ldKbS(){
     kb.st.backend=data.storage_backend||'';
     kb.st.milvus=!!data.milvus_ok;
     kb.st.chunkSrc=data.chunk_count_source||'';
+    kb.st.chunkAggMs=data.chunk_agg_ms!=null?data.chunk_agg_ms:null;
     kb.st.milvusDegraded=!!data.milvus_degraded;
     kb.st.recordsPath=data.file_records_path||'';
     if((kb.st.tf||0)===0&&data.records_merged_count>0){
@@ -5915,9 +6314,10 @@ async function ldKbS(){
     showToastMsg('知识库统计：'+(e.message||String(e)));
   }
 }
-async function ldKbF(){
+async function ldKbF(refresh){
   try{
-    const r=await fetch('/api/doc/rag/files?page=1&size=500',{headers:authBearerHeaders()});
+    const q=refresh?'&refresh=1':'';
+    const r=await fetch('/api/doc/rag/files?page=1&size=500'+q,{headers:authBearerHeaders()});
     const d=await parseApiJson(r);
     if(!d.ok){showToastMsg('文件列表加载失败');return;}
     kb.fs=d.files||[];
@@ -5927,10 +6327,16 @@ async function ldKbF(){
     const sum=typeof d.list_chunk_sum==='number'?d.list_chunk_sum:kb.fs.reduce((a,f)=>a+(parseInt(f.chunk_count,10)||0),0);
     kb.st.listChunkSum=sum;
     kb.st.chunkMismatch=Math.abs(sum-(kb.st.tc||0))>0;
+    if(d.chunk_agg_ms!=null)kb.st.chunkAggMs=d.chunk_agg_ms;
+    if(d.chunk_count_source)kb.st.chunkSrc=d.chunk_count_source;
   }catch(e){
     console.error('[kb] ldKbF',e);
     showToastMsg('知识库列表：'+(e.message||String(e)));
   }
+}
+async function kbRefreshAll(){
+  await ldKbS(true);
+  await ldKbF(true);
 }
 async function kbSyncChunkCounts(){
   kb.syncBusy=true;
@@ -5939,7 +6345,7 @@ async function kbSyncChunkCounts(){
     const d=await parseApiJson(r);
     if(!d.ok)throw new Error(d.error||'同步失败');
     showToastMsg('已回写 '+ (d.updated||0) +' 条记录（Milvus 合计 '+ (d.milvus_total_chunks||'?') +' 切片）');
-    await ldKbS();await ldKbF();
+    await kbRefreshAll();
   }catch(e){showToastMsg(e.message||String(e));}
   finally{kb.syncBusy=false;}
 }
@@ -5953,7 +6359,7 @@ async function kbRestoreCatalog(reindex){
     if(d.missing_sources)msg+='（'+d.missing_sources+' 个源文件路径已不存在）';
     if(reindex)msg+='；已重入库 '+ (d.reindexed||0) +' 个文件到 Milvus';
     showToastMsg(msg);
-    await ldKbS();await ldKbF();
+    await kbRefreshAll();
   }catch(e){showToastMsg(e.message||String(e));}
   finally{kb.syncBusy=false;}
 }
@@ -6211,6 +6617,30 @@ function onWebreplayNavClick(){
   if(navCollapsed.value){openWebreplaySec(wr.sec||"scripts");return}
   webreplayOpen.value=!webreplayOpen.value;
   try{localStorage.setItem("sba_webreplay_open",webreplayOpen.value?"1":"0")}catch(_){}
+}
+function onSubscribeNavClick(){
+  if(navCollapsed.value){openSubscribeSec(sub.sec||"up");return}
+  subscribeOpen.value=!subscribeOpen.value;
+  try{localStorage.setItem("sba_subscribe_open",subscribeOpen.value?"1":"0")}catch(_){}
+}
+function onSubscribeXhsNavClick(){
+  if(navCollapsed.value){openSubscribeSec(sub.sec||"up");return}
+  subscribeXhsOpen.value=!subscribeXhsOpen.value;
+  try{localStorage.setItem("sba_subscribe_xhs_open",subscribeXhsOpen.value?"1":"0")}catch(_){}
+}
+function openSubscribeSec(sec){
+  const s=sec==="fav"?"fav":"up";
+  page.value="subscribe";
+  sub.sec=s;
+  subscribeOpen.value=true;
+  subscribeXhsOpen.value=true;
+  try{
+    localStorage.setItem("sba_subscribe_open","1");
+    localStorage.setItem("sba_subscribe_xhs_open","1");
+    localStorage.setItem("sba_sub_sec",s);
+  }catch(_){}
+  if(s==="up")ldSubscriptions();
+  if(s==="fav")ldFavorites();
 }
 function openWebreplaySec(sec){
   page.value="webreplay";
@@ -6908,7 +7338,12 @@ watch(page,(p)=>{
     if(p==='chat'){refreshSlash();beginChatConnect();loadPlatformHealth(false);requestChatWarmup({wait:false}).catch(()=>{});}
     if(p==='rag'){kbLoadImportHistory();ldKbLibs();ldKbMetaOpts();ldKbS();ldKbF();ldKbConn();kbLoadRecallVocab();}
     if(p==='rss'){ldRssAll();}
-    if(p==='video'&&videoSubTab.value==='up'){ldSubscriptions();}
+    if(p==='subscribe'){
+      subscribeOpen.value=true;
+      subscribeXhsOpen.value=true;
+      if(sub.sec==='fav')ldFavorites();
+      else ldSubscriptions();
+    }
     if(p==='agpz'){ldApzCatalog().then(async()=>{await syncApzTemplateToCurrentAgent();});}
     if(p==='iag'){ldIag();}
     if(p==='settings'){
@@ -6946,7 +7381,7 @@ onMounted(async()=>{
   const isLoginPage = currentPath === '/login.html' || currentPath.endsWith('/login.html');
   
   const pathPage=currentPath.replace(/^\//,'').split('/')[0];
-  const allMenuItemsBoot=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
+  const allMenuItemsBoot=[...menuMainBase,{key:'subscribe',label:'订阅'},{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
   const wantPage=pathPage&&allMenuItemsBoot.some(m=>m.key===pathPage)?pathPage:'';
   
   // 如果在登录页，不显示遮罩
@@ -6960,13 +7395,14 @@ onMounted(async()=>{
     if(e.state&&e.state.page)target=e.state.page;
     else{
       const path=window.location.pathname.replace(/^\//,'').split('/')[0];
-      const allMenuItems=[...menuMainBase,{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
+      const allMenuItems=[...menuMainBase,{key:'subscribe',label:'订阅'},{key:'iag',label:'内部 Agent 配置'},{key:'webreplay',label:'浏览器自动化'}];
       if(path&&allMenuItems.some(m=>m.key===path))target=path;
     }
     if(!target)return;
     if(guardPageSwitch(target)){
       page.value=target;
       if(target==='webreplay')openWebreplaySec(wr.sec||'scripts');
+      if(target==='subscribe')openSubscribeSec(sub.sec||'up');
     }else if(target!=='video')page.value='video';
   });
   
@@ -7110,17 +7546,17 @@ onMounted(async()=>{
     bindNavIslandScroll(document.querySelector('.chat-config-scroll'));
   });
 });
-return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,
-  v,vec,videoSubTab,subForm,subList,subSelId,subSelRow,subFmtTime,selectSubscription,subDigest,subProfile,subViewTab,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,loadSubProfile,runCreatorProfile,pauseSubscription,resumeSubscription,deleteSubscription,renderSubDigestMd,taskQueue,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,outDirInp,toast,modalOut,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,taskQueueFmtTime,taskShowReadBadge,taskIsUnread,taskReadLabel,markQueueTaskRead,deleteQueueTask,
+return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,subscribeOpen,subscribeXhsOpen,onSubscribeNavClick,onSubscribeXhsNavClick,openSubscribeSec,sub,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,
+  v,vec,videoSubTab,subForm,subList,subSelId,subSelRow,subFmtTime,selectSubscription,subDigest,subProfile,subProfileViewMode,subViewTab,subProfileRunLabel,subProfileRunClass,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,loadSubProfile,runCreatorProfile,pauseSubscription,resumeSubscription,deleteSubscription,favForm,favSub,favSession,favDigest,favHabit,ldFavorites,syncFavorites,renderSubDigestMd,pathBasename,outputMdPreviewUrl,taskQueue,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,outDirInp,toast,modalOut,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,taskQueueFmtTime,taskShowReadBadge,taskIsUnread,taskReadLabel,markQueueTaskRead,deleteQueueTask,
   showHist,openHistPanel,ht,hs,ldHist,restartTask,stopTask,moveTask,deleteTask,clearCompleted,regenerateHtml,
   histLogPanel,openHistLogs,closeHistLogPanel,histLogSourceLabel,
   ldOpSpans,ldOpSpanExceptions,ldOpSpansAll,opLoadSpanTask,opSpanStatusClass,opSpanMaxMs,opSpanBarPct,opFmtJson,opPickSpanStep,opSpanTypeLabel,
   o,ldNodes,skills,skillsFiltered,skillCmdDraft,saveSkillCommand,saveAllSkillCommands,importProjectSkillsBatch,retagAllSkillsBoard,sk,skillImport,openSkillImport,closeSkillImport,orchSkillAttachActive,skillAttachKindLabel,selectSkillAttachment,orchToolSearch,orchBoardTab,orchBoardByCategory,orchBoardFilteredItems,orchBoardTotalCount,orchBoardOpenItem,builtinTools,mcpDiscovered,mcpDiscoveredFiltered,mcpEnabledListFiltered,mcpByServer,mcpVendors,mcpMarketOpen,mcpEnabledList,mcpServerKeys,ldMcpVendors,insertMcpVendorMerge,addMcpFromMarket,openMcpServerConfig,saveMcpServerConfigFromRail,removeMcpServer,orchStage,orchRail,orchFlowDisplay,orchFlowPanStart,orchFlowPanMove,orchFlowPanEnd,resetOrchRailView,fitOrchFlowToViewport,Math,closeOrchRail,openOrchFullscreen,dockOrchFromFullscreen,selectOrchBuiltin,selectOrchMcpServer,selectOrchMcpTool,selectOrchSkill,openSkillDiff,onSkillVersionClick,clearSkillDiff,refreshSkillFlow,onOrchRailTabChange,onOrchDetailTabChange,orchRailTabIsFlow,diagramStyleFields,ldDiagramStyles,iagDiagramStyleKeys,iagDiagramStyleLabel,iagDiagramStyleHint,resetIagDiagramStyle,mcpConfigEditText,mcpFeishuForm,mcpDiscKey,orchToggle,isOrchOn,setOrchOn,orchTocActive,scrollOrchTo,orchDetailToc,orchDetailTocActive,scrollOrchDetailTo,orchDiffStats,orchDiffDisplay,skillAliasCn,mcpAliasCn,skillDescParts,skillCardSummary,skillCardTags,mcpSyncMsg,mcpJsonText,mcpPlaceholder,ldBuiltinTools,ldMcpCfg,saveMcpCfg,mcpSyncPull,ldSkills,importSkillForm,onSkillFile,onSkillFolder,delSkill,orchSubTabs,switchOrchSubTab,
   chatSbCollapsed,toggleChatSb,
-  c,cs,filteredCs,chatSessionTitle,chatTopKpi,chatMainTaskHistory,taskHistDisplayCount,refreshChatSessionTaskHistory,chatConnectVisible,chatConnectClass,chatConnectLabel,taskRegistryKindLabel:taskRegistryKindLabel,taskRegistryKindClass:taskRegistryKindClass,openRegistryTask,openTaskDetailFromChat,openTaskHistModal,closeTaskHistModal,closeTaskHistModalBack,taskHistModalDetail,taskHistModalLoading,loadTaskHistDetail,taskHistDetailOf,taskHistDetailCounts,taskFieldLabel,taskFieldDisplayValue,taskStepTypeLabel,taskMetaLabel,taskHistDetailKey,preloadTaskHistDetails,chatCurrentSubtask,chatGroupedSubPlans,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,isRagDecisionStep,ragSliceParentName,extractRagSlicesFromStep,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,mainTaskCardLabel,execCardLabel,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepStatusIcoClass,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,toggleTaskStatusMenu,setCurrentMainTaskFromHistory,loadTaskRegistry,scheduleTaskRegistryReload,setTaskHistKindFilter,setTaskHistSort,syncTaskToMysql,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,regenerateAt,collectMsg,readMsg,slashOpen,slashItems,slashIdx,slashTotal,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,
+  c,cs,filteredCs,chatSessionTitle,chatTopKpi,chatMainTaskHistory,taskHistDisplayCount,refreshChatSessionTaskHistory,chatConnectVisible,chatConnectClass,chatConnectLabel,taskRegistryKindLabel:taskRegistryKindLabel,taskRegistryKindClass:taskRegistryKindClass,openRegistryTask,openTaskDetailFromChat,openTaskHistModal,closeTaskHistModal,closeTaskHistModalBack,taskHistModalDetail,taskHistModalLoading,loadTaskHistDetail,taskHistDetailOf,taskHistDetailCounts,taskFieldLabel,taskFieldDisplayValue,taskStepTypeLabel,taskMetaLabel,taskHistDetailKey,preloadTaskHistDetails,chatCurrentSubtask,chatGroupedSubPlans,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,isRagDecisionStep,ragSliceParentName,ragSliceModal,openRagSliceDetail,closeRagSliceDetail,openRagParentInKb,extractRagSlicesFromStep,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,mainTaskCardLabel,execCardLabel,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepStatusIcoClass,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,toggleTaskStatusMenu,setCurrentMainTaskFromHistory,loadTaskRegistry,scheduleTaskRegistryReload,setTaskHistKindFilter,setTaskHistSort,syncTaskToMysql,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,regenerateAt,collectMsg,readMsg,slashOpen,slashItems,slashIdx,slashTotal,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,
   apz,ldApzCatalog,selectApzTemplate,ldApzCurrent,ldApzHist,loadApzRevision,saveApzTemplate,newApzCustom,useApzInChat,deactivateApzCustom,
-  kb,kbImportMeta,kbImportBtnLabel,kbMilvusStatusText,kbMilvusStatusColor,ldKbS,ldKbF,ldKbMetaOpts,ldKbConn,kbSetConnectionParams,kbProbeConnection,kbRetryConnection,kbConnFmtTs,kbResetConnection,kbToggleConnDetail,kbSyncChunkCounts,kbRestoreCatalog,kbRm,ldKbLibs,onKbLibChange,promptCreateKbLib,deleteKbLib,saveKbLibCfg,kbLoadRecallVocab,kbImportInterviewFolder,kbFolderInp,kbPickLocalFolder,onKbLocalFolderPick,openKbBrowse,kbBrowse,kbBrowseEnter,kbBrowseUp,kbImportSelectedFiles,kbImportFolderHere,kbConfirmImportWithMeta,kbOpenImportMeta,openKbFileDetail,closeKbFileDetail,kbAutoFillMeta,kbSaveFileMeta,kbRowPv,
-  rss,rssFmtTime,rssFeedTitle,rssArticleTitle,ldRssAll,rssSelectFeed,rssSelectItem,rssOpenDoc,rssEnqueueDoc,rssAddFeed,rssDeleteFeed,rssSyncOne,rssSyncAll,rssToggleFilter,rssToggleRead,rssToggleStar,rssExportOpml,rssImportOpmlFile,rssTriggerOpmlImport,
+  kb,kbImportMeta,kbImportBtnLabel,kbMilvusStatusText,kbMilvusStatusColor,ldKbS,ldKbF,kbRefreshAll,ldKbMetaOpts,ldKbConn,kbSetConnectionParams,kbProbeConnection,kbRetryConnection,kbConnFmtTs,kbResetConnection,kbToggleConnDetail,kbSyncChunkCounts,kbRestoreCatalog,kbRm,ldKbLibs,onKbLibChange,promptCreateKbLib,deleteKbLib,saveKbLibCfg,kbLoadRecallVocab,kbImportInterviewFolder,kbFolderInp,kbPickLocalFolder,onKbLocalFolderPick,openKbBrowse,kbBrowse,kbBrowseEnter,kbBrowseUp,kbImportSelectedFiles,kbImportFolderHere,kbConfirmImportWithMeta,kbOpenImportMeta,openKbFileDetail,closeKbFileDetail,kbAutoFillMeta,kbSaveFileMeta,kbRowPv,
+   rss,rssFmtTime,rssFeedTitle,rssArticleTitle,rssSyncStepClass,rssSyncActionLabel,ldRssAll,rssSelectFeed,rssSelectItem,rssOpenDoc,rssEnqueueDoc,rssAddFeed,rssDeleteFeed,rssSyncOne,rssSyncAll,rssToggleFilter,rssToggleRead,rssToggleStar,rssExportOpml,rssImportOpmlFile,rssTriggerOpmlImport,
   d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,
   ca,caQ,caSel,caPickRow,caSv,caEx,
   st,agtKeys,ldGw,ldAr,ldNf,testConn,ndUpSert,ndPoolSv,ndUp,ndDn,ndDel,rtSv,ldWf,svWf,ldMd,svMd,svFs,ldFsCfg,aicf,ldAiCfg,svAiCfg,thcf,ldThCfg,svThCfg,ldTpl,svTpl,ldHtmlCfg,svHtmlCfg,ldImPlatforms,openImPlatform,closeImDetail,imPlatformIcon,imPlatformBadge,imDetailTitle,ldImFeishu,ldImFeishuMsgs,imFsSave,imFsTime,imFsWebhookUrl,imFsCopyWebhook,

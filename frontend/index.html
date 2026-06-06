@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=37">
+<link rel="stylesheet" href="/assets/css/app.css?v=40">
 </head>
 <body>
 <div id="sba-modal-root" aria-live="polite"></div>
@@ -23,6 +23,7 @@
 <symbol id="icon-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></symbol>
 <symbol id="icon-ops" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
 <symbol id="icon-webreplay" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><path d="M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M4.9 19.1l2.1-2.1M16.9 7.1l2.1-2.1"/></symbol>
+<symbol id="icon-subscribe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></symbol>
 <symbol id="icon-user" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
 <symbol id="icon-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></symbol>
 </svg>
@@ -43,6 +44,27 @@
   </button>
   </div>
   <div class="sb-foot">
+  <div class="ni-grp subscribe-grp" :class="{expanded:subscribeOpen&&!navCollapsed}">
+    <button type="button" class="ni ni-parent" :class="{on:page==='subscribe',expanded:subscribeOpen}" :title="navCollapsed?'订阅':'订阅（展开子项）'" @click="onSubscribeNavClick">
+      <span class="ni-ic" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-subscribe"/></svg>
+      </span>
+      <span class="ni-txt">订阅</span>
+      <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
+    </button>
+    <div class="ni-subwrap">
+      <div class="ni-subgrp" :class="{expanded:subscribeXhsOpen}">
+        <button type="button" class="ni ni-sub ni-sub-parent" :class="{on:page==='subscribe',expanded:subscribeXhsOpen}" @click="onSubscribeXhsNavClick">
+          <span class="ni-txt">小红书</span>
+          <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
+        </button>
+        <div class="ni-subwrap ni-subwrap--l3">
+          <button type="button" class="ni ni-sub ni-sub-l3" :class="{on:page==='subscribe'&&sub.sec==='up'}" @click="openSubscribeSec('up')"><span class="ni-txt">UP订阅</span></button>
+          <button type="button" class="ni ni-sub ni-sub-l3" :class="{on:page==='subscribe'&&sub.sec==='fav'}" @click="openSubscribeSec('fav')"><span class="ni-txt">收藏夹</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="ni-grp webreplay-grp" :class="{expanded:webreplayOpen&&!navCollapsed}">
     <button type="button" class="ni ni-parent" :class="{on:page==='webreplay',expanded:webreplayOpen}" :title="navCollapsed?'浏览器自动化':'浏览器自动化（展开子项）'" @click="onWebreplayNavClick">
       <span class="ni-ic" aria-hidden="true">
@@ -128,13 +150,6 @@
 
   <!-- ═══ PAGE 1: 链接文档化 ═══ -->
   <div v-show="page==='video'">
-    <div class="glass" style="padding:10px 14px;margin-bottom:12px">
-      <div class="xhs-sub-tabs" role="tablist">
-        <button type="button" class="btn btn-o btn-xs" :class="{on:videoSubTab==='single'}" @click="videoSubTab='single'">单链处理</button>
-        <button type="button" class="btn btn-o btn-xs" :class="{on:videoSubTab==='up'}" @click="videoSubTab='up';ldSubscriptions()">小红书 UP 订阅</button>
-      </div>
-    </div>
-    <div v-show="videoSubTab==='single'">
     <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg></div>流程与链接输入</div>
       <div class="fr link-link-row"><span class="fl">视频链接</span><input class="gi" v-model="v.link" placeholder="粘贴链接或整段分享口令（自动识别 URL）…" @keyup.enter="startProc"/></div>
       
@@ -266,10 +281,12 @@
       </div>
     </div>
     <div class="res" v-if="v.rd">MD 已生成: {{v.rd}} <span v-if="v.htmlStat==='async_pending'" style="color:var(--warn);margin-left:8px">HTML 生成中</span><span v-else-if="v.htmlStat==='completed'||v.htmlStat==='ok'" style="color:var(--ok);margin-left:8px">HTML 完成</span><button class="btn btn-o btn-xs" style="margin-left:auto" @click="openOut">查看</button></div>
-    </div>
+  </div>
 
+  <!-- ═══ PAGE: 订阅（小红书 UP / 收藏夹）═══ -->
+  <div v-show="page==='subscribe'">
     <!-- 小红书 UP 订阅：按 offset 回填 + note_id 增量判重 + 自动链接分析 -->
-    <div v-show="videoSubTab==='up'" class="xhs-sub-page">
+    <div v-show="sub.sec==='up'" class="xhs-sub-page">
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg></div>小红书 UP 订阅</div>
         <p style="font-size:12px;color:var(--t2);margin-bottom:10px">订阅博主主页后定时/手动同步：首次按 cursor offset 回填历史笔记，之后从列表头部增量拉取（note_id 判重），新笔记自动走链接分析流水线并生成批次 digest。</p>
@@ -304,7 +321,7 @@
           <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>{{subViewTab==='digest'?'批次 Digest':'UP 人物画像'}}</div>
           <div v-if="subSelId" style="margin-bottom:8px;display:flex;gap:6px">
             <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='digest'}" @click="subViewTab='digest';loadSubDigest(subSelId)">Digest</button>
-            <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='profile'}" @click="subViewTab='profile';loadSubProfile(subSelId)">画像</button>
+            <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='profile'}" @click="subViewTab='profile';loadSubProfile(subSelId)">画像<span v-if="subProfile.hasData" class="xhs-profile-dot" title="已有画像"></span></button>
           </div>
           <div v-if="!subSelId" class="rss-empty">选择左侧 UP 查看 digest 或人物画像。</div>
           <template v-else-if="subViewTab==='digest'">
@@ -313,15 +330,142 @@
             <p v-if="subDigest.rag_degraded" style="font-size:11px;color:var(--warn);margin-top:10px">RAG 检索降级，digest 中 kb_relation 可能为 unknown。</p>
           </template>
           <template v-else>
-            <div v-if="subProfile.busy" class="rss-empty">画像生成中…（轻量分析 → 选篇 → 原文拉取 → 深度画像）</div>
-            <div v-else-if="!subProfile.profile_md" class="rss-empty">暂无画像。点击「生成 UP 画像」启动五阶段流水线。</div>
-            <div v-else class="xhs-sub-digest" v-html="renderSubDigestMd(subProfile.profile_md)"></div>
-            <p v-if="subProfile.profile_md_path" style="font-size:10px;color:var(--t3);margin-top:8px">已持久化：{{subProfile.profile_md_path}}</p>
+            <div v-if="subProfile.busy" class="rss-empty">画像生成中…（目录拉取 → 轻量画像 → 选篇 → 原文 MD → 深度画像）</div>
+            <div v-else-if="!subProfile.hasData" class="rss-empty">暂无画像分析结果。点击左侧「生成 UP 画像」启动五阶段流水线。</div>
+            <div v-else class="xhs-profile-panel">
+              <div class="xhs-profile-stats" :class="'xhs-profile-stats--'+subProfileRunClass()">
+                <span class="xhs-profile-stat-pill">{{subProfileRunLabel()}}</span>
+                <span v-if="subProfile.catalog_count">目录 {{subProfile.catalog_count}} 篇</span>
+                <span v-if="subProfile.selected_count">选篇 {{subProfile.selected_count}}</span>
+                <span v-if="subProfile.deep_ok_count">深度 {{subProfile.deep_ok_count}}/{{subProfile.selected_count||subProfile.deep_ok_count}}</span>
+                <span v-if="subProfile.finished_at" class="xhs-profile-stat-time">{{subFmtTime(subProfile.finished_at)}}</span>
+              </div>
+              <div v-if="subProfile.error_message" class="xhs-profile-err">{{subProfile.error_code}} · {{subProfile.error_message}}</div>
+              <div class="xhs-profile-view-tabs">
+                <button type="button" class="btn btn-o btn-xs" :class="{on:subProfileViewMode==='summary'}" @click="subProfileViewMode='summary'">分析摘要</button>
+                <button type="button" class="btn btn-o btn-xs" :class="{on:subProfileViewMode==='full'}" @click="subProfileViewMode='full'">完整报告</button>
+              </div>
+              <div v-show="subProfileViewMode==='summary'" class="xhs-profile-summary">
+                <div class="xhs-profile-card">
+                  <div class="xhs-profile-card-h">{{subProfile.display_name||subSelRow?.display_name||'UP 人物画像'}}</div>
+                  <div v-if="subProfile.red_id||subProfile.creator_id" class="xhs-profile-meta">
+                    <span v-if="subProfile.red_id">小红书号 {{subProfile.red_id}}</span>
+                    <span v-if="subProfile.creator_id">Creator {{subProfile.creator_id}}</span>
+                    <span v-if="subProfile.llm_model">模型 {{subProfile.llm_model}}</span>
+                  </div>
+                  <dl class="xhs-profile-dl">
+                    <template v-if="subProfile.industry"><dt>行业</dt><dd>{{subProfile.industry}}</dd></template>
+                    <template v-if="subProfile.domain"><dt>领域</dt><dd>{{subProfile.domain}}</dd></template>
+                    <template v-if="subProfile.niche"><dt>细分赛道</dt><dd>{{subProfile.niche}}</dd></template>
+                    <template v-if="subProfile.persona_summary"><dt>人设</dt><dd>{{subProfile.persona_summary}}</dd></template>
+                    <template v-if="subProfile.target_audience"><dt>目标受众</dt><dd>{{subProfile.target_audience}}</dd></template>
+                    <template v-if="subProfile.content_style"><dt>内容风格</dt><dd>{{subProfile.content_style}}</dd></template>
+                  </dl>
+                </div>
+                <div v-if="subProfile.deep_directions.length" class="xhs-profile-block">
+                  <div class="xhs-profile-block-h">深入方向</div>
+                  <div class="xhs-profile-tags">
+                    <span v-for="(t,i) in subProfile.deep_directions" :key="'d'+i" class="xhs-profile-tag">{{t}}</span>
+                  </div>
+                </div>
+                <div v-if="subProfile.recent_topics.length" class="xhs-profile-block">
+                  <div class="xhs-profile-block-h">近期主题</div>
+                  <div class="xhs-profile-tags">
+                    <span v-for="(t,i) in subProfile.recent_topics" :key="'r'+i" class="xhs-profile-tag xhs-profile-tag--muted">{{t}}</span>
+                  </div>
+                </div>
+                <div v-if="subProfile.selected_notes.length" class="xhs-profile-block">
+                  <div class="xhs-profile-block-h">深度采样篇目（{{subProfile.selected_notes.length}}）</div>
+                  <ul class="xhs-profile-notes">
+                    <li v-for="(n,i) in subProfile.selected_notes" :key="n.note_id||i" :class="{'xhs-profile-note--bad':n.fetch_ok===false}">
+                      <div class="xhs-profile-note-title">
+                        <a v-if="n.canonical_url" :href="n.canonical_url" target="_blank" rel="noopener">{{n.title||n.note_id}}</a>
+                        <span v-else>{{n.title||n.note_id}}</span>
+                        <span v-if="n.content_type" class="xhs-profile-note-type">{{n.content_type==='video'?'视频':'图文'}}</span>
+                        <span v-if="n.fetch_ok===false" class="xhs-profile-note-warn">正文无效</span>
+                        <span v-else-if="n.fetch_ok===true" class="xhs-profile-note-ok">正文有效</span>
+                      </div>
+                      <div class="xhs-profile-note-links">
+                        <span v-if="n.canonical_url" class="xhs-profile-note-link-label">小红书</span>
+                        <a v-if="n.canonical_url" class="xhs-profile-note-link" :href="n.canonical_url" target="_blank" rel="noopener">打开笔记</a>
+                        <template v-if="n.doc_path">
+                          <span class="xhs-profile-note-link-label">本地 MD</span>
+                          <a class="xhs-profile-note-link" :href="outputMdPreviewUrl(n.doc_path)" target="_blank" rel="noopener">{{pathBasename(n.doc_path)}}</a>
+                          <span v-if="n.char_len" class="xhs-profile-note-meta">{{n.char_len}} 字</span>
+                        </template>
+                        <span v-if="n.link_source" class="xhs-profile-note-meta">{{n.link_source}}</span>
+                        <span v-if="n.pipeline_url && n.pipeline_url!==n.canonical_url" class="xhs-profile-note-meta">流水线链接已刷新</span>
+                        <span v-else-if="n.fetch_error" class="xhs-profile-note-meta">{{n.fetch_error}}</span>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+              <div v-show="subProfileViewMode==='full'" class="xhs-sub-digest xhs-profile-full" v-html="renderSubDigestMd(subProfile.profile_md)"></div>
+              <p v-if="subProfile.profile_md_path" class="xhs-profile-path">已持久化：{{subProfile.profile_md_path}}</p>
+            </div>
           </template>
         </div>
       </div>
     </div>
+
+    <!-- 小红书收藏夹订阅：启动/每日0点同步，仅分析新增收藏 -->
+    <div v-show="sub.sec==='fav'" class="xhs-sub-page">
+      <div class="glass">
+        <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg></div>我的收藏夹订阅</div>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">绑定<strong>三点、水</strong>（小红书号 9545679835）个人收藏夹。须使用本机 <strong>Chrome 有光账号</strong>（liyouguang2@gmail.com）并已开启 CDP（<code>--remote-debugging-port=9223</code>）；系统仅 CDP 附着现有 Chrome，<strong>不会新开浏览器</strong>，避免 Cookie 丢失。启动与每日 0:00 自动同步，首次建基线后仅分析新增收藏。</p>
+        <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <button type="button" class="btn btn-p btn-xs" :disabled="favForm.syncing" @click="syncFavorites()">{{favForm.syncing?'同步中…':'立即同步'}}</button>
+          <button type="button" class="btn btn-o btn-xs" @click="ldFavorites()">刷新</button>
+        </div>
+        <p v-if="favForm.error" class="rss-err">{{favForm.error}}</p>
+        <div v-if="favSub.subscription_id" class="rss-feed-meta" style="margin-top:6px">
+          {{favSub.display_name||'三点、水-收藏夹'}} · 小红书号 {{favSub.red_id||'9545679835'}} · {{favSub.status||'active'}}
+          <span v-if="favSub.initial_backfill_done"> · 增量模式</span>
+          <span v-else> · 基线建立中</span>
+        </div>
+        <p v-if="!favSession.xhs_owner_ok||!favSession.cdp_ready" class="rss-err" style="margin-top:8px;font-size:12px">
+          Chrome 会话：{{favSession.chrome_gaia||'—'}} / 小红书 {{favSession.xhs_nickname||'未登录'}}
+          <span v-if="!favSession.cdp_ready"> · CDP 未就绪（请用有光 Chrome 加 <code>--remote-debugging-port=9223</code> 启动）</span>
+        </p>
+        <p v-else class="rss-feed-meta" style="margin-top:6px;color:var(--ok)">
+          Chrome「{{favSession.chrome_gaia}}」· 小红书「{{favSession.xhs_nickname}}」· CDP 已附着
+        </p>
+      </div>
+      <div class="rss-layout">
+        <div class="glass rss-feeds">
+          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>收藏习惯画像</div>
+          <div v-if="!favHabit.top_authors||!favHabit.top_authors.length" class="rss-empty">暂无习惯数据。完成至少一批新增收藏分析后将累积作者/话题偏好。</div>
+          <div v-else class="xhs-profile-cards">
+            <div class="xhs-profile-card">
+              <div class="xhs-profile-card-h">常收藏作者 Top</div>
+              <ul class="xhs-profile-note-list">
+                <li v-for="a in (favHabit.top_authors||[]).slice(0,8)" :key="a.author_id">
+                  <span>{{a.author_name||a.author_id}}</span>
+                  <span class="xhs-profile-note-meta">{{a.count}} 篇</span>
+                </li>
+              </ul>
+            </div>
+            <div class="xhs-profile-card" v-if="(favHabit.interest_topics||[]).length">
+              <div class="xhs-profile-card-h">兴趣话题</div>
+              <p style="font-size:12px;color:var(--t2);line-height:1.6">{{(favHabit.interest_topics||[]).slice(0,12).join(' · ')}}</p>
+            </div>
+            <div class="xhs-profile-card" v-if="(favHabit.preferred_content_types||[]).length">
+              <div class="xhs-profile-card-h">偏好内容类型</div>
+              <p style="font-size:12px;color:var(--t2)">{{(favHabit.preferred_content_types||[]).join(' · ')}}</p>
+            </div>
+          </div>
+          <div v-if="favHabit.persona_md" class="xhs-sub-digest" style="margin-top:10px;font-size:12px" v-html="renderSubDigestMd(favHabit.persona_md.slice(0,3000))"></div>
+        </div>
+        <div class="glass rss-articles">
+          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>收藏批次 Digest</div>
+          <div v-if="!favDigest.digest_md" class="rss-empty">暂无 digest。新增收藏同步后将生成主题归类与优先级说明。</div>
+          <div v-else class="xhs-sub-digest" v-html="renderSubDigestMd(favDigest.digest_md)"></div>
+          <p v-if="favDigest.rag_degraded" style="font-size:11px;color:var(--warn);margin-top:10px">RAG 检索降级。</p>
+        </div>
+      </div>
     </div>
+  </div>
 
   <!-- ═══ PAGE 2: 工具（TOOL CALL + MCP + SKILL）═══ -->
   <div v-show="page==='orch'" class="tools-orch-page">
@@ -1496,7 +1640,7 @@
       <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg></div>RAG 知识库</div>
       <div class="ops-g kb-stats-row" style="margin-bottom:10px">
         <div class="ops-c"><div class="k">总文件</div><div class="v">{{kb.st.tf||0}}</div></div>
-        <div class="ops-c"><div class="k">总切片</div><div class="v">{{kb.st.tc||0}}</div><div class="k" style="margin-top:2px;font-size:10px" v-if="kb.st.listChunkSum!=null">列表合计 {{kb.st.listChunkSum}}</div></div>
+        <div class="ops-c"><div class="k">总切片</div><div class="v">{{kb.st.tc||0}}</div><div class="k" style="margin-top:2px;font-size:10px" v-if="kb.st.listChunkSum!=null">列表合计 {{kb.st.listChunkSum}}</div><div class="k" style="margin-top:2px;font-size:10px;color:var(--t3)" v-if="kb.st.chunkAggMs!=null">Milvus 聚合 {{kb.st.chunkAggMs}}ms</div></div>
         <div class="ops-c"><div class="k">嵌入维度</div><div class="v">{{kb.st.ed||1024}}</div></div>
         <div class="ops-c kb-stat-milvus">
           <div class="k">向量库</div>
@@ -1533,7 +1677,7 @@
         </div>
         <button type="button" class="btn btn-o btn-xs" @click="promptCreateKbLib">新建库</button>
         <button type="button" class="btn btn-d btn-xs" @click="deleteKbLib" :disabled="kb.activeLib==='lib_default'">删除当前库</button>
-        <button type="button" class="btn btn-o btn-xs" style="margin-left:auto" @click="ldKbLibs();ldKbS();ldKbF()">刷新</button>
+        <button type="button" class="btn btn-o btn-xs" style="margin-left:auto" @click="ldKbLibs();kbRefreshAll()">刷新</button>
         <button type="button" class="btn btn-o btn-xs" @click="kbSyncChunkCounts" :disabled="kb.syncBusy">{{kb.syncBusy?'同步中…':'同步切片数'}}</button>
         <button type="button" class="btn btn-o btn-xs" @click="kbRestoreCatalog(false)" :disabled="kb.syncBusy">恢复本地目录</button>
         <button type="button" class="btn btn-p btn-xs" @click="kbRestoreCatalog(true)" :disabled="kb.syncBusy">恢复并重入库</button>
@@ -1716,14 +1860,34 @@
       </div>
       <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:12px">
         <input class="gi" v-model="rss.newUrl" placeholder="粘贴 RSS/Atom 订阅地址，如 https://example.com/feed.xml" style="flex:1;min-width:min(100%,280px)" @keydown.enter="rssAddFeed"/>
-        <button type="button" class="btn btn-p btn-xs" :disabled="rss.busy||!rss.newUrl.trim()" @click="rssAddFeed">{{rss.busy?'处理中…':'添加订阅'}}</button>
-        <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssSyncAll">全部同步</button>
+        <button type="button" class="btn btn-p btn-xs" :disabled="rss.busy||!rss.newUrl.trim()" @click="rssAddFeed">{{rss.busy&&!rss.syncActive?'处理中…':'添加订阅'}}</button>
+        <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssSyncAll">{{rss.syncActive?rss.syncStage||'同步中…':'全部同步'}}</button>
         <button type="button" class="btn btn-o btn-xs" :disabled="rss.loading" @click="ldRssAll">刷新</button>
         <button type="button" class="btn btn-o btn-xs" @click="rssExportOpml">导出 OPML</button>
         <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssTriggerOpmlImport">导入 OPML</button>
         <input id="rss-opml-file" type="file" accept=".opml,.xml,text/xml" style="display:none" @change="rssImportOpmlFile"/>
       </div>
       <p v-if="rss.err" class="rss-err">{{rss.err}}</p>
+      <div v-if="rss.syncActive" class="rss-sync-panel">
+        <div class="rss-sync-head">
+          <span class="rss-sync-pulse"></span>
+          <strong>{{rss.syncStage||'正在同步'}}</strong>
+          <span v-if="rss.syncDetail" class="rss-sync-detail">{{rss.syncDetail}}</span>
+        </div>
+        <div v-if="rss.syncItemProgress" class="rss-sync-item">
+          映射 {{rss.syncItemProgress.index}}/{{rss.syncItemProgress.total}}：
+          {{rss.syncItemProgress.title}}
+          <span class="rss-sync-tag">{{rssSyncActionLabel(rss.syncItemProgress.action)}}</span>
+          <span v-if="rss.syncItemProgress.doc_filename" class="rss-sync-doc">{{rss.syncItemProgress.doc_filename}}</span>
+        </div>
+        <ul v-if="rss.syncSteps.length" class="rss-sync-steps">
+          <li v-for="s in rss.syncSteps" :key="s.step_id" :class="rssSyncStepClass(s.status)">
+            <span class="rss-sync-step-name">{{s.step_name}}</span>
+            <span v-if="s.output_text" class="rss-sync-step-out">{{s.output_text}}</span>
+            <span v-else-if="s.description" class="rss-sync-step-out">{{s.description}}</span>
+          </li>
+        </ul>
+      </div>
     </div>
     <div class="rss-layout">
       <div class="glass rss-feeds">
@@ -1735,7 +1899,7 @@
           <div v-if="f.error" class="rss-feed-err">{{f.error}}</div>
         </button>
         <div v-if="rss.selFeedId" class="btns" style="margin-top:10px">
-          <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssSyncOne(rss.selFeedId)">同步此源</button>
+          <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssSyncOne(rss.selFeedId)">{{rss.syncActive?rss.syncStage||'同步中…':'同步此源'}}</button>
           <button type="button" class="btn btn-danger btn-xs" :disabled="rss.busy" @click="rssDeleteFeed(rss.selFeedId)">删除</button>
         </div>
       </div>
@@ -2426,9 +2590,9 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
           </button>
           <div class="chat-header-left" @click.stop>
-            <div v-if="chatConnectVisible" class="chat-connect-pill" :class="chatConnectClass">
+            <div v-if="chatConnectVisible" class="chat-connect-pill" :class="chatConnectClass" :title="c.chatConnect.stallWarn?c.chatConnect.stallDetail:''">
               <span class="chat-connect-dot" aria-hidden="true"></span>
-              <span class="chat-connect-text">{{ chatConnectLabel }}<span v-if="!c.chatConnect.doneFlash" class="chat-connect-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></span>
+              <span class="chat-connect-text">{{ chatConnectLabel }}<span v-if="!c.chatConnect.doneFlash&&!c.chatConnect.stallWarn" class="chat-connect-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></span>
             </div>
             <div class="chat-header-health" @click="c.platformHealthOpen=!c.platformHealthOpen">
               <span class="ph-title">健康检查</span>
@@ -2602,10 +2766,10 @@
                           <article v-for="sl in extractRagSlicesFromStep(s)" :key="'rag-'+sl.ref_id+'-'+(sl.chunk_id||'')" class="rag-slice-card">
                             <header class="rag-slice-meta">
                               <span class="rag-ref-tag">[{{ sl.ref_id }}]</span>
-                              <span class="rag-slice-title">父文档：{{ ragSliceParentName(sl) }}</span>
+                              <button type="button" class="rag-slice-title rag-slice-link" @click="openRagSliceDetail(sl)">父文档：{{ ragSliceParentName(sl) }}（点击查看）</button>
                               <span v-if="sl.score!=null" class="rag-slice-score">score {{ Number(sl.score).toFixed(4) }}</span>
                             </header>
-                            <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：{{ sl.source_file }}</div>
+                            <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：<button type="button" class="rag-slice-link" @click="openRagSliceDetail(sl)">{{ sl.source_file }}</button></div>
                             <div class="rag-slice-lbl">切片全文</div>
                             <pre class="rag-slice-body">{{ sl.content }}</pre>
                           </article>
@@ -2636,10 +2800,10 @@
                     <article v-for="sl in m.ragPrefetchSlices" :key="'ans-rag-'+sl.ref_id+'-'+(sl.chunk_id||'')" class="rag-slice-card">
                       <header class="rag-slice-meta">
                         <span class="rag-ref-tag">[{{ sl.ref_id }}]</span>
-                        <span class="rag-slice-title">父文档：{{ ragSliceParentName(sl) }}</span>
+                        <button type="button" class="rag-slice-title rag-slice-link" @click="openRagSliceDetail(sl)">父文档：{{ ragSliceParentName(sl) }}（点击查看）</button>
                         <span v-if="sl.score!=null" class="rag-slice-score">score {{ Number(sl.score).toFixed(4) }}</span>
                       </header>
-                      <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：{{ sl.source_file }}</div>
+                      <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：<button type="button" class="rag-slice-link" @click="openRagSliceDetail(sl)">{{ sl.source_file }}</button></div>
                       <div class="rag-slice-lbl">切片全文</div>
                       <pre class="rag-slice-body">{{ sl.content }}</pre>
                     </article>
@@ -3239,6 +3403,22 @@
     </div>
   </Teleport>
 </main>
+<div v-if="ragSliceModal.show" class="modal-mask rag-slice-modal-mask" @click.self="closeRagSliceDetail">
+  <div class="modal-box rag-slice-modal-box" @click.stop>
+    <div class="modal-h">RAG 切片 · [{{ ragSliceModal.slice&&ragSliceModal.slice.ref_id }}] {{ ragSliceParentName(ragSliceModal.slice) }}</div>
+    <div class="modal-b rag-slice-modal-body">
+      <div v-if="ragSliceModal.slice&&ragSliceModal.slice.source_file" class="rag-slice-src">父文档路径：{{ ragSliceModal.slice.source_file }}</div>
+      <div class="rag-slice-lbl">切片全文</div>
+      <pre class="rag-slice-body rag-slice-modal-pre">{{ ragSliceModal.slice&&ragSliceModal.slice.content }}</pre>
+      <div class="rag-slice-lbl">父文档全文</div>
+      <div class="rag-slice-modal-hint">完整父文档请在「RAG 知识库」页按路径打开；当前弹窗展示本切片所属段落。</div>
+      <div class="btns" style="margin-top:12px;flex-wrap:wrap;gap:8px">
+        <button v-if="ragSliceModal.slice&&ragSliceModal.slice.source_file" type="button" class="btn btn-o btn-xs" @click="openRagParentInKb(ragSliceModal.slice)">在知识库中打开父文档</button>
+        <button type="button" class="btn btn-p btn-xs" style="margin-left:auto" @click="closeRagSliceDetail">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
 </div>
 
 <!-- 未登录状态遮罩 -->
@@ -3295,7 +3475,7 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" crossorigin="anonymous"></script>
 <script src="/assets/js/diagram_style_presets.js?v=3"></script>
 <script src="/assets/js/orch_catalog.js?v=1"></script>
-<script src="/assets/js/app.js?v=37"></script>
+<script src="/assets/js/app.js?v=40"></script>
 <script>
 (function(){
   setTimeout(function(){
