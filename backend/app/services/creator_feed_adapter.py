@@ -229,6 +229,14 @@ def resolve_xhs_red_id(red_id: str, *, display_name: str = "") -> Dict[str, Any]
 
     probe = probe_xhs_session(sess)
     if probe.get("guest") or not probe.get("logged_in"):
+        from .xhs_local_browser import refresh_xhs_cookies_from_system
+
+        refresh_xhs_cookies_from_system()
+        cookies = load_cookies("xiaohongshu") or {}
+        for k, v in cookies.items():
+            sess.cookies.set(k, v, domain=".xiaohongshu.com")
+        probe = probe_xhs_session(sess)
+    if probe.get("guest") or not probe.get("logged_in"):
         from .xhs_stateless import _MAX_ATTEMPTS as _max_att
         from .xhs_local_browser import resolve_red_id_via_local_chrome
 
@@ -399,6 +407,28 @@ def _extract_notes_from_state(
             continue
         seen.add(nid)
         out.append(n)
+    if out:
+        return out
+    # 浏览器 SSR 结构变更时，从 JSON blob 兜底提取 noteId
+    blob = json.dumps(data, ensure_ascii=False)
+    for nid in re.findall(r'"noteId"\s*:\s*"([a-f0-9]{24})"', blob, re.I):
+        if nid in seen:
+            continue
+        seen.add(nid)
+        title_m = re.search(
+            rf'"noteId"\s*:\s*"{re.escape(nid)}".{{0,800}}?"title"\s*:\s*"([^"]*)"', blob, re.S
+        )
+        display_m = re.search(
+            rf'"noteId"\s*:\s*"{re.escape(nid)}".{{0,800}}?"displayTitle"\s*:\s*"([^"]*)"', blob, re.S
+        )
+        title = (title_m.group(1) if title_m else "") or (display_m.group(1) if display_m else "")
+        token_m = re.search(
+            rf'"noteId"\s*:\s*"{re.escape(nid)}".{{0,2000}}?"xsecToken"\s*:\s*"([^"]+)"',
+            blob,
+            re.S | re.I,
+        )
+        xsec = token_m.group(1) if token_m else ""
+        out.append({"noteId": nid, "title": title or f"笔记 {nid[:8]}", "xsecToken": xsec})
     return out
 
 
@@ -562,16 +592,124 @@ class XiaohongshuFeedAdapter:
         """拉取主页可见的全部笔记（用于 UP 画像目录）。"""
         url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
         meta = self.fetch_profile_meta(url)
-        return parse_feed_from_init_state(
+        items = parse_feed_from_init_state(
             meta["init_state"],
             creator_id=creator_id,
             profile_url=url,
             xsec_token=meta.get("xsec_token") or "",
             fetch_source="catalog",
         )
+        if items:
+            return items
+        _log.warning(
+            "[社媒订阅-博主Feed|creator_feed_adapter.fetch_catalog|%s|Agent执行|回退] "
+            "requests 未解析到笔记，尝试浏览器兜底; creator_id=%s",
+            creator_id,
+            creator_id,
+        )
+        from .xhs_local_browser import fetch_catalog_via_browser
+
+        return fetch_catalog_via_browser(creator_id, profile_url=url)
 
 
 def get_feed_adapter(platform: str) -> CreatorFeedAdapter:
     if platform == "xiaohongshu":
         return XiaohongshuFeedAdapter()
     raise ValueError(f"不支持的平台: {platform}")
+
+
+def resolve_note_links_for_selection(
+    selected_notes: List[Dict[str, Any]],
+    *,
+    creator_id: str,
+    profile_url: str = "",
+    catalog: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """从博主主页收集带 xsec_token 的真实笔记链接，再交给链接分析流水线。"""
+    profile_url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+    url_map: Dict[str, str] = {}
+
+    def _put(nid: str, href: str, *, prefer_token: bool = True) -> None:
+        if not nid or not href:
+            return
+        cur = url_map.get(nid) or ""
+        if not cur:
+            url_map[nid] = href
+            return
+        if prefer_token and "xsec_token" in href and "xsec_token" not in cur:
+            url_map[nid] = href
+
+    for it in catalog or []:
+        _put(str(it.get("note_id") or ""), str(it.get("canonical_url") or ""))
+
+    missing = [
+        str(n.get("note_id") or "")
+        for n in selected_notes
+        if str(n.get("note_id") or "")
+        and ("xsec_token" not in (url_map.get(str(n.get("note_id") or "")) or ""))
+    ]
+    if missing:
+        try:
+            from .xhs_local_browser import scrape_profile_note_links_via_cdp
+
+            scraped = scrape_profile_note_links_via_cdp(profile_url, creator_id=creator_id)
+            for nid, href in scraped.items():
+                _put(nid, href)
+            _log.info(
+                "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|CDP采集] "
+                "scraped=%s; still_missing=%s",
+                len(scraped),
+                sum(1 for nid in missing if "xsec_token" not in (url_map.get(nid) or "")),
+            )
+        except Exception as ex:
+            _log.warning(
+                "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|CDP失败] error=%s",
+                ex,
+            )
+
+    still_missing = [
+        nid for nid in missing if "xsec_token" not in (url_map.get(nid) or "")
+    ]
+    if still_missing:
+        try:
+            adapter = XiaohongshuFeedAdapter()
+            meta = adapter.fetch_profile_meta(profile_url)
+            refreshed = parse_feed_from_init_state(
+                meta["init_state"],
+                creator_id=creator_id,
+                profile_url=profile_url,
+                xsec_token=meta.get("xsec_token") or "",
+                fetch_source="profile_link_refresh",
+            )
+            for it in refreshed:
+                _put(it.note_id, it.canonical_url)
+        except Exception as ex:
+            _log.warning(
+                "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|meta刷新失败] error=%s",
+                ex,
+            )
+
+    out: List[Dict[str, Any]] = []
+    for n in selected_notes:
+        nid = str(n.get("note_id") or "")
+        note = dict(n)
+        old_url = str(note.get("canonical_url") or "")
+        resolved = url_map.get(nid) or old_url or _build_note_url(nid, "")
+        note["canonical_url"] = resolved
+        note["pipeline_url"] = resolved
+        if resolved != old_url:
+            note["link_source"] = "profile_page"
+        elif "xsec_token" in resolved:
+            note["link_source"] = "catalog_token"
+        else:
+            note["link_source"] = "bare_explore"
+        out.append(note)
+        _log.info(
+            "[社媒订阅-博主Feed|resolve_note_links_for_selection|note:%s|Agent执行|链接] "
+            "source=%s; has_token=%s; url=%s",
+            nid[:8],
+            note.get("link_source"),
+            "xsec_token" in resolved,
+            resolved[:120],
+        )
+    return out

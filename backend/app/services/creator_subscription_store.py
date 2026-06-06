@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .creator_subscription_models import (
     CreatorSubBase,
     CreatorDigest,
+    FavoritesHabit,
     Subscription,
     SubscriptionSeenNote,
     SyncRun,
@@ -503,6 +504,120 @@ def get_digest(digest_id: str) -> Optional[Dict[str, Any]]:
         if not row:
             return None
         return _digest_to_dict(row)
+
+
+def get_subscription_by_platform_creator(platform: str, creator_id: str) -> Optional[Dict[str, Any]]:
+    with session_scope() as db:
+        row = db.execute(
+            select(Subscription).where(
+                Subscription.platform == platform,
+                Subscription.creator_id == creator_id,
+                Subscription.status != "deleted",
+            )
+        ).scalar_one_or_none()
+        if not row:
+            return None
+        return _sub_to_dict(row)
+
+
+def get_or_create_subscription(
+    *,
+    platform: str,
+    creator_id: str,
+    profile_url: str,
+    display_name: str = "",
+    cron_override: Optional[str] = None,
+    read_comments: bool = False,
+    auto_analyze: bool = True,
+    tags: Optional[List[str]] = None,
+    owner_user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    existing = get_subscription_by_platform_creator(platform, creator_id)
+    if existing:
+        return existing
+    try:
+        return create_subscription(
+            platform=platform,
+            creator_id=creator_id,
+            profile_url=profile_url,
+            display_name=display_name,
+            cron_override=cron_override,
+            read_comments=read_comments,
+            auto_analyze=auto_analyze,
+            tags=tags,
+            owner_user_id=owner_user_id,
+        )
+    except ValueError as ex:
+        if str(ex) == "SUB_DUPLICATE":
+            got = get_subscription_by_platform_creator(platform, creator_id)
+            if got:
+                return got
+        raise
+
+
+def get_favorites_habit(subscription_id: str) -> Optional[Dict[str, Any]]:
+    with session_scope() as db:
+        row = db.get(FavoritesHabit, subscription_id)
+        if not row:
+            return None
+        try:
+            habit = json.loads(row.habit_json or "{}")
+        except Exception:
+            habit = {}
+        return {
+            "subscription_id": row.subscription_id,
+            "red_id": row.red_id,
+            "habit_json": habit,
+            "persona_md": row.persona_md or "",
+            "total_collected": row.total_collected or 0,
+            "llm_model": row.llm_model or "",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+def save_favorites_habit(
+    *,
+    subscription_id: str,
+    red_id: str,
+    habit_json: Dict[str, Any],
+    persona_md: str = "",
+    total_collected: int = 0,
+    llm_model: str = "",
+) -> Dict[str, Any]:
+    with session_scope() as db:
+        row = db.get(FavoritesHabit, subscription_id)
+        if row is None:
+            row = FavoritesHabit(
+                subscription_id=subscription_id,
+                red_id=red_id,
+                habit_json=json.dumps(habit_json, ensure_ascii=False),
+                persona_md=persona_md,
+                total_collected=total_collected,
+                llm_model=llm_model,
+            )
+            db.add(row)
+        else:
+            row.red_id = red_id or row.red_id
+            row.habit_json = json.dumps(habit_json, ensure_ascii=False)
+            row.persona_md = persona_md or row.persona_md
+            row.total_collected = total_collected
+            row.llm_model = llm_model or row.llm_model
+            row.updated_at = datetime.utcnow()
+        db.flush()
+        try:
+            habit = json.loads(row.habit_json or "{}")
+        except Exception:
+            habit = {}
+        return {
+            "subscription_id": row.subscription_id,
+            "red_id": row.red_id,
+            "habit_json": habit,
+            "persona_md": row.persona_md or "",
+            "total_collected": row.total_collected or 0,
+            "llm_model": row.llm_model or "",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
 
 
 def get_latest_digest(subscription_id: Optional[str] = None) -> Optional[Dict[str, Any]]:

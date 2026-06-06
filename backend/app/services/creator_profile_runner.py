@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .creator_feed_adapter import get_feed_adapter
-from .creator_profile_article import run_article_only_for_note
+from .creator_profile_article import article_text_usable, run_article_only_for_note
 from .creator_profile_llm import (
     build_deep_profile,
     build_light_profile,
@@ -48,6 +48,48 @@ def _red_id_from_sub(sub: Dict[str, Any]) -> str:
 
 def _catalog_to_dicts(items) -> List[Dict[str, Any]]:
     return [it.to_dict() if hasattr(it, "to_dict") else dict(it) for it in items]
+
+
+def _enrich_selected_notes(
+    selected_notes: List[Dict[str, Any]],
+    fetch_results: List[Any],
+) -> List[Dict[str, Any]]:
+    """合并原文拉取结果：小红书链接 + 本地 MD 路径 + 字数 + 是否可用。"""
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for r in fetch_results:
+        if isinstance(r, Exception):
+            continue
+        nid = str(r.get("note_id") or "")
+        if not nid:
+            continue
+        art = str(r.get("article") or "")
+        usable = article_text_usable(art)
+        by_id[nid] = {
+            "doc_path": r.get("doc_path") or "",
+            "task_id": r.get("task_id") or "",
+            "char_len": len(art),
+            "fetch_ok": usable,
+            "fetch_error": ""
+            if usable
+            else ("页面不可访问或正文过短" if art.strip() else str(r.get("error") or "拉取失败")),
+        }
+    out: List[Dict[str, Any]] = []
+    for n in selected_notes:
+        nid = str(n.get("note_id") or "")
+        extra = by_id.get(nid) or {}
+        out.append(
+            {
+                "note_id": n.get("note_id"),
+                "title": n.get("title"),
+                "canonical_url": n.get("canonical_url"),
+                "pipeline_url": n.get("pipeline_url") or n.get("canonical_url"),
+                "link_source": n.get("link_source") or "",
+                "content_type": n.get("content_type"),
+                "published_at": n.get("published_at"),
+                **extra,
+            }
+        )
+    return out
 
 
 async def run_creator_profile(
@@ -131,10 +173,23 @@ async def run_creator_profile(
                 run_id,
                 selection_json=selection,
                 selected_count=len(selected_notes),
-                stage="deep_fetch",
+                stage="resolve_links",
             )
 
-            # ── 阶段3：并行原文 MD（仅原文，无摘要） ──
+            # ── 阶段2.5：从博主主页采集真实笔记链接（含 xsec_token）再喂流水线 ──
+            from .creator_feed_adapter import resolve_note_links_for_selection
+
+            selected_notes = await loop.run_in_executor(
+                None,
+                lambda: resolve_note_links_for_selection(
+                    selected_notes,
+                    creator_id=creator_id,
+                    profile_url=profile_url,
+                    catalog=catalog,
+                ),
+            )
+            update_profile_run(run_id, stage="deep_fetch")
+            # ── 阶段3：并行原文 MD（用主页采集到的真实链接输入流水线） ──
             per_timeout = int(os.environ.get("PROFILE_ARTICLE_TIMEOUT_SEC", "1800"))
             results = await asyncio.gather(
                 *[run_article_only_for_note(note=n, timeout_sec=per_timeout) for n in selected_notes],
@@ -147,11 +202,22 @@ async def run_creator_profile(
                 if isinstance(r, Exception):
                     fail_n += 1
                     continue
-                if r.get("ok") and (r.get("article") or "").strip():
+                art = str(r.get("article") or "")
+                if r.get("ok") and article_text_usable(art):
                     articles.append(r)
                     ok_n += 1
                 else:
                     fail_n += 1
+                    if r.get("ok") and art.strip():
+                        _log.warning(
+                            "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|原文无效] "
+                            "note_id=%s; doc_path=%s; char_len=%s",
+                            _CHAIN,
+                            run_id,
+                            r.get("note_id"),
+                            r.get("doc_path"),
+                            len(art),
+                        )
             update_profile_run(
                 run_id,
                 deep_ok_count=ok_n,
@@ -184,6 +250,7 @@ async def run_creator_profile(
                 selection=selection,
                 deep_profile=deep,
                 selected_notes=selected_notes,
+                sampled_articles=articles,
             )
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", display_name)[:40] or creator_id[:12]
             out_dir = get_output_dir() / "creator_profiles" / subscription_id
@@ -201,22 +268,17 @@ async def run_creator_profile(
                 "profile_run_id": run_id,
                 "light_profile": light,
                 "selection": selection,
-                "selected_notes": [
-                    {
-                        "note_id": n.get("note_id"),
-                        "title": n.get("title"),
-                        "canonical_url": n.get("canonical_url"),
-                        "content_type": n.get("content_type"),
-                        "published_at": n.get("published_at"),
-                    }
-                    for n in selected_notes
-                ],
+                "selected_notes": _enrich_selected_notes(selected_notes, results),
                 "sampled_articles": [
                     {
                         "note_id": a.get("note_id"),
                         "title": a.get("title"),
+                        "canonical_url": a.get("canonical_url"),
+                        "content_type": a.get("content_type"),
                         "doc_path": a.get("doc_path"),
+                        "task_id": a.get("task_id"),
                         "char_len": len(a.get("article") or ""),
+                        "fetch_ok": article_text_usable(str(a.get("article") or "")),
                     }
                     for a in articles
                 ],

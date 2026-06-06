@@ -55,6 +55,16 @@ def _doc_to_dict(row: CreatorProfileDoc) -> Dict[str, Any]:
         except Exception:
             return default
 
+    profile_json = _j(row.profile_json, {})
+    selected_notes = _j(row.selected_notes_json, [])
+    sampled_articles = profile_json.get("sampled_articles") or []
+    if sampled_articles and selected_notes:
+        by_id = {str(a.get("note_id") or ""): a for a in sampled_articles}
+        merged = []
+        for n in selected_notes:
+            extra = by_id.get(str(n.get("note_id") or "")) or {}
+            merged.append({**n, **{k: v for k, v in extra.items() if v not in (None, "") or k not in n}})
+        selected_notes = merged
     return {
         "profile_doc_id": row.profile_doc_id,
         "subscription_id": row.subscription_id,
@@ -72,8 +82,9 @@ def _doc_to_dict(row: CreatorProfileDoc) -> Dict[str, Any]:
         "recent_topics": _j(row.recent_topics_json, []),
         "content_type_distribution": _j(row.content_type_distribution_json, {}),
         "output_analysis": _j(row.output_analysis_json, {}),
-        "selected_notes": _j(row.selected_notes_json, []),
-        "profile_json": _j(row.profile_json, {}),
+        "selected_notes": selected_notes,
+        "sampled_articles": sampled_articles,
+        "profile_json": profile_json,
         "profile_md": row.profile_md,
         "profile_md_path": row.profile_md_path,
         "llm_model": row.llm_model,

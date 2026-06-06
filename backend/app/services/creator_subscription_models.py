@@ -171,3 +171,20 @@ class CreatorProfileDoc(CreatorSubBase):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_profile_doc_sub_latest", "subscription_id", "is_latest"),)
+
+
+class FavoritesHabit(CreatorSubBase):
+    """小红书收藏夹 — 用户收藏习惯画像（按订阅持久化）。"""
+
+    __tablename__ = "xhs_favorites_habits"
+
+    subscription_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    red_id: Mapped[str] = mapped_column(String(64), default="")
+    habit_json: Mapped[str] = mapped_column(Text, default="{}")
+    persona_md: Mapped[str] = mapped_column(Text, default="")
+    total_collected: Mapped[int] = mapped_column(Integer, default=0)
+    llm_model: Mapped[str] = mapped_column(String(128), default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

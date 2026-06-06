@@ -135,6 +135,11 @@ def api_delete_subscription(subscription_id: str) -> bool:
 
 async def api_trigger_sync(subscription_id: str) -> Dict[str, Any]:
     _ensure_db()
+    sub = get_subscription(subscription_id)
+    if sub and sub.get("platform") == "xiaohongshu_favorites":
+        from .favorites_sync_runner import run_favorites_sync
+
+        return await run_favorites_sync(subscription_id, trigger="manual")
     return await run_sync(subscription_id, trigger="manual")
 
 

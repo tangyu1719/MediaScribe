@@ -13,14 +13,22 @@ _CHAIN = "社媒订阅-UP画像-LLM分析"
 
 
 def _load_llm_cfg() -> Dict[str, Any]:
+    import os
+
     base = Path(__file__).resolve().parents[2]
-    agent_dir = base.parent / "src" / "agent"
-    for cp in [base / "config.json", agent_dir / "config.json"]:
-        if cp.exists():
-            try:
-                return json.loads(cp.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+    candidates = [
+        Path(os.environ.get("SBA_AGENT_CONFIG", "").strip()) if os.environ.get("SBA_AGENT_CONFIG") else None,
+        base / "config.json",
+        base.parent / "src" / "agent" / "config.json",
+        base.parent.parent / "src" / "agent" / "config.json",
+    ]
+    for cp in candidates:
+        if not cp or not cp.is_file():
+            continue
+        try:
+            return json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return {}
 
 
@@ -276,6 +284,7 @@ def render_profile_markdown(
     selection: Dict[str, Any],
     deep_profile: Dict[str, Any],
     selected_notes: List[Dict[str, Any]],
+    sampled_articles: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """阶段5：固化人物资料文档。"""
     lines = [
@@ -297,11 +306,31 @@ def render_profile_markdown(
         "## 二、深度采样篇目",
         "",
     ]
+    art_by_id = {
+        str(a.get("note_id") or ""): a for a in (sampled_articles or []) if a.get("note_id")
+    }
     for n in selected_notes:
+        nid = str(n.get("note_id") or "")
+        art = art_by_id.get(nid) or n
+        doc_path = str(art.get("doc_path") or n.get("doc_path") or "")
+        char_len = art.get("char_len") or n.get("char_len") or ""
+        fetch_ok = art.get("fetch_ok", n.get("fetch_ok"))
+        status = "正文有效" if fetch_ok else "正文无效/页面不可访问"
+        local_ref = Path(doc_path).name if doc_path else "—"
         lines.append(
             f"- [{n.get('title', n.get('note_id'))}]({n.get('canonical_url', '')}) "
-            f"· {n.get('content_type', '')} · {n.get('published_at', '')}"
+            f"· {n.get('content_type', '')} · {n.get('published_at') or '—'}"
         )
+        pipe = str(art.get("pipeline_url") or n.get("pipeline_url") or doc_path or "")
+        if pipe and pipe != n.get("canonical_url"):
+            lines.append(f"  - 流水线链接：`{pipe}`")
+        if n.get("link_source") or art.get("link_source"):
+            lines.append(f"  - 链接来源：`{n.get('link_source') or art.get('link_source')}`")
+        lines.append(f"  - 本地 MD：`{local_ref}` · 字数 {char_len or '—'} · {status}")
+        if doc_path:
+            lines.append(f"  - 路径：`{doc_path}`")
+        if n.get("task_id") or art.get("task_id"):
+            lines.append(f"  - 任务 ID：`{n.get('task_id') or art.get('task_id')}`")
     lines.extend(["", "## 三、深度人物画像", "", deep_profile.get("markdown_body") or ""])
     lines.extend(["", "## 四、结构化字段（JSON）", "", "```json", json.dumps(deep_profile, ensure_ascii=False, indent=2), "```"])
     if selection.get("rationale"):

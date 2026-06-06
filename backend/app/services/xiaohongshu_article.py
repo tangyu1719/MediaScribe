@@ -303,7 +303,16 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         comments_file_link=format_comments_file_link(comments_file_path),
     )
     if not md.strip():
-        md = f"""# {platform}{content_type}分析
+        from .file_naming import resolve_effective_doc_title
+
+        h1 = resolve_effective_doc_title(
+            doc_title=title,
+            link_title=link_title,
+            platform=platform,
+            content_type=content_type,
+            summary=ai_summary,
+        )
+        md = f"""# {h1}
 
 ## 分析信息
 - 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}

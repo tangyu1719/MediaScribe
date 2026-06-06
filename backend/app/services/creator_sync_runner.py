@@ -335,7 +335,7 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
 async def run_sync_all(trigger: str = "scheduled") -> Dict[str, Any]:
     from .creator_subscription_store import list_active_subscriptions
 
-    subs = list_active_subscriptions()
+    subs = [s for s in list_active_subscriptions() if s.get("platform") == "xiaohongshu"]
     results = []
     for s in subs:
         r = await run_sync(s["subscription_id"], trigger=trigger)

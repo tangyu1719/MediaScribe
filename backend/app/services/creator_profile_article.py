@@ -49,6 +49,15 @@ async def _run_in_profile_pool(task_id: str) -> None:
         await loop.run_in_executor(get_profile_executor(), _worker)
 
 
+def article_text_usable(text: str, *, min_len: int = 300) -> bool:
+    """判断拉取到的原文是否可用于深度画像（排除「页面不见了」等占位）。"""
+    body = (text or "").strip()
+    if len(body) < min_len:
+        return False
+    bad_markers = ("你访问的页面不见了", "页面不存在", "笔记不存在", "内容无法展示")
+    return not any(m in body for m in bad_markers)
+
+
 def extract_article_from_md(md_path: str) -> str:
     p = Path(md_path)
     if not p.is_file():
@@ -73,10 +82,20 @@ async def run_article_only_for_note(
     platform: str = "小红书",
     timeout_sec: int = 1800,
 ) -> Dict[str, Any]:
-    link = str(note.get("canonical_url") or "")
+    link = str(note.get("pipeline_url") or note.get("canonical_url") or "")
     note_id = str(note.get("note_id") or "")
     if not link:
         return {"ok": False, "note_id": note_id, "error": "missing_url"}
+
+    _log.info(
+        "[%s|creator_profile_article.run_article_only_for_note|%s|Agent执行|流水线输入] "
+        "link=%s; link_source=%s; has_token=%s",
+        _CHAIN,
+        note_id,
+        link[:160],
+        note.get("link_source") or "",
+        "xsec_token" in link,
+    )
 
     task_id = create_task(
         platform,
@@ -123,6 +142,8 @@ async def run_article_only_for_note(
         "published_at": note.get("published_at"),
         "content_type": note.get("content_type"),
         "canonical_url": link,
+        "pipeline_url": link,
+        "link_source": note.get("link_source") or "",
         "doc_path": doc_path,
         "article": article,
     }
