@@ -17,24 +17,26 @@
 
 ```json
 {
-  "version": 1,
-  "schema": "sublime-line-marks",
+  "version": 2,
+  "schema": "sublime-span-marks",
   "file": "062-08-05-示例_图文分析.md",
   "marks": [
-    { "line": 12, "name": "小红书图文分析" }
+    { "line": 12, "name": "中小公司", "start": 450, "end": 454 }
   ]
 }
 ```
 
-行号为 **1-based**（与 ST 行号一致）。
+- 行号为 **1-based**（与 ST 行号一致），**每行最多一处标记**。
+- 有 `start`/`end` 时为选区标记（与 Web 预览红框一致）；仅有 `line` 时为整行标记。
+- **Web 预览**还会把同样内容写入 MD 文件底部的 `## 选区标记` 节（人类可读 + ` ```sba-marks ` JSON），与侧车同步。
 
 ## 快捷键
 
 | 按键 | 功能 |
 |------|------|
-| Ctrl+Q | 切换当前行标记 |
-| F2 | 下一标记 |
-| Shift+F2 | 上一标记 |
+| Ctrl+Q | **切换当前行标记**：该行已标记则取消；未标记时有选区则标记选区，无选区则标记整行 |
+| F2 | 下一标记（按行号） |
+| Shift+F2 | 上一标记（按行号） |
 
 > 若与 ST 宏录制 Ctrl+Q 冲突，可在 `User/Default (*.sublime-keymap)` 中改绑。
 
