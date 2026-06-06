@@ -302,7 +302,16 @@ def generate_document_with_comments(
         comments_file_link=format_comments_file_link(cfp),
     )
     if not md.strip():
-        md = f"""# {platform}{content_type}分析
+        from .file_naming import resolve_effective_doc_title
+
+        h1 = resolve_effective_doc_title(
+            doc_title=doc_name,
+            link_title=(result_data.get("link_title") or doc_name),
+            platform=platform,
+            content_type=content_type,
+            summary=summary,
+        )
+        md = f"""# {h1}
 
 ## 分析信息
 - 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}

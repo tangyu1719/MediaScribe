@@ -357,6 +357,13 @@ def _startup_auth_and_db():
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("creator subscription scheduler: %s", e)
     try:
+        from .services.favorites_scheduler import schedule_favorites_on_startup, start_scheduler as start_favorites_scheduler
+
+        start_favorites_scheduler()
+        schedule_favorites_on_startup()
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("favorites scheduler startup: %s", e)
+    try:
         from .services.rss_scheduler import start_scheduler as start_rss_scheduler
 
         start_rss_scheduler()
@@ -370,6 +377,12 @@ def _shutdown_creator_scheduler():
         from .services.creator_scheduler import stop_scheduler
 
         stop_scheduler()
+    except Exception:
+        pass
+    try:
+        from .services.favorites_scheduler import stop_scheduler as stop_favorites_scheduler
+
+        stop_favorites_scheduler()
     except Exception:
         pass
     try:
@@ -722,7 +735,7 @@ async def route_output_open_local(request: Request):
 
 @app.get("/api/output/file")
 def route_output_file_read(file: str = Query(..., description="output 目录内 basename")):
-    """读取 output 内 Markdown 正文与行标记（预览/编辑用）。"""
+    """读取 output 内 Markdown 正文与选区标记（预览/编辑用）。"""
     from .services.output_file_io import read_output_file
 
     try:
@@ -744,10 +757,16 @@ async def route_output_file_save(request: Request):
     if content is None:
         raise HTTPException(400, "缺少 content")
     save_as = (body.get("save_as") or body.get("saveAs") or "").strip()
+    marks = body.get("marks")
     if not name:
         raise HTTPException(400, "缺少 file")
     try:
-        return save_output_file(name, str(content), save_as=save_as)
+        return save_output_file(
+            name,
+            str(content),
+            save_as=save_as,
+            marks=marks if isinstance(marks, list) else None,
+        )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except FileExistsError as e:
@@ -758,7 +777,7 @@ async def route_output_file_save(request: Request):
 
 @app.get("/api/output/file/marks")
 def route_output_file_marks_get(file: str = Query(...)):
-    """读取行标记侧车 JSON。"""
+    """读取选区标记侧车 JSON。"""
     from .services.output_file_io import enrich_marks_with_labels, read_marks, resolve_output_file
 
     try:
@@ -773,7 +792,7 @@ def route_output_file_marks_get(file: str = Query(...)):
 
 @app.put("/api/output/file/marks")
 async def route_output_file_marks_put(request: Request):
-    """写入行标记侧车 JSON（与 ST3 SBA_LineMarks 互通）。"""
+    """写入选区标记侧车 JSON（兼容旧版行标记读取）。"""
     from .services.output_file_io import save_marks
 
     body = await request.json()
@@ -793,7 +812,7 @@ async def route_output_file_marks_put(request: Request):
 
 @app.post("/api/output/file/marks/remap")
 async def route_output_file_marks_remap(request: Request):
-    """编辑正文后按行内容锚点传递标记（与 ST3 侧车同步）。"""
+    """编辑正文后按选区文本锚点传递标记。"""
     from .services.output_file_io import remap_marks_on_text_change, save_marks
 
     body = await request.json()
@@ -1440,6 +1459,86 @@ def route_subscriptions_profile_run_get(profile_run_id: str):
     return row
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 小红书收藏夹订阅
+# ═══════════════════════════════════════════════════════════════════
+from .services.favorites_subscription_api import (
+    api_ensure_favorites_subscription,
+    api_get_favorites_digest,
+    api_get_favorites_habit,
+    api_trigger_favorites_sync,
+    health as fav_health,
+)
+from .services.favorites_scheduler import get_scheduler_status as get_favorites_scheduler_status
+
+
+@app.get("/api/favorites/health")
+def route_favorites_health():
+    return fav_health()
+
+
+@app.get("/api/favorites/subscription")
+def route_favorites_subscription():
+    try:
+        return api_ensure_favorites_subscription()
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.post("/api/favorites/sync")
+async def route_favorites_sync(request: Request):
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    force = int(body.get("force_analyze_latest") or 0)
+    try:
+        return await api_trigger_favorites_sync(force_analyze_latest=force)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.get("/api/favorites/habit")
+def route_favorites_habit(subscription_id: str = Query(None)):
+    try:
+        return api_get_favorites_habit(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.get("/api/favorites/digest/latest")
+def route_favorites_digest_latest(subscription_id: str = Query(None)):
+    try:
+        row = api_get_favorites_digest(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not row:
+        raise HTTPException(404, "暂无收藏 digest")
+    return row
+
+
+@app.get("/api/favorites/scheduler/status")
+def route_favorites_scheduler_status():
+    return get_favorites_scheduler_status()
+
+
 @app.post("/api/history/regenerate-html")
 async def route_history_regenerate_html(request: Request):
     """重新生成HTML长页"""
@@ -1801,7 +1900,11 @@ async def route_chat_warmup(
     对话运行时预热：MCP 工具 + LangGraph 图 + 可选 RAG/Milvus。
     前端进入 AI 问答页或发送前调用；后端启动时亦后台执行。
     """
-    from .services.chat_warmup import get_warmup_status, run_chat_warmup
+    from .services.chat_warmup import (
+        get_warmup_status,
+        run_chat_warmup,
+        wait_for_chat_warmup,
+    )
 
     st = get_warmup_status()
     if st.get("ready") and not force and st.get("tools_cached", {}).get(
@@ -1809,6 +1912,13 @@ async def route_chat_warmup(
     ):
         return {"ok": True, **st}
     if st.get("warming") and not force:
+        if wait:
+            st = await wait_for_chat_warmup(
+                read_comments=read_comments,
+                include_rag=include_rag,
+                force=force,
+                timeout_sec=90.0,
+            )
         return {"ok": True, **st}
     if wait:
         st = await run_chat_warmup(
@@ -1826,6 +1936,21 @@ async def route_chat_warmup(
         )
         st = get_warmup_status()
     return {"ok": True, **st}
+
+
+@app.get("/api/chat/runtime-status")
+async def route_chat_runtime_status():
+    """轻量运行时探活：不探测 Milvus，供前端判断后端是否假死。"""
+    from .services.chat_warmup import get_warmup_status
+
+    t0 = time.perf_counter()
+    st = get_warmup_status()
+    return {
+        "ok": True,
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+        "latency_ms": int((time.perf_counter() - t0) * 1000),
+        "warmup": st,
+    }
 
 
 @app.get("/api/tools/mcp/config")
@@ -1978,6 +2103,13 @@ async def route_chat_stream(request: Request):
     sid = body.get("session_id", "default")
     if not orig:
         raise HTTPException(400, "消息不能为空")
+    _LOG_CHAT.info(
+        "[AI问答-流式|main.route_chat_stream|session:%s|Agent执行|接入] "
+        "stream_accepted; msg_len=%s; rag_prefetch=%s",
+        sid,
+        len(orig),
+        bool(body.get("rag_prefetch", False)),
+    )
     msg, skill_meta = expand_message_with_skill_meta(orig)
     if skill_meta:
         _LOG_CHAT.info(
@@ -2523,14 +2655,60 @@ def route_rag_library_delete(lid: str):
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 4: 文档处理 + RAG 知识库管理
 # ═══════════════════════════════════════════════════════════════════
+_RAG_API_TIMEOUT_SEC = 14.0
+
+
 @app.get("/api/doc/rag/stats")
-def route_doc_rag_stats():
-    return kb_stats()
+async def route_doc_rag_stats(refresh: bool = Query(False, description="true 时强制直连 Milvus 重算切片聚合")):
+    """RAG 统计：线程池执行并限时，避免 Milvus 不可达时拖死 worker 线程。"""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(kb_stats, refresh), timeout=_RAG_API_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logging.getLogger("sba.kb_rag").warning(
+            "[RAG-知识库|main.route_doc_rag_stats|kb_stats|硬编执行|超时] "
+            "timeout_sec=%s",
+            _RAG_API_TIMEOUT_SEC,
+        )
+        return {
+            "ok": True,
+            "degraded": True,
+            "error": "rag_stats_timeout",
+            "data": {
+                "total_files": 0,
+                "total_chunks": 0,
+                "milvus_ok": False,
+                "chunk_count_source": "timeout",
+            },
+        }
 
 
 @app.get("/api/doc/rag/files")
-def route_doc_rag_files(page: int = Query(1), size: int = Query(50)):
-    files = kb_list_files()
+async def route_doc_rag_files(
+    page: int = Query(1),
+    size: int = Query(50),
+    refresh: bool = Query(False, description="true 时强制直连 Milvus 按切片属性聚合父文档切片数"),
+):
+    """RAG 文件列表：线程池执行并限时，避免并发 Milvus 快照占满线程池。"""
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(kb_list_files, refresh), timeout=_RAG_API_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logging.getLogger("sba.kb_rag").warning(
+            "[RAG-知识库|main.route_doc_rag_files|kb_list_files|硬编执行|超时] "
+            "timeout_sec=%s; page=%s; size=%s",
+            _RAG_API_TIMEOUT_SEC,
+            page,
+            size,
+        )
+        return {
+            "ok": True,
+            "degraded": True,
+            "error": "rag_files_timeout",
+            "files": [],
+            "total": 0,
+            "page": page,
+            "list_chunk_sum": 0,
+        }
+    files = (payload or {}).get("files") or []
     total = len(files)
     start = (page - 1) * size
     list_sum = sum(int(f.get("chunk_count") or 0) for f in files)
@@ -2540,6 +2718,8 @@ def route_doc_rag_files(page: int = Query(1), size: int = Query(50)):
         "total": total,
         "page": page,
         "list_chunk_sum": list_sum,
+        "chunk_agg_ms": (payload or {}).get("chunk_agg_ms"),
+        "chunk_count_source": (payload or {}).get("chunk_count_source"),
     }
 
 
@@ -3491,9 +3671,51 @@ def route_rss_sync_one(feed_id: str, request: Request):
     return {"ok": True, "feed": feed}
 
 
+@app.post("/api/rss/feeds/{feed_id}/sync/stream")
+async def route_rss_sync_one_stream(feed_id: str, request: Request):
+    """RSS 单源同步 SSE：阶段性展示拉取/解析/映射本地文档（与 AI 问答 thought_step 对齐）。"""
+    from .services.rss_sync_stream import stream_sync_feed
+
+    uid = _rss_user_id(request)
+
+    async def gen():
+        try:
+            async for chunk in stream_sync_feed(uid, feed_id):
+                yield chunk
+        except Exception as ex:
+            yield f"event: error\ndata: {json.dumps({'ok': False, 'error': str(ex)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/rss/sync")
 def route_rss_sync_all(request: Request):
     return rss_sync_all(_rss_user_id(request))
+
+
+@app.post("/api/rss/sync/stream")
+async def route_rss_sync_all_stream(request: Request):
+    """RSS 全部订阅源同步 SSE。"""
+    from .services.rss_sync_stream import stream_sync_all_feeds
+
+    uid = _rss_user_id(request)
+
+    async def gen():
+        try:
+            async for chunk in stream_sync_all_feeds(uid):
+                yield chunk
+        except Exception as ex:
+            yield f"event: error\ndata: {json.dumps({'ok': False, 'error': str(ex)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/rss/items")

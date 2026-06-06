@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .task_manager import get_output_dir
 from .document_consolidation import extract_title_from_summary, clean_title
@@ -30,6 +30,44 @@ def apply_naming_template(template: str, **kwargs) -> str:
         for key, val in kwargs.items():
             out = out.replace("{" + key + "}", str(val or ""))
         return out
+
+
+_GENERIC_DOC_TITLE_MARKERS = frozenset({
+    "小红书图文分析", "小红书视频分析", "抖音图文分析", "抖音视频分析",
+    "B站视频分析", "B站图文分析", "内容分析", "未知标题", "文档标题",
+})
+
+
+def resolve_effective_doc_title(
+    *,
+    doc_title: str = "",
+    link_title: str = "",
+    platform: str = "",
+    content_type: str = "",
+    summary: str = "",
+) -> str:
+    """成品 Markdown 一级标题：优先 doc_title / link_title，禁止回退为「平台+类型+分析」泛称。"""
+    candidates: List[str] = []
+    for raw in (doc_title, link_title):
+        t = (raw or "").strip()
+        if t.endswith(" - 小红书"):
+            t = t[:-5].strip()
+        if t and not _is_junk_link_title(t) and t not in _GENERIC_DOC_TITLE_MARKERS:
+            candidates.append(t)
+    if candidates:
+        return sanitize_filename_part(candidates[0].replace(" ", "_"))[:50].replace("_", " ")
+    if summary:
+        from .document_consolidation import extract_title_from_summary
+
+        guessed = (extract_title_from_summary(summary, "") or "").strip()
+        if guessed and guessed not in _GENERIC_DOC_TITLE_MARKERS:
+            return guessed[:50]
+    fb = (link_title or doc_title or "").strip()
+    if fb.endswith(" - 小红书"):
+        fb = fb[:-5].strip()
+    if fb and not _is_junk_link_title(fb):
+        return fb[:50]
+    return "未命名文档"
 
 
 def render_output_template(
@@ -51,6 +89,16 @@ def render_output_template(
     tpl = (template or "").strip()
     if not tpl:
         return ""
+    # 兼容旧模板：将泛称 H1 占位自动替换为具体 doc_title
+    if "{platform}{content_type}分析" in tpl and "{doc_title}" not in tpl.split("\n", 1)[0]:
+        tpl = tpl.replace("# {platform}{content_type}分析", "# {doc_title}", 1)
+    effective_title = resolve_effective_doc_title(
+        doc_title=doc_title,
+        link_title=link_title,
+        platform=platform,
+        content_type=content_type,
+        summary=summary,
+    )
     ctx = {
         "platform": platform,
         "link": link,
@@ -62,7 +110,7 @@ def render_output_template(
         "content_type": content_type,
         "transcribe_source": (transcribe_source or "").strip() or "unknown",
         "link_title": link_title,
-        "doc_title": doc_title,
+        "doc_title": effective_title,
         "comments_section": (comments_section or "").strip(),
         "comments_analysis": (comments_analysis or "").strip(),
         "comments_file_link": (comments_file_link or "").strip(),

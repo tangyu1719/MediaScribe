@@ -61,6 +61,7 @@ _SPA_PAGE_PATHS = (
     "/profile",
     "/settings",
     "/iag",
+    "/subscribe",
     "/webreplay",
 )
 _WHITELIST_EXACT = frozenset({"/", "/login.html", *_SPA_PAGE_PATHS})
