@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -39,6 +40,32 @@ def normalize_rag_slices(hits: List[Any], *, max_slices: int = 8) -> List[Dict[s
     return out
 
 
+def _citation_format_block() -> str:
+    """按句编号引用 + 逐处逻辑注释的硬性格式说明。"""
+    return "\n".join(
+        [
+            "【回答格式 · 按句引用 + 逻辑注释（必须严格遵守）】",
+            "一、正文（按句为单位）",
+            "  · 每一句依据知识库写出的论断，句末必须标注引用编号，格式为阿拉伯数字 1、2、3…（不用上标）。",
+            "  · 同一句话可引用多个切片则写 1,2；编号对应下方预检索文献 [n]，禁止无编号的知识库论断。",
+            "二、正文结束后依次输出两节（标题固定，不可省略）：",
+            "  ## 文献切片明细",
+            "  逐条列出本回答用到的切片（按 [n] 编号），每条须含：",
+            "    - 切片[n]：所属父文档《父文档名》（父文档路径）",
+            "    - 切片全文：（完整粘贴该切片正文，不可截断）",
+            "    - 父文档全文：（写「见路径 xxx，前端可点击查看」；路径用预检索文献中的父文档路径）",
+            "  ## 注释",
+            "  按正文引用编号逐条写「处逻辑链路」（与正文句末编号一一对应，不可合并）：",
+            "    1 处逻辑链路：摘录切片【1】原文「…关键句…」；因原文…，故正文第1句写成…。置信度：100",
+            "    2 处逻辑链路：通过切片【1】【4】中…，结合…，判断正文第2句…。置信度：80",
+            "  · 置信度为 0–100 整数；直接摘录原文可 100，跨切片归纳酌情 60–90。",
+            "  · 每条必须写清：用了哪几个切片【n】、摘录了哪句原文、如何推到正文对应句。",
+            "三、禁止编造未出现在切片中的事实；无依据时写「知识库未检索到相关依据」，不得虚构编号。",
+            "四、禁止在正文输出 FunctionCall、```json 工具参数。",
+        ]
+    )
+
+
 def build_rag_llm_blocks(
     rag_slices: List[Dict[str, Any]],
     *,
@@ -47,30 +74,19 @@ def build_rag_llm_blocks(
 ) -> Tuple[str, str]:
     """
     返回 (rag_context_block, citation_instruction_block)。
-    rag_context_block 供模型阅读；citation_instruction_block 约束回答格式（论文式上标+脚注）。
+    rag_context_block 供模型阅读；citation_instruction_block 约束按句引用+逻辑注释格式。
     """
+    cite_lines = [_citation_format_block()]
     slices = [s for s in (rag_slices or []) if isinstance(s, dict) and s.get("content")]
-    cite_lines = [
-        "【回答格式 · 文献上标引用（必须遵守，类似学术论文）】",
-        "1. 正文：凡依据下方「预检索文献」切片写出的每一句事实/论断，句末必须标注上标编号，"
-        "格式为 ¹ 或 ¹² 或 ¹《父文档名》²《父文档名》。"
-        "上标数字 n 唯一对应预检索文献中的 [n]；禁止无出处的知识库论断。",
-        "2. 正文结束后，必须单独增加一节标题「## 文献注释」（脚注区），按上标编号逐条列出：",
-        "   ¹ 《父文档名》（父文档路径，若有）",
-        "     · 切片原文：引用该编号切片中的关键原文（用引号标出，可摘录）",
-        "     · 推理链路：说明从该原文如何归纳/推断出正文中对应句子的结论（逻辑须具体、可核对）",
-        "3. 禁止编造未出现在切片中的事实；无切片依据时写「知识库未检索到相关依据」，不得虚构上标。",
-        "4. 禁止在正文输出 FunctionCall、```json 工具参数；引用仅用上标+文献注释。",
-    ]
     if not slices:
         ctx = "编排段知识库预检索：未命中切片。"
         if prefetch_error:
             ctx += f" 原因：{prefetch_error[:300]}"
         if rag_query:
             ctx += f" 检索词：{rag_query[:200]}"
-        return ctx, "\n".join(cite_lines)
+        return ctx, cite_lines[0]
 
-    doc_lines = ["【预检索文献 · 原文切片（编号供上标引用）】"]
+    doc_lines = ["【预检索文献 · 原文切片（编号供正文句末引用）】"]
     if rag_query:
         doc_lines.append(f"检索词：{rag_query[:200]}")
     for sl in slices:
@@ -85,16 +101,34 @@ def build_rag_llm_blocks(
         doc_lines.append("切片全文：")
         doc_lines.append(str(sl.get("content") or ""))
 
-    return "\n".join(doc_lines), "\n".join(cite_lines)
+    return "\n".join(doc_lines), cite_lines[0]
 
 
 def answer_has_rag_citations(answer: str) -> bool:
-    """探测回答是否含论文式上标或文献注释节。"""
+    """探测回答是否含按句编号引用与逻辑注释。"""
     text = str(answer or "")
     if not text.strip():
         return False
-    has_sup = any(ch in text for ch in "¹²³⁴⁵⁶⁷⁸⁹")
-    has_bracket_ref = "[1]" in text or "【1】" in text
-    has_footnote_sec = "文献注释" in text or "脚注" in text
-    has_paren_doc = "《" in text and "》" in text
-    return has_sup or has_bracket_ref or (has_footnote_sec and has_paren_doc)
+    body = text.split("## 文献切片明细", 1)[0] if "## 文献切片明细" in text else text
+    # 句末引用：…协议1。 / …模块2 / …入口3。
+    has_sentence_ref = bool(
+        re.search(r"[\u4e00-\u9fff\w\)）]\d{1,2}(?:[,，]\d{1,2})*[。；！？]?", body)
+    )
+    has_slice_sec = "文献切片明细" in text or "切片全文" in text
+    has_note_sec = "## 注释" in text or "\n注释" in text
+    note_part = ""
+    if "## 注释" in text:
+        note_part = text.split("## 注释", 1)[-1]
+    elif "\n注释" in text:
+        note_part = text.split("\n注释", 1)[-1]
+    has_logic = "处逻辑链路" in note_part
+    has_conf = "置信度" in note_part
+    has_parent = "《" in text and "》" in text
+    return (
+        has_sentence_ref
+        and has_slice_sec
+        and has_note_sec
+        and has_logic
+        and has_conf
+        and has_parent
+    )

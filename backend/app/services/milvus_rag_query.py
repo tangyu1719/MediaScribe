@@ -64,6 +64,30 @@ def fetch_milvus_rag_snapshot(*, force: bool = False) -> Optional[Dict[str, Any]
     return data
 
 
+def _aggregate_slice_rows(rows: List[Any]) -> Tuple[Counter[str], Counter[str], Dict[str, Dict[str, str]]]:
+    """按切片 source_file（父文档键）累加；并建立 basename 索引供登记册绝对路径匹配。"""
+    per_parent: Counter[str] = Counter()
+    per_basename: Counter[str] = Counter()
+    sample_meta: Dict[str, Dict[str, str]] = {}
+    for r in rows or []:
+        src = str(r.get("source_file") or "").strip()
+        if not src:
+            continue
+        nk = _norm_path(src)
+        per_parent[nk] += 1
+        bn = _norm_path(os.path.basename(src))
+        per_basename[bn] += 1
+        if bn not in sample_meta and any(r.get(k) for k in ("domain", "module", "doc_type")):
+            sample_meta[bn] = {
+                "domain": str(r.get("domain") or ""),
+                "module": str(r.get("module") or ""),
+                "doc_type": str(r.get("doc_type") or ""),
+                "keyword1": str(r.get("keyword1") or ""),
+                "keyword2": str(r.get("keyword2") or ""),
+            }
+    return per_parent, per_basename, sample_meta
+
+
 def _fetch_milvus_rag_snapshot_impl() -> Optional[Dict[str, Any]]:
     host, port, coll_name = _milvus_cfg()
     t0 = time.perf_counter()
@@ -97,64 +121,61 @@ def _fetch_milvus_rag_snapshot_impl() -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-        per_file: Counter[str] = Counter()
-        sample_meta: Dict[str, Dict[str, str]] = {}
+        # 轻量分页：仅拉切片属性 source_file + metadata，在内存按父文档累加
+        slice_rows: List[Any] = []
         fields = ["source_file", "domain", "module", "doc_type", "keyword1", "keyword2"]
         offset = 0
-        page = 2000
+        page = 5000
         while True:
             try:
-                rows = coll.query(
-                    expr="pk >= 0",
-                    output_fields=fields,
-                    limit=page,
-                    offset=offset,
+                batch = list(
+                    coll.query(
+                        expr="pk >= 0",
+                        output_fields=fields,
+                        limit=page,
+                        offset=offset,
+                    )
+                    or []
                 )
             except TypeError:
-                rows = coll.query(
-                    expr="pk >= 0",
-                    output_fields=fields,
-                    limit=page,
+                batch = list(
+                    coll.query(
+                        expr="pk >= 0",
+                        output_fields=fields,
+                        limit=page,
+                    )
+                    or []
                 )
-                offset = page  # 不支持 offset 时只拉一页
+                offset = page
             except Exception as ex:
                 _log.warning(
-                    "[RAG-知识库|milvus_rag_query.fetch_milvus_rag_snapshot|collection.query|硬编执行|分页] 失败; error=%s",
+                    "[RAG-知识库|milvus_rag_query._fetch_milvus_rag_snapshot_impl|collection.query|硬编执行|分页] 失败; error=%s",
                     ex,
                 )
                 break
-            batch = list(rows or [])
             if not batch:
                 break
-            for r in batch:
-                src = str(r.get("source_file") or "").strip()
-                if not src:
-                    continue
-                nk = _norm_path(src)
-                per_file[nk] += 1
-                if nk not in sample_meta and any(r.get(k) for k in ("domain", "module", "doc_type")):
-                    sample_meta[nk] = {
-                        "domain": str(r.get("domain") or ""),
-                        "module": str(r.get("module") or ""),
-                        "doc_type": str(r.get("doc_type") or ""),
-                        "keyword1": str(r.get("keyword1") or ""),
-                        "keyword2": str(r.get("keyword2") or ""),
-                    }
+            slice_rows.extend(batch)
             if len(batch) < page or offset == page:
                 break
             offset += len(batch)
             if offset > 50000:
                 break
 
+        per_parent, per_basename, sample_meta = _aggregate_slice_rows(slice_rows)
         if total <= 0:
-            total = sum(per_file.values())
+            total = sum(per_parent.values())
+        agg_ms = int((time.perf_counter() - t0) * 1000)
         return {
             "ok": True,
             "total_chunks": int(total),
-            "total_files": len(per_file),
-            "per_file_norm": dict(per_file),
+            "total_files": len(per_parent),
+            "per_parent_norm": dict(per_parent),
+            "per_file_norm": dict(per_parent),
+            "per_basename_norm": dict(per_basename),
             "sample_meta": sample_meta,
-            "latency_ms": int((time.perf_counter() - t0) * 1000),
+            "latency_ms": agg_ms,
+            "aggregation": "milvus_slice_by_source_file",
             "collection": coll_name,
         }
     except Exception as ex:
@@ -167,17 +188,44 @@ def _fetch_milvus_rag_snapshot_impl() -> Optional[Dict[str, Any]]:
         _disconnect(_ALIAS)
 
 
-def milvus_chunk_count_for_path(file_path: str, snapshot: Optional[Dict[str, Any]] = None) -> int:
+def _milvus_lookup_keys(file_path: str) -> List[str]:
+    """Milvus 入库 source_file 常为 basename（kb_manager_fast.add_document），登记册多为绝对路径。"""
+    fp = str(file_path or "").strip()
+    keys: List[str] = []
+    seen: set[str] = set()
+    for candidate in (fp, os.path.basename(fp)):
+        c = str(candidate or "").strip()
+        if not c:
+            continue
+        nk = _norm_path(c)
+        if nk in seen:
+            continue
+        seen.add(nk)
+        keys.append(c)
+    if fp and ("/" in fp or "\\" in fp):
+        alt = fp.replace("/", "\\") if "/" in fp else fp.replace("\\", "/")
+        nk_alt = _norm_path(alt)
+        if nk_alt not in seen:
+            seen.add(nk_alt)
+            keys.append(alt)
+    return keys
+
+
+def milvus_chunk_count_for_path(file_path: str, snapshot: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """返回 Milvus 切片聚合后的父文档切片数；None 表示快照不可用或未匹配。"""
     snap = snapshot or fetch_milvus_rag_snapshot()
     if not snap or not snap.get("ok"):
-        return 0
-    per = snap.get("per_file_norm") or {}
-    nk = _norm_path(file_path)
-    if nk in per:
-        return int(per[nk])
-    # 路径分隔符不一致时再试
-    alt = _norm_path(file_path.replace("/", "\\")) if "/" in file_path else _norm_path(file_path.replace("\\", "/"))
-    return int(per.get(alt) or 0)
+        return None
+    per = snap.get("per_parent_norm") or snap.get("per_file_norm") or {}
+    per_bn = snap.get("per_basename_norm") or {}
+    for key in _milvus_lookup_keys(file_path):
+        nk = _norm_path(key)
+        if nk in per:
+            return int(per[nk])
+        bn = _norm_path(os.path.basename(key))
+        if bn in per_bn:
+            return int(per_bn[bn])
+    return None
 
 
 def milvus_query_file_chunks(file_path: str, limit: int = 30) -> List[Dict[str, Any]]:
@@ -217,16 +265,20 @@ def _milvus_query_file_chunks_impl(file_path: str, limit: int) -> List[Dict[str,
             coll.load(timeout=8)
         except TypeError:
             coll.load()
-        safe = _esc(file_path)
         lim = max(1, min(int(limit or 30), 100))
-        rows = coll.query(
-            expr=f'source_file == "{safe}"',
-            output_fields=[
-                "pk", "chunk_id", "start_pos", "end_pos", "content",
-                "domain", "module", "doc_type", "keyword1", "keyword2",
-            ],
-            limit=lim,
-        )
+        rows = []
+        for lookup_key in _milvus_lookup_keys(file_path):
+            safe = _esc(lookup_key)
+            rows = coll.query(
+                expr=f'source_file == "{safe}"',
+                output_fields=[
+                    "pk", "chunk_id", "start_pos", "end_pos", "content",
+                    "domain", "module", "doc_type", "keyword1", "keyword2",
+                ],
+                limit=lim,
+            )
+            if rows:
+                break
         for r in rows or []:
             chunks.append(
                 {

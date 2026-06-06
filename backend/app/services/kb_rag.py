@@ -414,20 +414,21 @@ def reset_kb_manager() -> None:
     _kb = None
 
 
-def _enrich_rows_from_milvus(rows: List[Dict[str, Any]], snap: Optional[Dict[str, Any]]) -> None:
-    """用 Milvus 真实切片数覆盖 file_records 中常为 0 的 chunk_count（与老 GUI 注释一致）。"""
+def _apply_milvus_slice_aggregate(rows: List[Dict[str, Any]], snap: Optional[Dict[str, Any]]) -> None:
+    """刷新时：直连 Milvus 切片，按 source_file 聚合后写回各行 chunk_count（不依赖 file_records 缓存值）。"""
     if not snap or not snap.get("ok"):
         return
-    per = snap.get("per_file_norm") or {}
     meta_samples = snap.get("sample_meta") or {}
     for row in rows:
         fp = str(row.get("path") or "")
         mc = milvus_chunk_count_for_path(fp, snap)
-        if mc > 0:
-            row["chunk_count"] = max(int(row.get("chunk_count") or 0), mc)
-            row["vector_bound"] = True
-        nk = _norm_path(fp)
-        sm = meta_samples.get(nk) or {}
+        if mc is not None:
+            row["chunk_count"] = mc
+            row["chunk_count_source"] = "milvus_slice_agg"
+            if mc > 0:
+                row["vector_bound"] = True
+        bn = _norm_path(os.path.basename(fp))
+        sm = meta_samples.get(bn) or meta_samples.get(_norm_path(fp)) or {}
         if sm.get("domain") and not row.get("domain"):
             row["domain"] = sm["domain"]
         if sm.get("module") and not row.get("module"):
@@ -436,7 +437,12 @@ def _enrich_rows_from_milvus(rows: List[Dict[str, Any]], snap: Optional[Dict[str
             row["doc_type"] = sm["doc_type"]
 
 
-def kb_stats() -> Dict[str, Any]:
+def _enrich_rows_from_milvus(rows: List[Dict[str, Any]], snap: Optional[Dict[str, Any]]) -> None:
+    """兼容旧名：统一走切片聚合。"""
+    _apply_milvus_slice_aggregate(rows, snap)
+
+
+def kb_stats(*, refresh: bool = False) -> Dict[str, Any]:
     records = load_merged_file_records()
     rec_files = len(records)
     rec_chunks = sum(int(r.get("chunk_count") or 0) for r in records)
@@ -446,6 +452,7 @@ def kb_stats() -> Dict[str, Any]:
     model_loaded = False
     last_update = _latest_added_at(records)
     chunk_count_source = "file_records"
+    chunk_agg_ms: Optional[int] = None
 
     milvus_snap = None
     milvus_degraded = False
@@ -457,14 +464,15 @@ def kb_stats() -> Dict[str, Any]:
         milvus_ok = False
 
     if milvus_ok:
-        milvus_snap = fetch_milvus_rag_snapshot()
+        milvus_snap = fetch_milvus_rag_snapshot(force=refresh)
         if milvus_snap and milvus_snap.get("ok"):
             mv_total = int(milvus_snap.get("total_chunks") or 0)
+            chunk_agg_ms = int(milvus_snap.get("latency_ms") or 0)
             if mv_total > 0:
                 storage_backend = "milvus"
                 rec_chunks = mv_total
                 rec_files = max(rec_files, int(milvus_snap.get("total_files") or 0))
-                chunk_count_source = "milvus"
+                chunk_count_source = "milvus_slice_agg"
             elif rec_chunks > 0:
                 milvus_degraded = True
                 chunk_count_source = "file_records"
@@ -495,6 +503,7 @@ def kb_stats() -> Dict[str, Any]:
             "milvus_ok": milvus_ok,
             "last_update": last_update,
             "chunk_count_source": chunk_count_source,
+            "chunk_agg_ms": chunk_agg_ms,
             "milvus_degraded": milvus_degraded,
             "file_records_path": str(agent_kb_dir() / "file_records.json"),
             "agent_dir": str(_AGENT_DIR or ""),
@@ -524,14 +533,14 @@ def _record_to_web_row(r: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def kb_list_files() -> List[Dict[str, Any]]:
-    """文件列表：优先老项目 file_records（与 rag_manager_gui 一致），切片数以 Milvus 为准。"""
+def kb_list_files(*, refresh: bool = False) -> Dict[str, Any]:
+    """文件列表：登记册 + 刷新时 Milvus 切片按父文档聚合的 chunk_count。"""
     records = load_merged_file_records()
-    milvus_snap = fetch_milvus_rag_snapshot() if records else None
+    milvus_snap = fetch_milvus_rag_snapshot(force=refresh) if records else None
+    chunk_agg_ms = int((milvus_snap or {}).get("latency_ms") or 0) if milvus_snap else None
     if records:
         rows = [_record_to_web_row(r) for r in records]
-        _enrich_rows_from_milvus(rows, milvus_snap)
-        # 有切片的文件排前面，避免顶部汇总 70 但首屏全是 0
+        _apply_milvus_slice_aggregate(rows, milvus_snap)
         rows.sort(
             key=lambda x: (
                 int(x.get("chunk_count") or 0),
@@ -540,10 +549,14 @@ def kb_list_files() -> List[Dict[str, Any]]:
             ),
             reverse=True,
         )
-        return rows
+        return {
+            "files": rows,
+            "chunk_agg_ms": chunk_agg_ms,
+            "chunk_count_source": "milvus_slice_agg" if milvus_snap and milvus_snap.get("ok") else "file_records",
+        }
     kb = get_kb_manager()
     if kb is None:
-        return []
+        return {"files": [], "chunk_agg_ms": chunk_agg_ms, "chunk_count_source": "none"}
     chunks = kb.list_chunks(offset=0, limit=500)
     by_file: Dict[str, Dict[str, Any]] = {}
     for c in chunks or []:
@@ -559,7 +572,11 @@ def kb_list_files() -> List[Dict[str, Any]]:
                 "chunk_count": 0,
             }
         by_file[src]["chunk_count"] = int(by_file[src].get("chunk_count") or 0) + 1
-    return list(by_file.values())
+    return {
+        "files": list(by_file.values()),
+        "chunk_agg_ms": chunk_agg_ms,
+        "chunk_count_source": "kb_manager",
+    }
 
 
 def _metadata_from_payload(raw: Optional[Dict[str, Any]]) -> Optional[DocumentMetadata]:
@@ -625,7 +642,8 @@ def kb_file_detail(file_path: str) -> Dict[str, Any]:
         "keyword1": "",
         "keyword2": "",
     }
-    # 详情接口不触发 kb_manager 全量初始化（避免加载 BGE 卡住页面）；切片列表走独立接口
+    snap = fetch_milvus_rag_snapshot()
+    _apply_milvus_slice_aggregate([row], snap)
     return {"ok": True, "file": row, "record": rec or {}, "chunks": []}
 
 
@@ -655,7 +673,9 @@ def kb_sync_chunk_counts() -> Dict[str, Any]:
     for r in records:
         fp = str(r.get("file_path") or "")
         mc = milvus_chunk_count_for_path(fp, snap)
-        if mc >= 0 and int(r.get("chunk_count") or 0) != mc:
+        if mc is None:
+            continue
+        if int(r.get("chunk_count") or 0) != mc:
             r["chunk_count"] = mc
             if mc > 0:
                 r["vector_bound"] = True
@@ -682,8 +702,10 @@ def kb_file_chunks(file_path: str, limit: int = 30) -> Dict[str, Any]:
     if not chunks:
         snap = fetch_milvus_rag_snapshot()
         mc = milvus_chunk_count_for_path(fp, snap)
-        if mc > 0:
+        if mc is not None and mc > 0:
             hint = f"Milvus 中有 {mc} 条切片，但按路径查询为空（可能路径与入库时不一致）"
+        elif mc == 0:
+            hint = "该文件在 Milvus 中无切片（已匹配 source_file 但计数为 0）"
         else:
             hint = "该文件在 Milvus 中无切片或未连接向量库"
     return {"ok": True, "chunks": chunks, "hint": hint}
