@@ -286,7 +286,13 @@ async def run_chat_warmup(
     with _lock:
         if _warming and not force:
             return get_warmup_status()
-        if _status.get("ready") and not force and _warmup_cache_satisfied(read_comments=read_comments):
+        rag_ok = bool(_status.get("rag_embed_ready"))
+        if (
+            _status.get("ready")
+            and not force
+            and _warmup_cache_satisfied(read_comments=read_comments)
+            and (not include_rag or rag_ok)
+        ):
             return get_warmup_status()
         _warming = True
         _status["warming"] = True

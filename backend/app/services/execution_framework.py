@@ -114,7 +114,7 @@ class ReActFrameworkStrategy(ExecutionFrameworkStrategy):
             return (
                 "【执行框架 · RAG 已预取】编排段已完成知识库检索并注入预检索文献切片。"
                 "请直接基于系统消息中的「预检索文献」撰写面向用户的总结；"
-                "正文须论文式上标引用（¹²），文末附「## 文献注释」说明切片原文与推理链路；"
+                "正文按句句末编号（1、2、3），文末附「## 文献切片明细」与「## 注释」（处逻辑链路+置信度）；"
                 "禁止再调用 rag_search、rag_retrieve、kb_search 等检索类工具；"
                 "禁止输出 <|FunctionCallBegin|> 或编造工具结果。"
             )
