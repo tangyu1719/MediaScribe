@@ -39,8 +39,7 @@ def cookie_attempts() -> int:
 
 
 def stateless_active() -> bool:
-    if os.environ.get("SBA_XHS_SKIP_CHROME", "").strip() in ("1", "true", "yes"):
-        return True
+    """Cookie/Chrome 连续失败达上限后进入无状态访客模式（与 SBA_XHS_SKIP_CHROME 无关）。"""
     return _stateless_active or os.environ.get("SBA_XHS_STATELESS", "").strip() in ("1", "true", "yes")
 
 
@@ -102,12 +101,7 @@ def bootstrap_stateless_session() -> requests.Session:
             ex,
         )
 
-    out: Dict[str, str] = {}
-    for c in sess.cookies:
-        if "xiaohongshu" in (c.domain or ""):
-            out[c.name] = c.value
-    if out:
-        save_cookies("xiaohongshu", out)
+    # 无状态访客会话不得写回 .xhs_cookies.json，否则会覆盖本机 Chrome 已登录 Cookie
     return sess
 
 
