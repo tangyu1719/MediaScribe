@@ -60,6 +60,18 @@ def generate_favorites_digest(
                 "task_id": it.get("analysis_task_id"),
                 "summary_excerpt": summary[:800],
                 "rag_top": top,
+                "published_date": it.get("published_date"),
+                "like_count": it.get("like_count") or 0,
+                "comment_count": it.get("comment_count") or 0,
+                "hashtags": it.get("hashtags") or [],
+                "cover_url": it.get("cover_url") or "",
+                "task_snapshot": {
+                    "task_id": it.get("analysis_task_id"),
+                    "status": it.get("analysis_status"),
+                    "summary": summary[:800],
+                    "author_name": it.get("author_name"),
+                    "priority_rank": it.get("priority_rank"),
+                },
             }
         )
 

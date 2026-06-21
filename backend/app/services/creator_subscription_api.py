@@ -174,6 +174,54 @@ async def api_run_creator_profile(subscription_id: str) -> Dict[str, Any]:
     return await run_creator_profile(subscription_id, trigger="manual")
 
 
+async def api_seed_subscription_catalog(subscription_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """摘录 UP 主页链接到 seen（博客信息），可选入队链接流水线。"""
+    _ensure_db()
+    from .creator_catalog_seed import seed_subscription_catalog
+
+    sub = get_subscription(subscription_id)
+    if not sub:
+        return {"ok": False, "error_code": "SUB_NOT_FOUND", "error": "订阅不存在"}
+    return await seed_subscription_catalog(
+        subscription_id=subscription_id,
+        limit=int(body.get("limit") or 20),
+        enqueue=bool(body.get("enqueue", False)),
+        dry_run=bool(body.get("dry_run", False)),
+        trigger=str(body.get("trigger") or "manual_catalog"),
+    )
+
+
+def api_list_subscription_blog_notes(
+    subscription_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    analysis_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """订阅下已摘录的博客链接列表。"""
+    _ensure_db()
+    from .creator_subscription_store import count_seen_notes_by_subscription, list_seen_notes_by_subscription
+
+    sub = get_subscription(subscription_id)
+    if not sub:
+        return {"ok": False, "error_code": "SUB_NOT_FOUND", "error": "订阅不存在"}
+    items = list_seen_notes_by_subscription(
+        subscription_id,
+        page=page,
+        page_size=page_size,
+        analysis_status=analysis_status,
+    )
+    return {
+        "ok": True,
+        "subscription_id": subscription_id,
+        "display_name": sub.get("display_name") or "",
+        "items": items,
+        "total": count_seen_notes_by_subscription(subscription_id),
+        "page": page,
+        "page_size": page_size,
+    }
+
+
 def api_get_latest_creator_profile(subscription_id: str) -> Optional[Dict[str, Any]]:
     _ensure_db()
     from .creator_profile_store import get_latest_profile_doc, get_latest_profile_run

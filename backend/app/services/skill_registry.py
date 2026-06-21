@@ -320,21 +320,26 @@ def list_skills() -> List[Dict[str, Any]]:
         atts = s.get("attachments") or []
         board = s.get("board") if isinstance(s.get("board"), dict) else None
         display = s.get("display") if isinstance(s.get("display"), dict) else None
-        out.append(
-            {
-                "id": s.get("id"),
-                "name": s.get("name"),
-                "description": s.get("description"),
-                "command": s.get("command"),
-                "created_at": s.get("created_at"),
-                "source": s.get("source"),
-                "version": (s.get("version") or "1.0.0"),
-                "preview": preview,
-                "attachment_count": len(atts) if isinstance(atts, list) else 0,
-                "board": board,
-                "display": display,
-            }
-        )
+        row = {
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "description": s.get("description"),
+            "command": s.get("command"),
+            "created_at": s.get("created_at"),
+            "source": s.get("source"),
+            "version": (s.get("version") or "1.0.0"),
+            "preview": preview,
+            "attachment_count": len(atts) if isinstance(atts, list) else 0,
+            "board": board,
+            "display": display,
+        }
+        try:
+            from .board_usage_stats import enrich_skill_meta
+
+            row = enrich_skill_meta(row)
+        except Exception:
+            pass
+        out.append(row)
     return out
 
 
@@ -935,6 +940,12 @@ def expand_message_with_skill_meta(user_message: str) -> Tuple[str, Optional[Dic
     user_line = f"{cmd} {tail}".strip() if tail else cmd
     expanded = f"{block}\n\n【用户】\n{user_line}"
     meta = {"skill_id": sk.get("id"), "command": cmd, "name": name}
+    try:
+        from .board_usage_stats import record_skill_mount
+
+        record_skill_mount(str(sk.get("id") or ""))
+    except Exception:
+        pass
     return expanded, meta
 
 

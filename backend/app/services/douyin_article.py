@@ -419,6 +419,13 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
         comments_file_path=comments_file_path,
     )
     output_tpl = (cfg.get("output_template") or "").strip()
+    from .link_meta_extract import format_meta_json_block, get_meta_extract_config
+
+    meta_cfg = get_meta_extract_config(cfg)
+    meta_block = format_meta_json_block(
+        result_data.get("extracted_metadata") or {},
+        fields=meta_cfg.get("fields") or [],
+    )
     md = render_output_template(
         output_tpl,
         platform="抖音",
@@ -432,6 +439,9 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
         comments_section=comments_section,
         comments_analysis=comments_viewpoint,
         comments_file_link=format_comments_file_link(comments_file_path),
+        meta_json=meta_block,
+        task_note=str(result_data.get("task_note") or "").strip(),
+        task_keywords=str(result_data.get("task_keywords") or "").strip(),
     )
     if not md.strip():
         md = f"""# 抖音{content_type}分析
@@ -533,14 +543,24 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
         from .pipeline_comments import resolve_comments_text
 
         comments_text = resolve_comments_text(comments_data=comments_data)
+        task_snap_pre = get_task(task_id) or {}
         consolidation = await loop.run_in_executor(
             _llm_executor(), lambda: run_document_consolidation(
-                text=source_text, llm_cfg=cfg,
+                text=source_text, llm_cfg={
+                    **cfg,
+                    "_task_id": task_id,
+                    "_log_chain": "链接沉淀文档-抖音图文",
+                    "_task_note": str(task_snap_pre.get("task_note") or ""),
+                    "_task_keywords": str(task_snap_pre.get("task_keywords") or ""),
+                },
                 stage_label="抖音图文沉淀",
                 comments_text=comments_text,
                 log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
                 ops_cb=_ops_cb,
             ))
+        extracted_metadata = consolidation.get("extracted_metadata") or {}
+        if extracted_metadata:
+            update_task(task_id, extracted_metadata=extracted_metadata)
         if not consolidation.get("ai_summary"):
             update_task(task_id, status="failed", error="AI摘要失败")
             mark_failure_from_task(task_id, "AI摘要失败", route="douyin_graphic", stage_id="ai_analysis")
@@ -566,6 +586,7 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
 
         # ── 节点6: 生成 MD（参照原 generate_md 格式） ──
         update_task(task_id, status="generating", stage="生成Markdown", progress=90)
+        task_snap_md = get_task(task_id) or {}
         result_data = {
             "ai_summary": ai_summary,
             "article": consolidation.get("article", ""),
@@ -573,6 +594,9 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
             "link_title": link_title,
             "comments_viewpoint": (consolidation.get("comments_viewpoint") or "").strip(),
             "comments_file_path": str((task.get("comments") or {}).get("comments_file_path") or ""),
+            "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
+            "task_note": task_snap_md.get("task_note") or "",
+            "task_keywords": task_snap_md.get("task_keywords") or "",
         }
         doc_path = await loop.run_in_executor(
             _io_executor(), lambda: _generate_md(result_data, link, task_id, cfg=cfg))

@@ -206,15 +206,36 @@ def schedule_whisper_warmup() -> None:
     threading.Thread(target=_run, name="whisper-warmup", daemon=True).start()
 
 
-def register_whisper_pool_with_downloader() -> None:
-    """将池注册到 src/agent/video_downloader.speech_to_text。"""
+def register_whisper_pool_with_downloader(vd_mod: Any = None) -> bool:
+    """
+    将池注册到 video_downloader（须在 importlib.reload(video_downloader) 之后调用，
+    reload 会重置模块全局变量 _whisper_pool）。
+    """
     try:
-        from video_downloader import set_whisper_pool  # type: ignore
-
-        set_whisper_pool(get_whisper_pool())
+        if vd_mod is None:
+            import video_downloader as vd_mod  # type: ignore
+        if not hasattr(vd_mod, "set_whisper_pool"):
+            _log.warning(
+                "[链接沉淀文档-Whisper池|whisper_pool.register_whisper_pool_with_downloader|"
+                "video_downloader|硬编执行|注册] 跳过; 模块无 set_whisper_pool; path=%s",
+                getattr(vd_mod, "__file__", ""),
+            )
+            return False
+        pool = get_whisper_pool()
+        vd_mod.set_whisper_pool(pool)
+        _log.info(
+            "[链接沉淀文档-Whisper池|whisper_pool.register_whisper_pool_with_downloader|"
+            "video_downloader|硬编执行|注册] 成功; path=%s; core=%s; max=%s; warmed_total=%s",
+            getattr(vd_mod, "__file__", ""),
+            pool.core_size,
+            pool.max_size,
+            pool.total,
+        )
+        return True
     except Exception as ex:
         _log.warning(
             "[链接沉淀文档-Whisper池|whisper_pool.register_whisper_pool_with_downloader|"
             "video_downloader|硬编执行|注册] 失败; error=%s",
             ex,
         )
+        return False

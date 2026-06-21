@@ -20,6 +20,19 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             "outputs": "任务进入队列；SSE 日志与最终 MD/HTML 路径由任务状态接口返回。",
         },
         {
+            "id": "tool_xhs_user_search",
+            "name": "小红书用户搜索与画像",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "通过小红书号（数字 ID）搜索用户主页，解析 profile URL 并自动启动画像分析流水线。内部通过浏览器自动化（CDP/Playwright）完成 red_id → creator_id → profile_url 的解析。",
+            "inputs": [
+                {"name": "red_id", "type": "string", "required": True, "hint": "小红书号（纯数字 ID，如 9545679835）"},
+                {"name": "user_prompt", "type": "string", "required": False, "hint": "额外分析指令，如「做用户画像」「分析内容风格」"},
+            ],
+            "outputs": "解析结果（creator_id、display_name、profile_url）与流水线任务 ID。",
+        },
+        {
             "id": "tool_rag_index",
             "name": "RAG 索引与库管理",
             "kind": "tool_call",

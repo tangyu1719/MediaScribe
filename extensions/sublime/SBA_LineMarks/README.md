@@ -4,12 +4,29 @@
 
 ## 安装
 
-将整个 `SBA_LineMarks` 文件夹复制到 Sublime 的 Packages 目录：
+将整个 `SBA_LineMarks` 文件夹复制到 Sublime 的 **Packages 根目录**（不要放在 `User` 子目录，否则 ST3 不会加载 `.py`）：
 
-- Windows: `%APPDATA%\Sublime Text\Packages\User\SBA_LineMarks`
-- macOS: `~/Library/Application Support/Sublime Text/Packages/User/SBA_LineMarks`
+- Windows: `%APPDATA%\Sublime Text 3\Packages\SBA_LineMarks`
+- macOS: `~/Library/Application Support/Sublime Text/Packages/SBA_LineMarks`
+
+**Ctrl+Q 请继续绑定 ColorMarker**（文末 `标记内容汇总` + 全字符匹配 + `[CNT=n]`，只拷 `.md` 即可迁移）：
+
+```json
+{ "keys": ["ctrl+q"], "command": "color_marker", "args": { "action": "mark" } }
+```
+
+SBA 命令（F2 跳转 / 命令面板 Toggle）会同步写入同款文末块；侧车 JSON 仅为加速，非 portable 主路径。
 
 重启 Sublime Text。
+
+## 打开文件时自动恢复红框
+
+1. **优先**读取 MD 文末 `标记内容汇总` 块（与 ColorMarker / Web 保存格式一致）
+2. 支持 `[CNT=n]`、Markdown 加粗（`**...**`）等模糊匹配
+3. 若无文末块，再读侧车 `*.sublime-marks.json`
+4. 大文件打开后会延迟 300ms / 1200ms 二次尝试恢复（避免 ST 尚未加载完正文）
+
+命令面板：`SBA: Reload Line Marks`（或 `sba_reload_line_marks`）可手动从文末汇总重载。
 
 ## 侧车格式
 
@@ -28,7 +45,7 @@
 
 - 行号为 **1-based**（与 ST 行号一致），**每行最多一处标记**。
 - 有 `start`/`end` 时为选区标记（与 Web 预览红框一致）；仅有 `line` 时为整行标记。
-- **Web 预览**还会把同样内容写入 MD 文件底部的 `## 选区标记` 节（人类可读 + ` ```sba-marks ` JSON），与侧车同步。
+- **Web 预览**保存时会写入 MD 文件末尾的 **ColorMarker 兼容块**（`标记内容汇总` / `COUNT` / `ORDER_FP` / `[CNT=n]`），与 ST3 插件 `ColorMarker.py` 互通；侧车 `*.sublime-marks.json` 同步保留。
 
 ## 快捷键
 

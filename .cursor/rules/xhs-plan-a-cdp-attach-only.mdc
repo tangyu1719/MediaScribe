@@ -1,0 +1,62 @@
+# 小红书收藏夹 — 方案 A（CDP 仅附着，禁止新开浏览器）
+
+
+
+## 硬性要求（改代码前必查）
+
+
+
+收藏夹 / 三点、水 个人号链路 **只允许方案 A**：
+
+
+
+1. **禁止 Agent** 执行 `taskkill` / `Start-Process` / `plan_a_launch_chrome.ps1` 里的自动启动 / `_start_browser_with_cdp` / `_restart_browser_with_cdp` / `_kill_chrome` / `launch_persistent_context` 进入收藏夹主路径。
+
+2. **禁止** `browser.new_context()`、`context.new_page()`、`CDP /json/new` 为小红书开新标签。
+
+3. **禁止** `page.bring_to_front()`（`SBA_XHS_BACKGROUND=1` 默认开）。
+
+4. **禁止** attach-only 下自动 `goto` 收藏页；用户须**已打开** `profile/60dc2e340000000001008a1f?tab=fav` 且**已登录**。
+
+5. 检测到 `/login` 或 `data:` 标签 → **立即报错**，不得静默重试或换 Profile。
+
+
+
+## 允许
+
+
+
+- `connect_over_cdp` 附着用户**手动**开的 Chrome（带 `--remote-debugging-port=9222`）。
+
+- `pick_xhs_page()` 复用已有标签；收藏页上 **仅 scroll + 解析**。
+
+- `browser_cookie3` / 磁盘 Cookie 只读（不导航）。
+
+
+
+## 改代码自检清单
+
+
+
+- [ ] 收藏夹路径是否调用 `assert_plan_a_owner_browser_ops()`？
+
+- [ ] 是否仍 import/调用 `_start_browser_with_cdp` 或 `new_page`？
+
+- [ ] CDP 未就绪时是否 **只报错**（不启动 Chrome）？
+
+- [ ] 测试/回归脚本是否设 `SBA_XHS_CDP_ATTACH_ONLY=1`？
+
+
+
+## 用户侧一次性准备（须用户本人操作）
+
+
+
+1. 完全退出 Chrome
+
+2. 运行 `scripts/plan_a_launch_chrome.ps1` **仅查看** Win+R 启动命令（脚本已禁止 Start-Process）
+
+3. 确认右上角「李有光」+ 收藏页 `tab=fav` + 无 `data:` 标签
+
+4. `py -3 scripts/plan_a_verify_session.py` 通过后再跑回归
+

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio, json, logging, os, time, uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict
 
 
 def _load_project_dotenv() -> None:
@@ -34,7 +35,7 @@ _load_project_dotenv()
 os.environ.setdefault("CHAT_USE_LANGGRAPH", "1")
 from fastapi import FastAPI, HTTPException, Request, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from .models import ProcessRequest
@@ -50,6 +51,8 @@ from .services.task_manager import (
     delete_task,
     get_output_dir,
     set_output_dir,
+    get_task_by_link,
+    import_history_task_to_queue,
 )
 from .services.milvus_health import check_milvus
 from .services.vector_connection import get_connection_state, probe_connection, retry_connection, set_connection_params
@@ -246,37 +249,67 @@ def _save_history(h):
     _HISTORY_PATH.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ─── 安全响应头中间件 ───
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        return response
+# ─── 安全响应头中间件（纯 ASGI，不缓冲 StreamingResponse）───
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers") or [])
+                headers[b"x-content-type-options"] = b"nosniff"
+                headers[b"x-frame-options"] = b"DENY"
+                headers[b"x-xss-protection"] = b"1; mode=block"
+                headers[b"referrer-policy"] = b"strict-origin-when-cross-origin"
+                message["headers"] = list(headers.items())
+            await send(message)
+
+        await self.app(scope, receive, _send)
 
 
-class OpsObservabilityMiddleware(BaseHTTPMiddleware):
-    """自动采集 /api/* 请求耗时与状态，写入 OPS 可观测内存。"""
+class OpsObservabilityMiddleware:
+    """自动采集 /api/* 请求耗时与状态（纯 ASGI，不缓冲 StreamingResponse）。"""
 
-    async def dispatch(self, request, call_next):
-        path = request.url.path or ""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         if not path.startswith("/api/"):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
+
         t0 = time.perf_counter()
-        response = await call_next(request)
-        cost_ms = int((time.perf_counter() - t0) * 1000)
-        try:
-            ops_add_event(
-                method=request.method,
-                path=path,
-                status_code=response.status_code,
-                cost_ms=cost_ms,
-            )
-        except Exception:
-            pass
-        return response
+        method = scope.get("method", "")
+        query = (scope.get("query_string") or b"").decode("utf-8", errors="replace")
+        status_code = 200
+
+        async def _send(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 200)
+            elif message["type"] == "http.response.body":
+                cost_ms = int((time.perf_counter() - t0) * 1000)
+                try:
+                    ops_add_event(
+                        method=method, path=path, status_code=status_code,
+                        cost_ms=cost_ms, query=query,
+                        error_detail="" if status_code < 400 else f"HTTP {status_code}",
+                    )
+                except Exception:
+                    pass
+            await send(message)
+
+        await self.app(scope, receive, _send)
 
 # ─── FastAPI App ───
 app = FastAPI(title="多模态文档化助手 Web")
@@ -338,41 +371,91 @@ def _startup_auth_and_db():
         init_chat_persistence()
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("chat session persistence init: %s", e)
+
+
+@app.on_event("startup")
+async def _startup_chat_runtime_warmup():
+    """阻塞完成 LangGraph 编译 + 工具/MCP 加载；uvicorn 就绪前完成，首条问答零冷启动。"""
+    try:
+        from .services.chat_warmup import await_chat_warmup_on_startup
+
+        await await_chat_warmup_on_startup(timeout_sec=120.0)
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("chat warmup blocking startup: %s", e)
+    try:
+        from .services.favorites_scheduler import register_main_event_loop
+
+        register_main_event_loop(asyncio.get_running_loop())
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("favorites main loop register: %s", e)
+    try:
+        from .services.scheduled_job_scheduler import register_main_event_loop as sched_reg_loop
+
+        sched_reg_loop(asyncio.get_running_loop())
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("scheduled job main loop register: %s", e)
+
+
+@app.on_event("startup")
+def _startup_deferred_services():
+    """问答运行时预热完成后再启动其它后台任务，避免争抢 LangGraph 导入锁。"""
     try:
         from .services.platform_health import schedule_startup_health_check
 
         asyncio.create_task(schedule_startup_health_check())
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("platform health startup: %s", e)
+    unified_ok = False
     try:
-        from .services.chat_warmup import schedule_chat_warmup_on_startup
+        from .services.scheduled_job_scheduler import start_scheduled_job_scheduler
+        from .services.favorites_scheduler import schedule_favorites_on_startup
 
-        schedule_chat_warmup_on_startup()
+        sched_status = start_scheduled_job_scheduler()
+        unified_ok = bool(sched_status.get("scheduler_running"))
+        if unified_ok:
+            schedule_favorites_on_startup()
     except Exception as e:
-        logging.getLogger("uvicorn.error").warning("chat warmup startup: %s", e)
+        logging.getLogger("uvicorn.error").warning("unified scheduled job scheduler: %s", e)
+    if not unified_ok:
+        try:
+            from .services.creator_scheduler import start_scheduler
+
+            start_scheduler()
+        except Exception as e:
+            logging.getLogger("uvicorn.error").warning("creator subscription scheduler: %s", e)
+        try:
+            from .services.favorites_scheduler import schedule_favorites_on_startup, start_scheduler as start_favorites_scheduler
+
+            start_favorites_scheduler()
+            schedule_favorites_on_startup()
+        except Exception as e:
+            logging.getLogger("uvicorn.error").warning("favorites scheduler startup: %s", e)
+        try:
+            from .services.rss_scheduler import start_scheduler as start_rss_scheduler
+
+            start_rss_scheduler()
+        except Exception as e:
+            logging.getLogger("uvicorn.error").warning("rss scheduler startup: %s", e)
     try:
-        from .services.creator_scheduler import start_scheduler
+        from .services.whisper_pool import (
+            register_whisper_pool_with_downloader,
+            schedule_whisper_warmup,
+        )
 
-        start_scheduler()
+        register_whisper_pool_with_downloader()
+        schedule_whisper_warmup()
     except Exception as e:
-        logging.getLogger("uvicorn.error").warning("creator subscription scheduler: %s", e)
-    try:
-        from .services.favorites_scheduler import schedule_favorites_on_startup, start_scheduler as start_favorites_scheduler
-
-        start_favorites_scheduler()
-        schedule_favorites_on_startup()
-    except Exception as e:
-        logging.getLogger("uvicorn.error").warning("favorites scheduler startup: %s", e)
-    try:
-        from .services.rss_scheduler import start_scheduler as start_rss_scheduler
-
-        start_rss_scheduler()
-    except Exception as e:
-        logging.getLogger("uvicorn.error").warning("rss scheduler startup: %s", e)
+        logging.getLogger("uvicorn.error").warning("whisper pool startup: %s", e)
 
 
 @app.on_event("shutdown")
 def _shutdown_creator_scheduler():
+    try:
+        from .services.scheduled_job_scheduler import stop_scheduled_job_scheduler
+
+        stop_scheduled_job_scheduler()
+    except Exception:
+        pass
     try:
         from .services.creator_scheduler import stop_scheduler
 
@@ -391,16 +474,6 @@ def _shutdown_creator_scheduler():
         stop_rss_scheduler()
     except Exception:
         pass
-    try:
-        from .services.whisper_pool import (
-            register_whisper_pool_with_downloader,
-            schedule_whisper_warmup,
-        )
-
-        register_whisper_pool_with_downloader()
-        schedule_whisper_warmup()
-    except Exception as e:
-        logging.getLogger("uvicorn.error").warning("whisper pool startup: %s", e)
 
 
 _out_root = get_output_dir()
@@ -472,24 +545,11 @@ async def platform_health(refresh: bool = False, chat_model: str = ""):
 
 @app.get("/api/health")
 def health():
-    lg_on = False
-    lg_import_ok = False
-    try:
-        from .services.chat_graph_runner import langgraph_enabled
-
-        lg_on = langgraph_enabled()
-        lg_import_ok = True
-    except ImportError:
-        pass
+    """轻量探活：禁止在此导入 LangGraph/LangChain，避免与预热线程争抢模块锁导致探活超时。"""
     return {
         "ok": True,
         "service": "web-rebuild-v2",
         "config_loaded": bool(CONFIG),
-        "chat_use_langgraph": lg_on,
-        "langgraph_import_ok": lg_import_ok,
-        "expected_orchestration_phases": [
-            "intent", "rewrite", "slot", "decompose", "enhance", "rag_decision",
-        ],
     }
 
 
@@ -574,9 +634,18 @@ def route_process_queue():
         "error",
         "priority",
         "queue_seq",
+        "importance",
+        "task_note",
+        "task_keywords",
+        "extracted_metadata",
         "created_at",
         "updated_at",
         "read_status",
+        "import_source",
+        "source_label",
+        "author_name",
+        "author_id",
+        "subscription_id",
         "pipeline_started_at",
         "md_completed_at",
         "total_duration_ms",
@@ -586,9 +655,10 @@ def route_process_queue():
     ]
     out = []
     from .services.pipeline_finalize import apply_task_card_metrics
+    from .services.task_source_meta import enrich_task_source_fields
 
     for i, t in enumerate(rows):
-        row = {k: t.get(k) for k in keys}
+        row = enrich_task_source_fields({k: t.get(k) for k in keys})
         row["queue_pos"] = i + 1
         tid = row.get("task_id")
         if tid and row.get("status") == "completed":
@@ -610,6 +680,79 @@ def route_process_queue():
         row["pipeline_steps"] = pipeline_summary(row.get("pipeline_stages"), route)
         out.append(row)
     return {"tasks": out}
+
+
+@app.get("/api/process/queue/suggest")
+def route_queue_search_suggest(q: str = Query("", max_length=200)):
+    """标题检索近义词扩展（供前端展示推荐词）。"""
+    from .follow_up_search import expand_search_terms
+
+    terms = expand_search_terms(q)
+    return {"ok": True, "query": q, "expanded_terms": terms[:20]}
+
+
+@app.get("/api/process/queue/filter")
+def route_queue_filter(
+    q: str = Query("", max_length=200),
+    author: str = Query("", max_length=120),
+    read: str = Query("all"),
+    sort: str = Query("default"),
+    enable_title: bool = Query(True),
+    enable_author: bool = Query(False),
+    enable_read: bool = Query(False),
+    enable_source: bool = Query(False),
+    sources: str = Query(""),
+):
+    """队列任务筛选（多重条件，勾选启用）。"""
+    from .services.task_manager import list_queue_tasks
+    from .services.task_queue_search import collect_author_facets, filter_tasks
+
+    src_list = [s.strip() for s in (sources or "").split(",") if s.strip()]
+    rows = list_queue_tasks()
+    result = filter_tasks(
+        rows,
+        title_query=q,
+        author_query=author,
+        read_filter=read,
+        sources=src_list or None,
+        enable_title=enable_title,
+        enable_author=enable_author,
+        enable_read=enable_read,
+        enable_source=enable_source,
+        sort=sort,
+    )
+    result["author_facets"] = collect_author_facets(rows)
+    return {"ok": True, **result}
+
+
+@app.post("/api/process/queue/importance")
+async def route_queue_importance(request: Request):
+    """更新 pending 任务的重要度（1-10）。"""
+    body = await request.json()
+    task_id = (body.get("task_id") or "").strip()
+    importance = body.get("importance", 5)
+    from .services.task_manager import set_task_importance
+    from .services.pipeline_scheduler import kick_pipeline_dispatch
+
+    ok = set_task_importance(task_id, int(importance))
+    if ok:
+        await kick_pipeline_dispatch()
+    return {"ok": ok}
+
+
+@app.post("/api/process/queue/meta")
+async def route_queue_meta(request: Request):
+    """更新任务备注与关键词。"""
+    body = await request.json()
+    task_id = (body.get("task_id") or "").strip()
+    from .services.task_manager import set_task_note_keywords
+
+    ok = set_task_note_keywords(
+        task_id,
+        task_note=body.get("task_note"),
+        task_keywords=body.get("task_keywords"),
+    )
+    return {"ok": ok}
 
 
 @app.post("/api/process/queue/move")
@@ -670,7 +813,24 @@ async def route_queue_delete(request: Request):
     from .services.task_manager import dismiss_queue_task
 
     ok = dismiss_queue_task(task_id)
-    return {"ok": ok}
+    if not ok:
+        raise HTTPException(400, "移除失败：任务不存在或已移除")
+    return {"ok": True}
+
+
+@app.post("/api/process/queue/delete-batch")
+async def route_queue_delete_batch(request: Request):
+    """批量移除队列卡片（不会删除历史记录与产出文件）。"""
+    body = await request.json()
+    raw_ids = body.get("task_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(400, "缺少 task_ids 数组")
+    from .services.task_manager import dismiss_queue_tasks
+
+    result = dismiss_queue_tasks(raw_ids)
+    if result.get("removed", 0) <= 0:
+        raise HTTPException(400, "未移除任何卡片")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -746,6 +906,23 @@ def route_output_file_read(file: str = Query(..., description="output 目录内 
         raise HTTPException(400, str(e)) from e
 
 
+@app.post("/api/output/file/export")
+async def route_output_file_export(request: Request):
+    """导出完整 Markdown（含文末标记块），供浏览器另存到本机任意目录。"""
+    from .services.output_file_io import export_output_markdown
+
+    body = await request.json()
+    content = body.get("content")
+    if content is None:
+        raise HTTPException(400, "缺少 content")
+    marks = body.get("marks")
+    try:
+        full = export_output_markdown(str(content), marks if isinstance(marks, list) else [])
+        return {"ok": True, "content": full}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/output/file/save")
 async def route_output_file_save(request: Request):
     """保存 output 内 Markdown（覆盖或另存为）。"""
@@ -757,15 +934,19 @@ async def route_output_file_save(request: Request):
     if content is None:
         raise HTTPException(400, "缺少 content")
     save_as = (body.get("save_as") or body.get("saveAs") or "").strip()
+    save_dir = (body.get("save_dir") or body.get("saveDir") or "").strip()
+    abs_path = (body.get("path") or body.get("abs_path") or "").strip()
     marks = body.get("marks")
-    if not name:
-        raise HTTPException(400, "缺少 file")
+    if not name and not abs_path:
+        raise HTTPException(400, "缺少 file 或 path")
     try:
         return save_output_file(
             name,
             str(content),
             save_as=save_as,
+            save_dir=save_dir,
             marks=marks if isinstance(marks, list) else None,
+            abs_path=abs_path,
         )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
@@ -856,20 +1037,21 @@ async def route_process_start(req: ProcessRequest):
     platform = (req.platform or "").strip() or platform_from_url(link) or "小红书"
     comments_dict = req.comments.model_dump() if req.comments else {"enabled": False, "count": 10, "sort": "hot"}
     from .services.task_manager import reuse_or_enqueue_task
+    from .services.task_source_meta import SOURCE_MANUAL, source_meta_kwargs
 
+    src_meta = source_meta_kwargs(SOURCE_MANUAL, platform=platform)
     task_id, reused = reuse_or_enqueue_task(
         platform,
         link,
         req.user_prompt,
         comments_dict,
         action="start",
+        fast_enqueue=True,
+        importance=req.importance,
+        task_note=req.task_note,
+        task_keywords=req.task_keywords,
+        **src_meta,
     )
-    try:
-        from .services.pipeline_span_bridge import ensure_pipeline_span_task
-
-        ensure_pipeline_span_task(task_id, link, platform)
-    except Exception:
-        pass
     if reused:
         add_log(task_id, f"同链接复用本卡片继续处理 [{platform}] {link}")
     add_log(task_id, f"收到处理请求 [{platform}] {link}")
@@ -877,16 +1059,22 @@ async def route_process_start(req: ProcessRequest):
         add_log(task_id, f"User Prompt: {req.user_prompt[:100]}..." if len(req.user_prompt) > 100 else f"User Prompt: {req.user_prompt}")
     if comments_dict.get("enabled"):
         add_log(task_id, f"评论读取: 启用，数量={comments_dict.get('count', 10)}, 排序={comments_dict.get('sort', 'hot')}")
-    from .services.pipeline_scheduler import run_pipeline_with_slot
+    from .services.pipeline_scheduler import request_video_pipeline_async
 
-    async def _run_one():
-        await run_pipeline_with_slot(task_id, lambda: process_video_pipeline(task_id))
+    async def _schedule():
+        try:
+            from .services.pipeline_span_bridge import ensure_pipeline_span_task
 
-    asyncio.create_task(_run_one())
+            ensure_pipeline_span_task(task_id, link, platform)
+        except Exception:
+            pass
+        await request_video_pipeline_async(task_id)
+
+    asyncio.create_task(_schedule())
     t = get_task(task_id)
     return {
         "task_id": task_id,
-        "status": "running",
+        "status": (t or {}).get("status") or "pending",
         "reused": reused,
         "url_hash": (t or {}).get("url_hash"),
         "normalized_link": (t or {}).get("normalized_link"),
@@ -967,7 +1155,7 @@ async def route_stream_logs(task_id: str, request: Request):
                 break
             await asyncio.sleep(0.5)
     return StreamingResponse(gen(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+        headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/tasks/query")
@@ -1051,6 +1239,7 @@ def route_history():
                 "resume_from", "resume_context", "error", "transcribe_error_code",
                 "pipeline_started_at", "md_completed_at", "total_duration_ms", "total_token_count",
                 "article_char_count", "summary_char_count",
+                "import_source", "source_label", "author_name", "author_id", "read_status",
             ):
                 if rt.get(_k) is not None:
                     task[_k] = rt.get(_k)
@@ -1060,7 +1249,14 @@ def route_history():
         route = task.get("pipeline_route") or task.get("route_type") or "video"
         task["pipeline_steps"] = pipeline_summary(task.get("pipeline_stages"), route)
         tasks[i] = enrich_completed_task_metrics(task)
-    
+
+    from .services.task_manager import apply_read_status_to_history_row
+    from .services.task_source_meta import enrich_task_source_fields
+
+    for i, task in enumerate(tasks):
+        apply_read_status_to_history_row(task)
+        tasks[i] = enrich_task_source_fields(task)
+
     return {"tasks": tasks, "total": len(tasks)}
 
 
@@ -1157,12 +1353,9 @@ async def route_history_restart(request: Request):
         pass
     mode = "断点恢复" if resume_from else "全量重跑"
     add_log(task_id, f"{mode}任务: {link}" + (f" · 从阶段 {resume_from} 继续" if resume_from else ""))
-    from .services.pipeline_scheduler import run_pipeline_with_slot
+    from .services.pipeline_scheduler import request_video_pipeline_async
 
-    async def _run_one():
-        await run_pipeline_with_slot(task_id, lambda: process_video_pipeline(task_id))
-
-    asyncio.create_task(_run_one())
+    asyncio.create_task(request_video_pipeline_async(task_id))
     return {
         "ok": True,
         "task_id": task_id,
@@ -1237,6 +1430,8 @@ from .services.creator_subscription_api import (
     api_run_creator_profile,
     api_get_latest_creator_profile,
     api_get_creator_profile_run,
+    api_seed_subscription_catalog,
+    api_list_subscription_blog_notes,
 )
 from .services.creator_scheduler import get_scheduler_status
 
@@ -1411,6 +1606,53 @@ def route_subscriptions_digest_get(digest_id: str):
 
 @app.get("/api/subscriptions/scheduler/status")
 def route_subscriptions_scheduler_status():
+    try:
+        from .services.scheduled_job_scheduler import get_scheduler_status as unified_sched_status
+
+        st = unified_sched_status()
+        if st.get("scheduler_running"):
+            return {"scheduler_running": True, "unified": True, **st}
+    except Exception:
+        pass
+    return get_scheduler_status()
+
+
+@app.get("/api/scheduled-jobs")
+def route_scheduled_jobs_list():
+    from .services.scheduled_job_service import api_list_jobs
+
+    return api_list_jobs()
+
+
+@app.patch("/api/scheduled-jobs/{job_key}")
+async def route_scheduled_jobs_update(job_key: str, request: Request):
+    from .services.scheduled_job_service import api_update_job
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    result = api_update_job(job_key, body or {})
+    if not result.get("ok"):
+        raise HTTPException(404, detail={"error_code": result.get("error_code"), "message": result.get("error")})
+    return result
+
+
+@app.post("/api/scheduled-jobs/{job_key}/run")
+async def route_scheduled_jobs_run(job_key: str):
+    from .services.scheduled_job_service import api_run_job
+
+    return await api_run_job(job_key, trigger="manual_test")
+
+
+@app.get("/api/scheduled-jobs/runs")
+def route_scheduled_jobs_runs(job_key: str = Query(""), limit: int = Query(50, ge=1, le=200)):
+    from .services.scheduled_job_store import list_runs
+
+    return {"ok": True, "runs": list_runs(job_key=job_key, limit=limit)}
+
+
+@app.get("/api/scheduled-jobs/scheduler/status")
+def route_scheduled_jobs_scheduler_status():
+    from .services.scheduled_job_scheduler import get_scheduler_status
+
     return get_scheduler_status()
 
 
@@ -1459,6 +1701,129 @@ def route_subscriptions_profile_run_get(profile_run_id: str):
     return row
 
 
+@app.post("/api/subscriptions/{subscription_id}/catalog/seed")
+async def route_subscriptions_catalog_seed(subscription_id: str, request: Request):
+    """摘录 UP 主页链接到 seen（博客信息），可选 enqueue 入队链接流水线。"""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        result = await api_seed_subscription_catalog(subscription_id, body or {})
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not result.get("ok"):
+        code = result.get("error_code") or "CATALOG_SEED_FAILED"
+        if code == "SUB_NOT_FOUND":
+            raise HTTPException(404, result.get("error"))
+        raise HTTPException(422, detail={"error_code": code, "message": result.get("error")})
+    return result
+
+
+@app.post("/api/subscriptions/{subscription_id}/catalog/repair-links")
+async def route_subscriptions_catalog_repair_links(subscription_id: str):
+    """补全 seen 表中缺少 xsec_token 的裸 explore 链接。"""
+    from .services.creator_catalog_seed import repair_subscription_note_links
+
+    try:
+        result = await repair_subscription_note_links(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not result.get("ok"):
+        raise HTTPException(422, detail={"error_code": result.get("error_code"), "message": result.get("error")})
+    return result
+
+
+@app.post("/api/subscriptions/{subscription_id}/catalog/finalize")
+async def route_subscriptions_catalog_finalize(subscription_id: str, request: Request):
+    """订阅批次收尾：同步 seen、审计、失败重试、总量校验。"""
+    from .services.subscription_batch_gate import finalize_subscription_batch
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    sync_run_id = str((body or {}).get("sync_run_id") or "").strip()
+    expected_total = body.get("expected_total")
+    wait_timeout_sec = int((body or {}).get("wait_timeout_sec") or 0)
+    max_retry_rounds = int((body or {}).get("max_retry_rounds") or 2)
+    task_ids = body.get("task_ids") if isinstance(body.get("task_ids"), list) else None
+    try:
+        result = await finalize_subscription_batch(
+            subscription_id,
+            sync_run_id,
+            expected_total=expected_total,
+            wait_timeout_sec=wait_timeout_sec,
+            max_retry_rounds=max_retry_rounds,
+            task_ids=task_ids,
+        )
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    return result
+
+
+@app.get("/api/subscriptions/{subscription_id}/catalog/audit")
+def route_subscriptions_catalog_audit(
+    subscription_id: str,
+    sync_run_id: str = Query(""),
+    expected_total: int = Query(None),
+):
+    """订阅批次审计（不重试）。"""
+    from .services.subscription_batch_gate import audit_subscription_batch, sync_seen_from_history
+
+    synced = sync_seen_from_history(subscription_id)
+    report = audit_subscription_batch(
+        subscription_id,
+        sync_run_id=sync_run_id,
+        expected_total=expected_total,
+    )
+    return {"ok": report.ok, "synced_from_history": synced, "audit": report.to_dict()}
+
+
+@app.get("/api/subscriptions/{subscription_id}/blog-notes")
+def route_subscriptions_blog_notes(
+    subscription_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    analysis_status: str = Query(None),
+):
+    """订阅下已摘录的博客链接（seen 表）。"""
+    try:
+        result = api_list_subscription_blog_notes(
+            subscription_id,
+            page=page,
+            page_size=page_size,
+            analysis_status=analysis_status,
+        )
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error"))
+    return result
+
+
+@app.get("/api/subscriptions/{subscription_id}/link-cards")
+def route_subscription_link_cards(
+    subscription_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """订阅链接简化卡片（MySQL seen+pipeline 一次 JOIN；无库时 Redis 回退）。"""
+    from .services.subscription_link_api import api_list_subscription_link_cards
+
+    return api_list_subscription_link_cards(subscription_id, page=page, page_size=page_size)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 小红书收藏夹订阅
 # ═══════════════════════════════════════════════════════════════════
@@ -1466,8 +1831,20 @@ from .services.favorites_subscription_api import (
     api_ensure_favorites_subscription,
     api_get_favorites_digest,
     api_get_favorites_habit,
+    api_get_favorites_catalog,
+    api_get_favorites_latest_sync,
+    api_import_favorite_ups,
+    api_pull_favorite_up_authors,
+    api_refresh_favorites_cookies,
     api_trigger_favorites_sync,
     health as fav_health,
+)
+from .services.follow_up_api import (
+    api_list_follow_ups,
+    api_profile_follow_up,
+    api_pull_follow_ups,
+    api_remove_follow_up,
+    api_subscribe_follow_up,
 )
 from .services.favorites_scheduler import get_scheduler_status as get_favorites_scheduler_status
 
@@ -1497,8 +1874,24 @@ async def route_favorites_sync(request: Request):
     except Exception:
         body = {}
     force = int(body.get("force_analyze_latest") or 0)
+    batch = int(body.get("sync_batch_size") or 0)
     try:
-        return await api_trigger_favorites_sync(force_analyze_latest=force)
+        return await api_trigger_favorites_sync(
+            force_analyze_latest=force,
+            sync_batch_size=batch,
+        )
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.post("/api/favorites/refresh-cookies")
+def route_favorites_refresh_cookies():
+    try:
+        return api_refresh_favorites_cookies()
     except Exception as ex:
         from .services.creator_subscription_store import SubscriptionDbError
 
@@ -1534,9 +1927,156 @@ def route_favorites_digest_latest(subscription_id: str = Query(None)):
     return row
 
 
+@app.get("/api/favorites/catalog")
+def route_favorites_catalog(limit: int = Query(20, ge=1, le=80)):
+    try:
+        return api_get_favorites_catalog(limit=limit)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.get("/api/favorites/sync/latest")
+def route_favorites_sync_latest(subscription_id: str = Query(None)):
+    try:
+        return api_get_favorites_latest_sync(subscription_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
 @app.get("/api/favorites/scheduler/status")
 def route_favorites_scheduler_status():
     return get_favorites_scheduler_status()
+
+
+@app.get("/api/follow-ups")
+def route_follow_ups_list(
+    q: str = Query("", description="筛选关键词（支持近义词扩展）"),
+    subscribed: str = Query("all", description="all|yes|no"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+):
+    """关注 UP 列表查询（近义词 + 订阅状态筛选）。"""
+    try:
+        return api_list_follow_ups(query=q, subscribed=subscribed, page=page, page_size=page_size)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.post("/api/follow-ups/pull")
+def route_follow_ups_pull(
+    limit: int = Query(20, ge=1, le=20),
+    fast: bool = Query(False),
+    reset: bool = Query(False),
+):
+    """从收藏夹笔记按 cursor 分批拉取未入库博主（每批最多 20 个）。"""
+    try:
+        return api_pull_follow_ups(limit=limit, merge=True, fast=fast, reset=reset)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        msg = str(ex)
+        if "SUB_OWNER" in msg or "SUB_FAVORITES" in msg or "FOLLOW_UP" in msg:
+            raise HTTPException(400, detail={"error_code": "FOLLOW_UP_PULL_FAILED", "message": msg})
+        raise
+
+
+@app.post("/api/follow-ups/{creator_id}/subscribe")
+async def route_follow_up_subscribe(creator_id: str, request: Request):
+    """将关注列表中的 UP 加入订阅（用户显式操作）。"""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sync_after = bool(body.get("sync_after", False))
+    try:
+        return await api_subscribe_follow_up(creator_id, sync_after=sync_after)
+    except ValueError as ex:
+        raise HTTPException(404, detail={"error_code": str(ex), "message": "关注列表中无此 UP"})
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.post("/api/follow-ups/{creator_id}/profile")
+async def route_follow_up_profile(creator_id: str):
+    """对关注列表 UP 生成画像（无订阅时先建订阅，不自动同步作品）。"""
+    try:
+        return await api_profile_follow_up(creator_id)
+    except ValueError as ex:
+        raise HTTPException(404, detail={"error_code": str(ex), "message": "关注列表中无此 UP"})
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.delete("/api/follow-ups/{creator_id}")
+def route_follow_up_delete(creator_id: str):
+    """从关注列表移除（不删除已有订阅）。"""
+    try:
+        return api_remove_follow_up(creator_id)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
+
+
+@app.get("/api/favorites/up-authors")
+def route_favorites_up_authors(limit: int = Query(40, ge=5, le=80)):
+    """兼容：拉取并写入关注列表（不自动订阅）。"""
+    try:
+        return api_pull_favorite_up_authors(limit=limit)
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        msg = str(ex)
+        if "SUB_OWNER" in msg or "SUB_FAVORITES" in msg:
+            raise HTTPException(400, detail={"error_code": "FAV_UP_PULL_FAILED", "message": msg})
+        raise
+
+
+@app.post("/api/favorites/up/import")
+async def route_favorites_up_import(request: Request):
+    """将收藏 UP 批量加入 UP 订阅。"""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        return await api_import_favorite_ups(body)
+    except ValueError as ex:
+        raise HTTPException(400, detail={"error_code": str(ex), "message": "未选择可导入的收藏 UP"})
+    except Exception as ex:
+        from .services.creator_subscription_store import SubscriptionDbError
+
+        if isinstance(ex, SubscriptionDbError):
+            raise HTTPException(503, detail={"error_code": "SUB_DB_UNAVAILABLE", "message": str(ex)})
+        raise
 
 
 @app.post("/api/history/regenerate-html")
@@ -1557,19 +2097,49 @@ async def route_history_regenerate_html(request: Request):
         platform = "B站"
     
     # 构建MD文件路径
-    md_path = OUTPUT_DIR / doc_filename
+    md_path = _out_root / Path(doc_filename).name
     if not md_path.exists():
         raise HTTPException(404, "MD文件不存在")
-    
-    # 创建新任务用于HTML生成
-    task_id = create_task(platform, link)
-    update_task(task_id, status="generating_html", stage="重新生成HTML", progress=80, doc_filename=str(md_path))
+
+    md_str = str(md_path)
+    prev = get_task_history(link=link)
+    existing = get_task_by_link(link)
+    if not existing and prev:
+        import_history_task_to_queue(prev)
+        existing = get_task_by_link(link)
+
+    task_id = (existing or {}).get("task_id") or ((prev or {}).get("id") if prev else None)
+    if not task_id:
+        task_id = create_task(platform, link)
+        update_task(
+            task_id,
+            status="generating_html",
+            stage="重新生成HTML",
+            progress=80,
+            doc_filename=md_str,
+            doc_path=md_str,
+        )
+    else:
+        if not get_task(task_id) and prev:
+            import_history_task_to_queue({**prev, "id": task_id})
+        keep_status = (get_task(task_id) or {}).get("status") or (prev or {}).get("status") or "completed"
+        patch = {
+            "html_status": "async_pending",
+            "html_message": "HTML 重新生成中...",
+            "html_path": "",
+            "stage": "重新生成HTML",
+            "doc_filename": md_str,
+            "doc_path": md_str,
+        }
+        if keep_status in ("completed", "failed", "cancelled"):
+            patch["status"] = keep_status
+        update_task(task_id, **patch)
+
     add_log(task_id, f"重新生成HTML: {link}")
-    
+
     # 启动HTML生成
     from .services.video_pipeline import start_html_generation
-    start_html_generation(str(md_path), task_id, platform=platform, link=link)
-    prev = get_task_history(link=link)
+    start_html_generation(md_str, task_id, platform=platform, link=link)
     if prev:
         add_or_update_task_in_history(
             {
@@ -1578,8 +2148,8 @@ async def route_history_regenerate_html(request: Request):
                 "url_hash": prev.get("url_hash"),
                 "platform": platform,
                 "status": prev.get("status") or "completed",
-                "doc_filename": str(md_path),
-                "doc_path": str(md_path),
+                "doc_filename": md_str,
+                "doc_path": md_str,
                 "html_status": "async_pending",
                 "html_message": "HTML 重新生成中...",
                 "logs": prev.get("logs") or [],
@@ -1623,7 +2193,9 @@ def route_config_info():
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/skills")
 def route_skills_list():
-    return {"skills": skill_list()}
+    from .services.board_usage_stats import get_stats_map
+
+    return {"skills": skill_list(), "usage_stats": get_stats_map()}
 
 
 @app.get("/api/skills/{skill_id}")
@@ -1889,6 +2461,14 @@ async def route_chat_tools_catalog(read_comments: bool = False):
     return {"ok": True, **meta}
 
 
+@app.get("/api/chat/models")
+def route_chat_models():
+    """AI 问答页模型下拉：网关节点池活跃 endpoint（不含 api_key）。"""
+    from .services.config import list_chat_model_options
+
+    return list_chat_model_options()
+
+
 @app.get("/api/chat/warmup")
 async def route_chat_warmup(
     read_comments: bool = False,
@@ -2139,32 +2719,54 @@ async def route_chat_stream(request: Request):
     orch_pipeline_nodes = body.get("orch_pipeline_nodes") if isinstance(body.get("orch_pipeline_nodes"), dict) else None
 
     from .services.chat_warmup import (
+        get_cached_session_memory,
         get_warmup_status,
         refresh_or_prepare_session_memory,
         run_chat_warmup,
+        store_session_memory_cache,
         wait_for_chat_warmup,
     )
+
+    def _minimal_session_memory() -> Dict[str, Any]:
+        return {
+            "usage": {"pct": 0, "mode": "short"},
+            "memory_meta": {"mode": "short"},
+            "memory_mode": "short",
+            "task_context_block": "",
+            "task_redis": {},
+            "task_repo": {},
+            "task_group_seq": 0,
+            "cur_task": client_cur_task if isinstance(client_cur_task, dict) else {},
+            "main_task_history": client_main_task_history if isinstance(client_main_task_history, list) else [],
+            "summary_text": "",
+            "events": [],
+            "force_new_session": False,
+        }
 
     async def gen():
         try:
             st = get_warmup_status()
             warmup_task = None
-            # 工具/MCP：页面预热应已完成；仅 RAG 嵌入未就绪时再阻塞（避免重复 list_tools）
-            need_rag_embed = bool(rag_prefetch and not st.get("rag_embed_ready"))
+            # 仅等待工具/MCP + LangGraph；RAG/Milvus 嵌入后台预热，不得阻塞 SSE 首包与普通问答
             need_tools = not st.get("ready")
-            if need_tools or need_rag_embed or st.get("warming"):
+            if need_tools or st.get("warming"):
                 warmup_task = asyncio.create_task(
                     wait_for_chat_warmup(
                         read_comments=read_comments,
-                        include_rag=need_rag_embed or need_tools,
-                        timeout_sec=60.0 if need_rag_embed else 30.0,
+                        include_rag=False,
+                        timeout_sec=25.0,
                     )
                 )
-            elif not st.get("warming"):
+            elif not st.get("warming") and not st.get("ready"):
                 asyncio.create_task(
-                    run_chat_warmup(read_comments=read_comments, include_rag=rag_prefetch)
+                    run_chat_warmup(
+                        read_comments=read_comments,
+                        include_rag=bool(rag_prefetch),
+                    )
                 )
-            # 首包立刻返回，避免前端长时间停在「正在连接…」（会话记忆在后台继续准备）
+            # 照搬 HaiChiAgent：SSE 注释 + 填充强制 TCP 立即 flush，避免 Nagle 缓冲首包
+            yield ": " + (" " * 2048) + "\n\n"
+            # 首包立刻返回，避免前端长时间停在「正在处理…」（会话记忆在后台继续准备）
             yield (
                 "event: stream_open\n"
                 + "data: "
@@ -2185,38 +2787,6 @@ async def route_chat_stream(request: Request):
             _tid_lite = ""
             if isinstance(client_cur_task, dict):
                 _tid_lite = str(client_cur_task.get("task_id") or "").strip()
-            if _tid_lite:
-                yield (
-                    "event: pipeline_progress\n"
-                    + "data: "
-                    + json.dumps(
-                        {
-                            "session_id": sid,
-                            "stage": "延续主任务",
-                            "progress": 2,
-                            "detail": "检测到主任务续接，准备编排面板",
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n\n"
-                )
-                yield (
-                    "event: orchestration_node_start\n"
-                    + "data: "
-                    + json.dumps(
-                        {
-                            "session_id": sid,
-                            "task_id": _tid_lite,
-                            "step_id": "step_boot",
-                            "step_name": "延续主任务",
-                            "phase": "execute_prep",
-                            "progress_hint": "正在执行：延续主任务",
-                            "sub_index": 0,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n\n"
-                )
             mem_task = asyncio.create_task(
                 refresh_or_prepare_session_memory(
                     sid,
@@ -2226,9 +2796,37 @@ async def route_chat_stream(request: Request):
                     lite=bool(_tid_lite),
                 )
             )
-            if warmup_task is not None:
-                await warmup_task
-            memory_prepared = await mem_task
+            cached_mem = get_cached_session_memory(sid)
+            if cached_mem:
+                memory_prepared = dict(cached_mem)
+                async def _refresh_mem_bg() -> None:
+                    try:
+                        refreshed = await mem_task
+                        store_session_memory_cache(sid, refreshed)
+                    except Exception:
+                        pass
+                asyncio.create_task(_refresh_mem_bg())
+            else:
+                waitables = [mem_task]
+                if warmup_task is not None:
+                    waitables.append(warmup_task)
+                done, pending = await asyncio.wait(
+                    waitables,
+                    timeout=0.35,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if mem_task in done:
+                    memory_prepared = mem_task.result()
+                else:
+                    memory_prepared = _minimal_session_memory()
+                    async def _mem_fallback() -> None:
+                        try:
+                            refreshed = await mem_task
+                            store_session_memory_cache(sid, refreshed)
+                        except Exception:
+                            pass
+                    asyncio.create_task(_mem_fallback())
+                # pending 中的 warmup_task / mem_task 继续在后台运行，勿对 Task 再 create_task
             _mem_ms = int((_time.perf_counter() - _mem_t0) * 1000)
             logging.getLogger("sba.main").info(
                 "[AI问答-流式|main.route_chat_stream|session:%s|硬编执行|会话记忆] "
@@ -2278,7 +2876,7 @@ async def route_chat_stream(request: Request):
                 yield event
 
     return StreamingResponse(gen(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+        headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/chat/graph/resume")
@@ -2353,12 +2951,26 @@ def route_chat_delete(sid: str):
 
 @app.get("/api/chat/sessions/{sid}")
 def route_chat_get(sid: str):
+    from .services.chat_context_memory import (
+        normalize_session_document_for_storage,
+        persist_normalized_session_document,
+        session_doc_byte_size,
+        session_document_has_full_orchestration_io,
+        SESSION_DOC_SOFT_BYTES,
+    )
     from .services.chat_session_store import get_session_document
 
     doc = get_session_document(sid)
     if not doc:
         raise HTTPException(404, "会话不存在")
-    return doc
+    normalized, changed = normalize_session_document_for_storage(doc)
+    if (
+        changed
+        or session_document_has_full_orchestration_io(doc)
+        or session_doc_byte_size(doc) > SESSION_DOC_SOFT_BYTES
+    ):
+        normalized = persist_normalized_session_document(sid, normalized)
+    return normalized
 
 
 @app.patch("/api/chat/sessions/{sid}")
@@ -2662,7 +3274,10 @@ _RAG_API_TIMEOUT_SEC = 14.0
 async def route_doc_rag_stats(refresh: bool = Query(False, description="true 时强制直连 Milvus 重算切片聚合")):
     """RAG 统计：线程池执行并限时，避免 Milvus 不可达时拖死 worker 线程。"""
     try:
-        return await asyncio.wait_for(asyncio.to_thread(kb_stats, refresh), timeout=_RAG_API_TIMEOUT_SEC)
+        return await asyncio.wait_for(
+            asyncio.to_thread(lambda r=refresh: kb_stats(refresh=r)),
+            timeout=_RAG_API_TIMEOUT_SEC,
+        )
     except asyncio.TimeoutError:
         logging.getLogger("sba.kb_rag").warning(
             "[RAG-知识库|main.route_doc_rag_stats|kb_stats|硬编执行|超时] "
@@ -2690,7 +3305,10 @@ async def route_doc_rag_files(
 ):
     """RAG 文件列表：线程池执行并限时，避免并发 Milvus 快照占满线程池。"""
     try:
-        payload = await asyncio.wait_for(asyncio.to_thread(kb_list_files, refresh), timeout=_RAG_API_TIMEOUT_SEC)
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(lambda r=refresh: kb_list_files(refresh=r)),
+            timeout=_RAG_API_TIMEOUT_SEC,
+        )
     except asyncio.TimeoutError:
         logging.getLogger("sba.kb_rag").warning(
             "[RAG-知识库|main.route_doc_rag_files|kb_list_files|硬编执行|超时] "
@@ -2762,13 +3380,23 @@ async def route_doc_process(request: Request):
     p = Path(path_raw).resolve()
     if not p.is_file():
         raise HTTPException(400, "路径无效或不是可读文件")
+    export_txt = bool(body.get("export_txt", False))
+    summarize = bool(body.get("summarize", body.get("enable_summary", False)))
     try:
-        from .services.document import analyze_document
+        from .services.multimodal_export import export_multimodal_document
 
         slice_method = (body.get("slice_method") or body.get("chunk_mode") or "auto").strip()
         max_tokens = int(body.get("max_tokens") or 350)
         overlap = int(body.get("overlap") or 40)
-        return analyze_document(str(p), slice_method=slice_method, chunk_mode=slice_method, max_tokens=max_tokens, overlap=overlap)
+        return export_multimodal_document(
+            str(p),
+            export_txt=export_txt,
+            summarize=summarize,
+            slice_method=slice_method,
+            chunk_mode=slice_method,
+            max_tokens=max_tokens,
+            overlap=overlap,
+        )
     except Exception as e:
         return {
             "ok": False,
@@ -2780,6 +3408,10 @@ async def route_doc_process(request: Request):
             "file_path": str(p),
             "file_size": 0,
             "processing_time": 0.0,
+            "md_path": "",
+            "txt_path": "",
+            "summarized": False,
+            "export_txt": export_txt,
         }
 
 
@@ -3101,6 +3733,36 @@ async def route_settings_wf_save(ak: str, request: Request):
     return save_agent_prompt(ak, body.get("fields", {}))
 
 
+@app.get("/api/settings/meta-extract-schema")
+def route_meta_extract_schema(lib: str = Query("", description="知识库 ID，留空则返回默认字段")):
+    """链接沉淀可配置元数据提取结构；支持从知识库 metadata_json 一键转换。"""
+    from .link_meta_extract import DEFAULT_META_EXTRACT_FIELDS, fields_from_kb_metadata_json, normalize_meta_extract_fields
+    from .config import load_config
+
+    cfg = load_config()
+    fields = normalize_meta_extract_fields(cfg.get("meta_extract_fields"))
+    if lib.strip():
+        try:
+            from .services.rag_libraries import get_active_id, list_libraries
+
+            libs = list_libraries()
+            target = lib.strip()
+            row = next((x for x in libs if x.get("id") == target), None)
+            if not row and not target:
+                aid = get_active_id()
+                row = next((x for x in libs if x.get("id") == aid), None)
+            if row:
+                fields = fields_from_kb_metadata_json(str(row.get("metadata_json") or "{}"))
+        except Exception:
+            fields = list(DEFAULT_META_EXTRACT_FIELDS)
+    return {
+        "ok": True,
+        "enabled": bool(cfg.get("meta_extract_enabled", True)),
+        "fields": fields,
+        "default_fields": DEFAULT_META_EXTRACT_FIELDS,
+    }
+
+
 @app.get("/api/settings/agents-md/{ak}")
 def route_settings_md_get(ak: str):
     return get_agent_md(ak)
@@ -3390,6 +4052,174 @@ async def route_eval_trajectory_from_span(task_id: str, request: Request):
     )
 
 
+# ── 用户反馈（打分 + 意图准确率） ──
+
+@app.post("/api/chat/feedback")
+async def route_chat_feedback(request: Request):
+    """提交 AI 回答反馈：1-5 星打分 + 意图点赞/踩 + 纠正意图。"""
+    from .services.chat_feedback import save_feedback, INTENT_LABELS, MODE_LABELS
+
+    raw = await request.body()
+    try:
+        body = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        body = {}
+    sid = str(body.get("session_id") or "").strip()
+    idx = int(body.get("message_index") or 0)
+    if not sid:
+        raise HTTPException(400, "缺少 session_id")
+    rating_raw = body.get("rating")
+    rating = max(1, min(5, int(rating_raw))) if rating_raw is not None else None
+    intent_liked = body.get("intent_liked")
+    if intent_liked is not None:
+        intent_liked = bool(intent_liked)
+    corrected_intent = str(body.get("corrected_intent") or "").strip() or None if "corrected_intent" in body else None
+    corrected_intent_label = str(body.get("corrected_intent_label") or "").strip() or None if "corrected_intent_label" in body else None
+    comment = body.get("comment") if "comment" in body else None
+    row = save_feedback(
+        session_id=sid,
+        message_index=idx,
+        rating=rating,
+        intent_liked=intent_liked,
+        detected_intent=body.get("detected_intent") if isinstance(body.get("detected_intent"), dict) else None,
+        corrected_intent=corrected_intent,
+        corrected_intent_label=corrected_intent_label,
+        comment=str(comment)[:500] if comment is not None else None,
+        user_id=str(getattr(request.state, "user_id", "") or ""),
+    )
+    return {"ok": True, "feedback": row}
+
+
+@app.get("/api/chat/feedback/analytics")
+async def route_chat_feedback_analytics(days: int = 30, full: bool = False):
+    """意图识别准确率统计；full=true 时返回完整看板指标。"""
+    if full:
+        from .services.feedback_analytics import compute_feedback_dashboard
+
+        return compute_feedback_dashboard(days=max(1, min(365, days)))
+    from .services.chat_feedback import compute_intent_accuracy
+
+    return compute_intent_accuracy(days=max(1, min(365, days)))
+
+
+@app.get("/api/chat/feedback/session")
+async def route_chat_feedback_session(session_id: str = ""):
+    """按会话批量加载反馈（前端回显）。"""
+    from .services.chat_feedback import list_feedback_for_session
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(400, "缺少 session_id")
+    return {"ok": True, "items": list_feedback_for_session(sid)}
+
+
+@app.get("/api/chat/intent-alternatives")
+async def route_chat_intent_alternatives(
+    session_id: str = "",
+    message_index: int = 0,
+    retrieval_terms: str = "",
+):
+    """意图纠偏备选（内置 + LLM 推测）。"""
+    from .services.intent_suggest import build_intent_alternatives
+    from .services.chat_feedback import get_feedback
+    from .services.chat_session_store import get_session_document
+
+    sid = str(session_id or "").strip()
+    idx = int(message_index or 0)
+    fb = get_feedback(sid, idx) if sid else None
+    detected = (fb or {}).get("detected_intent") or {}
+    detected_label = str(detected.get("domain") or detected.get("mode") or "通用")
+    detected_code = str(detected.get("domain_code") or detected_label)
+    question = ""
+    answer = ""
+    if sid:
+        try:
+            doc = get_session_document(sid) or {}
+            msgs = doc.get("messages") or []
+            user_msgs = [m for m in msgs if isinstance(m, dict) and m.get("role") == "user"]
+            asst_msgs = [m for m in msgs if isinstance(m, dict) and m.get("role") == "assistant"]
+            if idx < len(asst_msgs):
+                answer = str(asst_msgs[idx].get("content") or "")
+            if user_msgs:
+                question = str(user_msgs[min(idx, len(user_msgs) - 1)].get("content") or "")
+        except Exception:
+            pass
+    terms = [t.strip() for t in (retrieval_terms or "").split(",") if t.strip()]
+    return build_intent_alternatives(
+        question=question,
+        answer=answer,
+        detected_intent=detected_code,
+        detected_label=detected_label,
+        retrieval_terms=terms,
+        include_llm=True,
+    )
+
+
+@app.get("/api/settings/pipeline-config")
+def route_settings_pipeline_config_get():
+    from .services.pipeline_llm import get_pipeline_llm, pipeline_settings, probe_ollama_health
+
+    node = get_pipeline_llm()
+    health = probe_ollama_health()
+    cfg = pipeline_settings()
+    return {
+        "ok": True,
+        "ollama_base_url": cfg["ollama_base_url"],
+        "ollama_model": cfg["ollama_model"],
+        "pipeline_gateway_llm_fallback": cfg["pipeline_gateway_llm_fallback"],
+        "pipeline_concurrency": cfg["pipeline_concurrency"],
+        "pipeline_timeout_sec": cfg["pipeline_timeout_sec"],
+        "ollama_configured": bool(node),
+        "health": health,
+    }
+
+
+@app.put("/api/settings/pipeline-config")
+async def route_settings_pipeline_config_put(request: Request):
+    import os
+
+    raw = await request.body()
+    try:
+        body = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        body = {}
+    if "ollama_model" in body:
+        model = str(body.get("ollama_model") or "").strip()
+        if model:
+            os.environ["OLLAMA_MODEL"] = model
+    if "ollama_base_url" in body:
+        url = str(body.get("ollama_base_url") or "").strip()
+        if url:
+            os.environ["OLLAMA_BASE_URL"] = url
+    if "pipeline_concurrency" in body:
+        os.environ["OLLAMA_PIPELINE_CONCURRENCY"] = str(max(1, min(32, int(body.get("pipeline_concurrency") or 4))))
+    return route_settings_pipeline_config_get()
+
+
+@app.get("/api/chat/feedback/list")
+async def route_chat_feedback_list(
+    limit: int = 100,
+    offset: int = 0,
+    rating_min: Optional[int] = None,
+    rating_max: Optional[int] = None,
+    intent_liked: Optional[bool] = None,
+    keyword: str = "",
+):
+    """反馈列表（管理页用）。"""
+    from .services.chat_feedback import list_all_feedback
+
+    return {
+        "items": list_all_feedback(
+            limit=min(500, max(1, limit)),
+            offset=max(0, offset),
+            rating_min=rating_min,
+            rating_max=rating_max,
+            intent_liked=intent_liked,
+            keyword=keyword.strip(),
+        ),
+    }
+
+
 @app.get("/api/ops/observability/overview")
 def route_ops_overview():
     return ops_get_overview()
@@ -3424,6 +4254,27 @@ async def route_ops_add(request: Request):
         status_code=body.get("status_code", 200),
         cost_ms=body.get("cost_ms", 0),
     )
+
+
+@app.get("/api/ops/scheduled-jobs/events")
+def route_ops_scheduled_job_events(limit: int = Query(100, ge=1, le=500)):
+    from .services.ops import ops_get_scheduled_job_events
+
+    return ops_get_scheduled_job_events(limit=limit)
+
+
+@app.get("/api/ops/exception-catalog")
+def route_ops_exception_catalog():
+    from .services.ops_exception_proposals import list_exception_catalog
+
+    return list_exception_catalog()
+
+
+@app.get("/api/ops/exception-proposals")
+def route_ops_exception_proposals(error: str = Query(""), context: str = Query("")):
+    from .services.ops_exception_proposals import get_proposal_for_error
+
+    return get_proposal_for_error(error, context=context)
 
 
 @app.get("/api/ops/dashboard")
@@ -3599,6 +4450,87 @@ async def route_webreplay_run_log(request: Request):
         raise HTTPException(400, "缺少 scriptId")
     webreplay_append_run(_webreplay_user_id(request), script_id, body)
     return {"ok": True}
+
+
+from .services.webreplay_cdp import (
+    cdp_status as webreplay_cdp_status,
+    get_cdp_recording_status,
+    media_file_path as webreplay_media_file_path,
+    run_cdp_replay,
+    start_cdp_recording,
+    stop_cdp_recording,
+)
+
+
+@app.get("/api/webreplay/cdp/status")
+def route_webreplay_cdp_status():
+    return webreplay_cdp_status()
+
+
+@app.post("/api/webreplay/cdp/record/start")
+async def route_webreplay_cdp_record_start(request: Request):
+    body = await request.json()
+    name = str(body.get("name") or "").strip()
+    tab_url_hint = str(body.get("tabUrlHint") or body.get("tab_url_hint") or "").strip()
+    result = start_cdp_recording(_webreplay_user_id(request), name=name, tab_url_hint=tab_url_hint)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "启动录制失败")
+    return result
+
+
+@app.get("/api/webreplay/cdp/record/{session_id}")
+def route_webreplay_cdp_record_poll(session_id: str, request: Request):
+    result = get_cdp_recording_status(_webreplay_user_id(request), session_id)
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error") or "会话不存在")
+    return result
+
+
+@app.post("/api/webreplay/cdp/record/{session_id}/stop")
+def route_webreplay_cdp_record_stop(session_id: str, request: Request):
+    uid = _webreplay_user_id(request)
+    result = stop_cdp_recording(uid, session_id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "停止录制失败")
+    script = result.get("script") or {}
+    saved = webreplay_upsert_script(uid, script)
+    result["script"] = saved
+    return result
+
+
+@app.post("/api/webreplay/cdp/replay/{script_id}")
+def route_webreplay_cdp_replay(script_id: str, request: Request):
+    uid = _webreplay_user_id(request)
+    row = webreplay_get_script(uid, script_id)
+    if not row:
+        raise HTTPException(404, "脚本不存在")
+    result = run_cdp_replay(row)
+    webreplay_append_run(
+        uid,
+        script_id,
+        {
+            "status": result.get("status") or ("success" if result.get("ok") else "failed"),
+            "error": result.get("error"),
+            "failedAtStep": result.get("failedAtStep"),
+            "doneSteps": result.get("doneSteps"),
+            "totalSteps": result.get("totalSteps"),
+            "elapsedMs": result.get("elapsedMs"),
+            "via": "cdp",
+        },
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "重放失败")
+    return result
+
+
+@app.get("/api/webreplay/media/{session_id}/{filename}")
+def route_webreplay_media(session_id: str, filename: str, request: Request):
+    from fastapi.responses import FileResponse
+
+    path = webreplay_media_file_path(_webreplay_user_id(request), session_id, filename)
+    if not path:
+        raise HTTPException(404, "媒体文件不存在")
+    return FileResponse(path, media_type="image/png")
 
 
 # ─── RSS 订阅阅读 ───
@@ -3800,14 +4732,14 @@ async def route_rss_item_document(item_id: str, request: Request):
         code = 404 if "不存在" in msg else 400
         raise HTTPException(code, msg) from ex
 
-    from .services.pipeline_scheduler import run_pipeline_with_slot
+    from .services.pipeline_scheduler import request_pipeline_task_async
     from .services.rss_article_pipeline import process_rss_article_pipeline
 
     task_id = str(meta.get("task_id") or "")
     rss_iid = str(meta.get("item_id") or item_id)
 
     async def _run_rss_doc() -> None:
-        await run_pipeline_with_slot(
+        await request_pipeline_task_async(
             task_id,
             lambda: process_rss_article_pipeline(
                 task_id,
@@ -3818,6 +4750,178 @@ async def route_rss_item_document(item_id: str, request: Request):
 
     asyncio.create_task(_run_rss_doc())
     return {"ok": True, **meta}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 文本阅读器 + 辅助阅读 Agent
+# ═══════════════════════════════════════════════════════════════════
+@app.post("/api/reader/import-local")
+async def route_reader_import_local(request: Request):
+    """本地 MD/TXT 导入 output 目录，与任务产物相同方式打开预览。"""
+    from .services.output_file_io import import_local_text_to_output
+
+    body = await request.json()
+    name = (body.get("name") or body.get("file") or "local.md").strip()
+    content = body.get("content")
+    if content is None:
+        raise HTTPException(400, "缺少 content")
+    try:
+        return import_local_text_to_output(name, str(content))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
+
+
+def _reader_user_id(request: Request) -> str:
+    uid = getattr(request.state, "user_id", None)
+    return str(uid or "default")
+
+
+@app.get("/api/reader/recent")
+def route_reader_recent_list(request: Request):
+    """最近打开的 MD 列表（服务端持久化，按磁盘 mtime 降序）。"""
+    from .services.reader_recent_store import list_recent
+
+    return {"ok": True, "items": list_recent(_reader_user_id(request))}
+
+
+@app.put("/api/reader/recent")
+async def route_reader_recent_replace(request: Request):
+    """合并客户端缓存与服务端最近列表（全量合并，不丢项）。"""
+    from .services.reader_recent_store import replace_recent
+
+    body = await request.json()
+    items = body.get("items") if isinstance(body, dict) else None
+    if items is not None and not isinstance(items, list):
+        raise HTTPException(400, "items 须为数组")
+    merged = replace_recent(_reader_user_id(request), items or [])
+    return {"ok": True, "items": merged}
+
+
+@app.post("/api/reader/recent/touch")
+async def route_reader_recent_touch(request: Request):
+    """记录打开文件：合并写入，mtime 取磁盘修改时间。"""
+    from .services.reader_recent_store import touch_recent
+
+    body = await request.json()
+    file_name = (body.get("file") or body.get("name") or "").strip()
+    if not file_name:
+        raise HTTPException(400, "缺少 file")
+    opened_at = body.get("opened_at")
+    try:
+        opened_ms = int(opened_at) if opened_at is not None else None
+    except (TypeError, ValueError):
+        opened_ms = None
+    try:
+        items = touch_recent(_reader_user_id(request), file_name, opened_at=opened_ms)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "items": items}
+
+
+@app.get("/api/reader/recent/stat")
+def route_reader_recent_stat(file: str = Query(..., description="output 目录内 basename")):
+    """查询 output 文件磁盘修改时间（毫秒）。"""
+    from .services.reader_recent_store import stat_recent_file
+
+    try:
+        return stat_recent_file(file)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/reader/sessions/{doc_id}")
+def route_reader_session_get(doc_id: str):
+    from .services.reader_session_store import get_session
+
+    did = (doc_id or "").strip()
+    if not did:
+        raise HTTPException(400, "doc_id 不能为空")
+    return get_session(did)
+
+
+@app.put("/api/reader/sessions/{doc_id}")
+async def route_reader_session_put(doc_id: str, request: Request):
+    from .services.reader_session_store import upsert_session, flush_session
+
+    did = (doc_id or "").strip()
+    if not did:
+        raise HTTPException(400, "doc_id 不能为空")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body 须为对象")
+    messages = body.get("messages")
+    if messages is not None and not isinstance(messages, list):
+        raise HTTPException(400, "messages 须为数组")
+    row = upsert_session(
+        did,
+        doc_name=str(body.get("doc_name") or "").strip(),
+        messages=messages,
+        prefs=body.get("prefs") if isinstance(body.get("prefs"), dict) else None,
+    )
+    flush_session(did)
+    return {"ok": True, "session": row}
+
+
+@app.get("/api/reader/agent-config")
+def route_reader_agent_config():
+    from .services.reader_agent import get_agent_config_payload
+
+    return get_agent_config_payload()
+
+
+@app.post("/api/reader/chat/stream")
+async def route_reader_chat_stream(request: Request):
+    from .services.reader_agent import stream_reader_chat
+    from .services.reader_session_store import maybe_periodic_flush
+
+    maybe_periodic_flush()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body 须为 JSON 对象")
+    doc_id = str(body.get("doc_id") or "").strip()
+    doc_name = str(body.get("doc_name") or "").strip()
+    doc_text = str(body.get("doc_text") or "")
+    message = str(body.get("message") or "").strip()
+    if not doc_id:
+        raise HTTPException(400, "缺少 doc_id")
+    if not message:
+        raise HTTPException(400, "缺少 message")
+    if not doc_text.strip():
+        raise HTTPException(400, "缺少 doc_text（请先打开文档）")
+
+    async def gen():
+        try:
+            async for chunk in stream_reader_chat(
+                doc_id=doc_id,
+                doc_name=doc_name,
+                doc_text=doc_text,
+                message=message,
+                rag_prefetch=bool(body.get("rag_prefetch", False)),
+                web_search=bool(body.get("web_search", False)),
+                deep_think=bool(body.get("deep_think", False)),
+                model=str(body.get("model") or "").strip() or None,
+            ):
+                yield chunk
+        except Exception as ex:
+            from .services.chat_error_handler import stream_user_error_sse
+
+            async for ev in stream_user_error_sse(ex, session_id=doc_id, stage="阅读器问答"):
+                yield ev
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 # SPA Frontend Routes (must be after all API routes)

@@ -38,6 +38,17 @@ _log = logging.getLogger(__name__)
 def _reload_speech_to_text():
     """重新加载 video_downloader，返回最新的 speech_to_text（含 strict 参数检测）。"""
     mod = importlib.reload(_video_downloader)
+    # reload 会清空 video_downloader._whisper_pool，必须在 reload 之后重新注册实例池
+    try:
+        from .whisper_pool import register_whisper_pool_with_downloader
+
+        register_whisper_pool_with_downloader(mod)
+    except Exception as ex:
+        _log.warning(
+            "[链接沉淀文档-视频转写|video_pipeline._reload_speech_to_text|whisper_pool|硬编执行|注册] "
+            "reload 后注册失败; error=%s",
+            ex,
+        )
     fn = mod.speech_to_text
     has_strict = "strict" in inspect.signature(fn).parameters
     return fn, has_strict, str(getattr(mod, "__file__", ""))
@@ -287,6 +298,15 @@ def generate_document_with_comments(
         comments_file_path=cfp,
     )
     output_tpl = (cfg.get("output_template") or "").strip()
+    from .link_meta_extract import format_meta_json_block, get_meta_extract_config
+
+    meta_cfg = get_meta_extract_config(cfg)
+    meta_block = format_meta_json_block(
+        result_data.get("extracted_metadata") or {},
+        fields=meta_cfg.get("fields") or [],
+    )
+    task_note = str(result_data.get("task_note") or "").strip()
+    task_keywords = str(result_data.get("task_keywords") or "").strip()
     md = render_output_template(
         output_tpl,
         platform=platform,
@@ -300,6 +320,9 @@ def generate_document_with_comments(
         comments_section=comments_section,
         comments_analysis=viewpoint,
         comments_file_link=format_comments_file_link(cfp),
+        meta_json=meta_block,
+        task_note=task_note,
+        task_keywords=task_keywords,
     )
     if not md.strip():
         from .file_naming import resolve_effective_doc_title
@@ -980,11 +1003,18 @@ async def process_video_pipeline(task_id: str):
                 or str((task.get("comments") or {}).get("comments_file_path") or ""),
             )
             _article_only = is_article_only(task)
+            task_snap_pre = get_task(task_id) or {}
             consolidation = await loop.run_in_executor(
                 _llm_executor(),
                 lambda: run_document_consolidation(
                     text=raw_text,
-                    llm_cfg={**cfg, "_task_id": task_id, "_log_chain": f"链接沉淀文档-{platform}视频"},
+                    llm_cfg={
+                        **cfg,
+                        "_task_id": task_id,
+                        "_log_chain": f"链接沉淀文档-{platform}视频",
+                        "_task_note": str(task_snap_pre.get("task_note") or ""),
+                        "_task_keywords": str(task_snap_pre.get("task_keywords") or ""),
+                    },
                     user_prompt=user_prompt,
                     stage_label=f"{platform}视频沉淀",
                     summary_after_article=True,
@@ -997,6 +1027,9 @@ async def process_video_pipeline(task_id: str):
 
             ai_summary = (consolidation.get("ai_summary") or "").strip()
             article_text = (consolidation.get("article") or "").strip()
+            extracted_metadata = consolidation.get("extracted_metadata") or {}
+            if extracted_metadata:
+                update_task(task_id, extracted_metadata=extracted_metadata)
             transcript["comments_viewpoint"] = (consolidation.get("comments_viewpoint") or "").strip()
             if not _article_only and not ai_summary:
                 tracker.fail("ai_analysis", "摘要生成失败")
@@ -1008,17 +1041,33 @@ async def process_video_pipeline(task_id: str):
             if _article_only:
                 title = link_title or (transcript.get("title") or platform)
             else:
-                title = await loop.run_in_executor(
-                    _io_executor(),
-                    lambda: resolve_doc_title(
-                        ai_summary,
-                        link,
-                        link_title=link_title,
-                        fallback=(transcript.get("title") or platform),
-                        log_cb=lambda msg: add_log(task_id, msg),
-                        platform=platform,
-                    ),
-                )
+                try:
+                    title = await loop.run_in_executor(
+                        _io_executor(),
+                        lambda: resolve_doc_title(
+                            ai_summary,
+                            link,
+                            link_title=link_title,
+                            fallback=(transcript.get("title") or platform),
+                            log_cb=lambda msg: add_log(task_id, msg),
+                            platform=platform,
+                            source_text_len=len(raw_text or ""),
+                        ),
+                    )
+                except Exception as title_ex:
+                    from .pipeline_output_quality import PipelineOutputQualityError
+
+                    if isinstance(title_ex, PipelineOutputQualityError):
+                        err_msg = f"[{title_ex.error_code}] {title_ex.message}"
+                        update_task(
+                            task_id,
+                            error_code=title_ex.error_code,
+                            error=err_msg,
+                            span_stage_hint=title_ex.span_stage,
+                        )
+                        tracker.fail("ai_analysis", err_msg)
+                        return
+                    raise
             update_task(task_id, doc_title=title)
             add_log(task_id, f"二层标题（AI摘要）: {title}")
             tracker.complete("ai_analysis", {"ai_summary": ai_summary, "article": article_text or raw_text, "title": title, "link_title": link_title}, persist_payload={"ai_summary": ai_summary, "article": article_text or raw_text, "title": title, "link_title": link_title})
@@ -1034,6 +1083,10 @@ async def process_video_pipeline(task_id: str):
         transcript["title"] = title
         transcript["link_title"] = (get_task(task_id) or {}).get("link_title") or transcript.get("link_title") or ""
         transcript["transcribe_source"] = transcript.get("transcribe_source") or "audio_whisper"
+        task_snap_md = get_task(task_id) or {}
+        transcript["extracted_metadata"] = task_snap_md.get("extracted_metadata") or {}
+        transcript["task_note"] = task_snap_md.get("task_note") or ""
+        transcript["task_keywords"] = task_snap_md.get("task_keywords") or ""
 
         doc_path = None
         if tracker.should_run("generate_md"):

@@ -4,13 +4,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from .task_manager import add_log, update_task
 
 _log = logging.getLogger("sba.pipeline_scheduler")
 _pipeline_sem: Optional[asyncio.Semaphore] = None
 _pipeline_sem_size: int = 0
+
+# 已提交调度、尚未释放槽位的任务
+_scheduled_ids: set[str] = set()
+_coro_factories: Dict[str, Callable[[], Awaitable[None]]] = {}
+_dispatch_lock: Optional[asyncio.Lock] = None
+
+
+def _get_dispatch_lock() -> asyncio.Lock:
+    global _dispatch_lock
+    if _dispatch_lock is None:
+        _dispatch_lock = asyncio.Lock()
+    return _dispatch_lock
 
 
 def _get_pipeline_semaphore() -> asyncio.Semaphore:
@@ -48,13 +60,13 @@ def _run_pipeline_coro_in_worker(task_id: str, coro_factory: Callable[[], Awaita
 async def run_pipeline_with_slot(task_id: str, coro_factory: Callable[[], Awaitable[None]]):
     """
     将整条流水线提交到阻塞 I/O 线程池（max_workers，默认 8），并用信号量限制并发路数。
-    与老项目 ThreadPoolExecutor(max_workers=8) + 队列调度行为对齐。
+    获得槽位前保持 pending；开始执行后不再参与优先级排序。
     """
     from .pipeline_executor import blocking_pool_size, get_pipeline_runner_executor
 
     workers = blocking_pool_size()
     scheduler_th = threading.current_thread().name
-    update_task(task_id, status="running", stage="流水线执行中")
+    update_task(task_id, stage="等待执行槽位")
     add_log(
         task_id,
         f"[调度] 流水线排队（线程池 max_workers={workers}）; 调度协程={scheduler_th}",
@@ -70,6 +82,7 @@ async def run_pipeline_with_slot(task_id: str, coro_factory: Callable[[], Awaita
     sem = _get_pipeline_semaphore()
     loop = asyncio.get_running_loop()
     async with sem:
+        update_task(task_id, status="running", stage="流水线执行中")
         add_log(
             task_id,
             f"[调度] 已获得线程池槽位，提交执行; 当前线程={scheduler_th}",
@@ -78,6 +91,81 @@ async def run_pipeline_with_slot(task_id: str, coro_factory: Callable[[], Awaita
             get_pipeline_runner_executor(),
             lambda: _run_pipeline_coro_in_worker(task_id, coro_factory),
         )
+
+
+async def _dispatch_pending_pipelines() -> None:
+    """按 importance 降序 + queue_seq 升序（先进先出）启动 pending 任务，直至占满并发槽。"""
+    from .pipeline_executor import blocking_pool_size
+    from .task_manager import list_pending_tasks
+
+    max_w = blocking_pool_size()
+    lock = _get_dispatch_lock()
+    async with lock:
+        pending = [
+            t for t in list_pending_tasks()
+            if (t.get("task_id") or "") not in _scheduled_ids
+        ]
+        while len(_scheduled_ids) < max_w and pending:
+            task = pending.pop(0)
+            tid = str(task.get("task_id") or "").strip()
+            if not tid or tid in _scheduled_ids:
+                continue
+            factory = _coro_factories.get(tid)
+            if not factory:
+                continue
+            _scheduled_ids.add(tid)
+
+            async def _runner(tid: str = tid, factory=factory):
+                try:
+                    await run_pipeline_with_slot(tid, factory)
+                finally:
+                    async with _get_dispatch_lock():
+                        _scheduled_ids.discard(tid)
+                        _coro_factories.pop(tid, None)
+                    await _dispatch_pending_pipelines()
+
+            asyncio.create_task(_runner())
+
+
+async def kick_pipeline_dispatch() -> None:
+    """对外：尝试按重要度启动 pending 任务。"""
+    await _dispatch_pending_pipelines()
+
+
+def request_pipeline_task(task_id: str, coro_factory: Callable[[], Awaitable[None]]) -> None:
+    """登记 pending 任务并触发按重要度调度（同级 FIFO）。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return
+    _coro_factories[tid] = coro_factory
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_dispatch_pending_pipelines())
+    except RuntimeError:
+        # 非 async 上下文（极少）：直接同步登记，由后续 start 触发
+        pass
+
+
+async def request_pipeline_task_async(task_id: str, coro_factory: Callable[[], Awaitable[None]]) -> None:
+    """async 上下文登记并调度。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return
+    _coro_factories[tid] = coro_factory
+    await _dispatch_pending_pipelines()
+
+
+def request_video_pipeline(task_id: str) -> None:
+    """默认视频/图文链接沉淀入口。"""
+    from .video_pipeline import process_video_pipeline
+
+    request_pipeline_task(task_id, lambda: process_video_pipeline(task_id))
+
+
+async def request_video_pipeline_async(task_id: str) -> None:
+    from .video_pipeline import process_video_pipeline
+
+    await request_pipeline_task_async(task_id, lambda: process_video_pipeline(task_id))
 
 
 def pipeline_max_workers() -> int:

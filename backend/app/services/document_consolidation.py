@@ -644,6 +644,7 @@ def run_document_consolidation(
             "comments_viewpoint": "",
             "comments_summary_mode": "none",
             "llm_meta": llm_meta,
+            "extracted_metadata": {},
         }
 
     if summary_after_article:
@@ -717,6 +718,27 @@ def run_document_consolidation(
         summary_model=llm_meta.get("summary", {}).get("primary_endpoint", ""),
         article_model=llm_meta.get("article", {}).get("primary_endpoint", ""),
     )
+
+    extracted_metadata: Dict = {}
+    try:
+        from .link_meta_extract import extract_link_metadata, get_meta_extract_config
+
+        meta_cfg = get_meta_extract_config(llm_cfg)
+        if meta_cfg.get("enabled") and meta_cfg.get("fields"):
+            extracted_metadata = extract_link_metadata(
+                body_text=article_text or raw_text,
+                summary_text=ai_summary or "",
+                llm_cfg=llm_cfg,
+                fields=meta_cfg.get("fields") or [],
+                task_note=str(llm_cfg.get("_task_note") or ""),
+                task_keywords=str(llm_cfg.get("_task_keywords") or ""),
+                log_cb=log_cb,
+            )
+            if extracted_metadata:
+                _plog("元数据", "结构化元数据提取完成", field_count=len(extracted_metadata))
+    except Exception as ex:
+        log(f"[{stage_label}] 元数据提取异常：{ex}", "WARNING")
+
     return {
         "ai_summary": ai_summary,
         "article": article_text,
@@ -724,4 +746,5 @@ def run_document_consolidation(
         "comments_viewpoint": comments_viewpoint,
         "comments_summary_mode": comments_summary_mode,
         "llm_meta": llm_meta,
+        "extracted_metadata": extracted_metadata,
     }

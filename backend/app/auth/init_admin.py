@@ -25,6 +25,8 @@ DEFAULT_POLICIES = [
     ("p", "viewer", "/api/chat/*", "(POST|PUT|PATCH|DELETE)"),
     # viewer: RSS 订阅管理（添加/同步/删除）
     ("p", "viewer", "/api/rss/*", "(POST|PUT|PATCH|DELETE)"),
+    # viewer: 链接文档化队列（提交/删除/编辑/批量操作）
+    ("p", "viewer", "/api/process/*", "(POST|PUT|PATCH|DELETE)"),
     # admin: 全部功能
     ("p", "admin", "/api/*", ".*"),
 ]

@@ -12,8 +12,8 @@ from .creator_feed_adapter import FeedItem, get_feed_adapter
 from .creator_subscription_store import (
     add_sync_run_item,
     create_sync_run,
+    get_subscription_sync_anchor,
     insert_seen_note,
-    is_note_seen,
     list_sync_run_items,
     save_digest,
     update_subscription_cursor,
@@ -21,8 +21,12 @@ from .creator_subscription_store import (
     update_sync_run_item,
     get_subscription,
 )
-from .pipeline_scheduler import run_pipeline_with_slot
+from .subscription_import_guard import check_already_imported, record_skipped_import
+from .subscription_link_order import select_items_for_subscription_sync
+from .subscription_link_card_store import sync_link_card_from_task, upsert_link_card
+from .pipeline_scheduler import request_video_pipeline_async
 from .task_manager import create_task, get_task
+from .task_source_meta import SOURCE_SUB_CREATOR, source_meta_kwargs
 from .video_pipeline import process_video_pipeline
 
 _log = logging.getLogger("sba.creator_sync_runner")
@@ -108,17 +112,45 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
             )
 
             new_items: List[FeedItem] = []
-            for it in items:
-                if not is_note_seen(it.platform, it.note_id):
-                    new_items.append(it)
+            skipped_imported: List[Dict[str, Any]] = []
+            anchor = get_subscription_sync_anchor(subscription_id)
+            sel_limit = limit if backfill_done else _INITIAL_FETCH_LIMIT
+            if backfill_done:
+                sel_limit = _INCREMENTAL_FETCH_LIMIT
+            picked, order_skipped, stop_reason = select_items_for_subscription_sync(
+                items,
+                platform=sub["platform"],
+                seen_url_hashes=set(anchor.get("url_hashes") or []),
+                seen_note_ids=set(anchor.get("note_ids") or []),
+                anchor_published_at=anchor.get("published_at"),
+                limit=sel_limit,
+            )
+            for sk in order_skipped:
+                skipped_imported.append(
+                    {
+                        "note_id": sk.get("note_id"),
+                        "title": "",
+                        "url_hash": sk.get("url_hash"),
+                        "reason": sk.get("reason") or "seen",
+                    }
+                )
+            new_items = picked
+            if stop_reason:
+                _log.warning(
+                    "[%s|creator_sync_runner.run_sync|%s|Agent执行|连续性阻断] reason=%s",
+                    _CHAIN,
+                    sync_run_id,
+                    stop_reason,
+                )
 
             update_sync_run(sync_run_id, status="analyzing", new_count=len(new_items))
             _log.info(
-                "[%s|creator_sync_runner.run_sync|%s|Agent执行|拉取] 完成; fetched=%s; new=%s",
+                "[%s|creator_sync_runner.run_sync|%s|Agent执行|拉取] 完成; fetched=%s; new=%s; skipped_imported=%s",
                 _CHAIN,
                 sync_run_id,
                 len(items),
                 len(new_items),
+                len(skipped_imported),
             )
 
             analyzed = 0
@@ -135,8 +167,62 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                     canonical_url=it.canonical_url,
                     content_type=it.content_type,
                     title=it.title,
+                    published_at=str(it.published_at or ""),
                     analysis_status="pending",
                 )
+                upsert_link_card(
+                    subscription_id=subscription_id,
+                    platform=it.platform,
+                    note_id=it.note_id,
+                    canonical_url=it.canonical_url,
+                    url_hash=it.url_hash,
+                    title=it.title,
+                    content_type=it.content_type,
+                    published_at=str(it.published_at or ""),
+                    analysis_status="pending",
+                    author_name=str(it.author_name or sub.get("display_name") or ""),
+                    import_source=SOURCE_SUB_CREATOR,
+                    source_label=source_meta_kwargs(
+                        SOURCE_SUB_CREATOR,
+                        display_name=str(sub.get("display_name") or ""),
+                        platform=it.platform,
+                    )["source_label"],
+                )
+
+                imported, imp_reason = check_already_imported(
+                    it.platform,
+                    it.note_id,
+                    it.url_hash,
+                    canonical_url=it.canonical_url,
+                )
+                if imported:
+                    record_skipped_import(
+                        subscription_id=subscription_id,
+                        platform=it.platform,
+                        note_id=it.note_id,
+                        canonical_url=it.canonical_url,
+                        url_hash=it.url_hash,
+                        content_type=it.content_type,
+                        title=it.title,
+                        reason=imp_reason,
+                    )
+                    update_sync_run_item(
+                        sync_run_id,
+                        it.note_id,
+                        analysis_status="already_imported",
+                        error_message=f"已在历史库/seen 中（{imp_reason}），跳过分析",
+                    )
+                    digest_items.append(
+                        {
+                            "note_id": it.note_id,
+                            "title": it.title,
+                            "content_type": it.content_type,
+                            "canonical_url": it.canonical_url,
+                            "analysis_status": "already_imported",
+                            "summary": f"已导入，跳过（{imp_reason}）",
+                        }
+                    )
+                    continue
 
                 if not sub.get("auto_analyze", True):
                     insert_seen_note(
@@ -163,13 +249,39 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                     )
                     continue
 
-                task_id = create_task("小红书", it.canonical_url, "", comments_dict)
+                src_meta = source_meta_kwargs(
+                    SOURCE_SUB_CREATOR,
+                    display_name=str(sub.get("display_name") or ""),
+                    platform=it.platform,
+                    author_name=str(it.author_name or sub.get("display_name") or ""),
+                    author_id=str(it.author_id or sub.get("creator_id") or ""),
+                    subscription_id=subscription_id,
+                )
+                task_id = create_task(
+                    "小红书",
+                    it.canonical_url,
+                    "",
+                    comments_dict,
+                    **src_meta,
+                )
                 update_sync_run_item(sync_run_id, it.note_id, analysis_task_id=task_id, analysis_status="running")
+                upsert_link_card(
+                    subscription_id=subscription_id,
+                    platform=it.platform,
+                    note_id=it.note_id,
+                    canonical_url=it.canonical_url,
+                    url_hash=it.url_hash,
+                    title=it.title,
+                    content_type=it.content_type,
+                    published_at=str(it.published_at or ""),
+                    task_id=task_id,
+                    analysis_status="running",
+                    author_name=src_meta.get("author_name") or "",
+                    import_source=SOURCE_SUB_CREATOR,
+                    source_label=src_meta.get("source_label") or "",
+                )
 
-                async def _run_pipeline(tid: str = task_id):
-                    await run_pipeline_with_slot(tid, lambda: process_video_pipeline(tid))
-
-                asyncio.create_task(_run_pipeline())
+                asyncio.create_task(request_video_pipeline_async(task_id))
                 wait = await _wait_task(task_id, per_item_timeout)
                 task = wait.get("task") or {}
                 st = wait.get("status")
@@ -199,6 +311,7 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                         analysis_status="completed",
                     )
                     update_sync_run_item(sync_run_id, it.note_id, analysis_status="completed")
+                    sync_link_card_from_task(subscription_id, task)
                 else:
                     failed += 1
                     err = task.get("error") or f"analysis_{st}"
@@ -208,6 +321,7 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                         analysis_status="failed",
                         error_message=str(err),
                     )
+                    sync_link_card_from_task(subscription_id, task)
 
                 digest_items.append(
                     {
@@ -220,6 +334,26 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                         "summary": summary,
                         "error_message": task.get("error") or "",
                     }
+                )
+
+            if failed > 0:
+                from .subscription_batch_gate import finalize_subscription_batch
+
+                finalize_out = await finalize_subscription_batch(
+                    subscription_id,
+                    sync_run_id,
+                    max_retry_rounds=2,
+                )
+                run_items = list_sync_run_items(sync_run_id)
+                analyzed = sum(1 for it in run_items if it.get("analysis_status") in ("completed", "already_imported"))
+                failed = sum(1 for it in run_items if it.get("analysis_status") == "failed")
+                _log.info(
+                    "[%s|creator_sync_runner.run_sync|%s|Agent执行|批次收尾] ok=%s; analyzed=%s; failed=%s",
+                    _CHAIN,
+                    sync_run_id,
+                    finalize_out.get("ok"),
+                    analyzed,
+                    failed,
                 )
 
             newest_note = new_items[0] if new_items else (items[0] if items else None)
@@ -296,6 +430,8 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
                 "sync_run_id": sync_run_id,
                 "status": final_status,
                 "new_count": len(new_items),
+                "skipped_imported_count": len(skipped_imported),
+                "skipped_imported": skipped_imported,
                 "analyzed_count": analyzed,
                 "failed_count": failed,
                 "digest_id": (digest_record or {}).get("digest_id"),

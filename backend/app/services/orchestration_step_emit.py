@@ -273,6 +273,19 @@ def emit_orchestration_step(
         },
     )
 
+    invoke_extra: Dict[str, str] = {}
+    if phase == "rag_decision" and output_payload.get("needs_rag"):
+        from .tool_invoke_qualifier import INVOKE_FIXED, build_invoke_labels
+
+        invoke_extra = build_invoke_labels(
+            mode=INVOKE_FIXED,
+            tool_name="rag_retrieve",
+            action_label="知识库检索",
+            purpose="编排节点预取",
+            query=str(output_payload.get("rag_query") or ""),
+            phase=phase,
+        )
+
     t0 = time.perf_counter()
     runtime.emit(
         "thought_step_start",
@@ -291,6 +304,7 @@ def emit_orchestration_step(
             "target": (runtime.message or "")[:40],
             "phase": phase,
             "step_lane": "orchestration",
+            **invoke_extra,
         },
     )
     cost_ms = int((time.perf_counter() - t0) * 1000)
@@ -338,6 +352,7 @@ def emit_orchestration_step(
             "token_count": max(12, len(think_text) // 4),
             "llm_powered": llm_powered,
             "io_links": [],
+            **invoke_extra,
         },
     )
 

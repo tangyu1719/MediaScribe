@@ -1,14 +1,12 @@
-"""FastAPI 认证中间件：JWT 校验 + Casbin RBAC 鉴权。"""
+"""FastAPI 认证中间件：JWT 校验 + Casbin RBAC 鉴权（纯 ASGI，不缓冲 StreamingResponse）。"""
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
+from urllib.parse import parse_qs
 
-from fastapi import HTTPException, Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
-
-from .dependencies import decode_token, get_token_from_request
+from .dependencies import decode_token
 from .enforcer import enforce
 
 _log = logging.getLogger("sba.auth.middleware")
@@ -63,6 +61,7 @@ _SPA_PAGE_PATHS = (
     "/iag",
     "/subscribe",
     "/webreplay",
+    "/reader",
 )
 _WHITELIST_EXACT = frozenset({"/", "/login.html", *_SPA_PAGE_PATHS})
 
@@ -70,7 +69,6 @@ _WHITELIST_EXACT = frozenset({"/", "/login.html", *_SPA_PAGE_PATHS})
 def _is_whitelisted(path: str) -> bool:
     if path in _WHITELIST_EXACT:
         return True
-    # /output 挂载点：产物 MD/HTML 直链，任务卡片点击无需鉴权
     if path == "/output" or path.startswith("/output/"):
         return True
     for prefix in _WHITELIST_PREFIXES:
@@ -79,61 +77,102 @@ def _is_whitelisted(path: str) -> bool:
     return False
 
 
+def _path_bypasses_auth(path: str, method: str) -> bool:
+    m = method.upper()
+    if path.startswith("/api/output/file") and m in ("GET", "PUT", "POST"):
+        return True
+    if path.startswith("/api/reader/") and m in ("GET", "PUT", "POST"):
+        return True
+    if path.startswith("/api/fs/browse") and m == "GET":
+        return True
+    return False
+
+
 def _get_primary_role(payload: dict) -> str:
     roles = payload.get("roles", [])
     return roles[0] if roles else "viewer"
 
 
-def _get_token(request: Request) -> Optional[str]:
-    """从 Header 或 Query 参数中提取 Token（兼容 EventSource）。"""
-    token = get_token_from_request(request)
-    if token:
-        return token
-    # EventSource 不支持自定义 Header，走 Query 参数兜底
-    return request.query_params.get("sba_token")
+def _headers_dict(scope) -> dict[str, str]:
+    return {
+        k.decode("latin-1").lower(): v.decode("latin-1")
+        for k, v in (scope.get("headers") or [])
+    }
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+def _token_from_scope(scope) -> Optional[str]:
+    headers = _headers_dict(scope)
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    qs = (scope.get("query_string") or b"").decode("latin-1", errors="replace")
+    if qs:
+        params = parse_qs(qs, keep_blank_values=False)
+        rows = params.get("sba_token") or []
+        if rows and rows[0]:
+            return rows[0]
+    return None
 
-        if _is_whitelisted(path):
-            return await call_next(request)
 
-        # MD 预览：output 内正文/标记读写（侧车与 ST3 互通，路径校验在 service 层）
-        if path.startswith("/api/output/file") and request.method.upper() in ("GET", "PUT", "POST"):
-            return await call_next(request)
+async def _send_json(send, status: int, payload: dict) -> None:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body, "more_body": False})
 
-        token = _get_token(request)
+
+class AuthMiddleware:
+    """纯 ASGI 鉴权中间件，避免 BaseHTTPMiddleware 缓冲 SSE 流。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = (scope.get("method") or "GET").upper()
+
+        if _is_whitelisted(path) or _path_bypasses_auth(path, method):
+            await self.app(scope, receive, send)
+            return
+
+        token = _token_from_scope(scope)
         if not token:
-            return JSONResponse(
-                {"detail": "未登录，请先登录"}, status_code=401
-            )
+            await _send_json(send, 401, {"detail": "未登录，请先登录"})
+            return
 
         payload = decode_token(token)
         if not payload:
-            return JSONResponse(
-                {"detail": "登录已过期，请重新登录"}, status_code=401
-            )
+            await _send_json(send, 401, {"detail": "登录已过期，请重新登录"})
+            return
 
         role = _get_primary_role(payload)
-        method = request.method.upper()
-
         roles = payload.get("roles") or []
         if _is_admin_only_path(path) and "admin" not in roles:
-            return JSONResponse(
-                {"detail": "仅管理员可访问服务端内部 Agent 与网关配置"},
-                status_code=403,
-            )
+            await _send_json(send, 403, {"detail": "仅管理员可访问服务端内部 Agent 与网关配置"})
+            return
 
         if not enforce(role, path, method):
             _log.warning("权限拒绝 role=%s path=%s method=%s", role, path, method)
-            return JSONResponse(
+            await _send_json(
+                send,
+                403,
                 {"detail": f"权限不足：{role} 无权执行 {method} {path}"},
-                status_code=403,
             )
+            return
 
-        request.state.user_id = payload.get("sub")
-        request.state.user_roles = payload.get("roles", [])
-
-        return await call_next(request)
+        state = scope.setdefault("state", {})
+        state["user_id"] = payload.get("sub")
+        state["user_roles"] = roles
+        await self.app(scope, receive, send)

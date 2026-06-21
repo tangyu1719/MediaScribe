@@ -1,0 +1,39 @@
+---
+description: web_rebuild_v2 前端改动后必须跑 export 门禁并在浏览器验收，防止 Vue runtime-1 白屏
+globs: frontend/**/*
+alwaysApply: false
+---
+
+# 前端改动门禁（web_rebuild_v2）
+
+本仓库前端为 **index.html 内联模板 + app.js setup/return 手动导出**，无 TypeScript/vue-tsc。模板引用未写入 `return` 会在运行时直接白屏（`xxx is not a function` / `reading 'open'`）。
+
+## 每次修改 `frontend/` 后必须完成（不可跳过）
+
+1. **静态检查**
+   ```bash
+   cd frontend && npm run check
+   ```
+   - `node --check assets/js/app.js` 语法
+   - `scripts/check_vue_exports.mjs`：模板函数调用 + `xxx.open/show` 根对象必须在 `return` 导出
+   - `scripts/check_vue_reactive_props.mjs`：reactive 对象的一级字段须在 `reactive({...})` 中初始化
+
+2. **缓存版本**
+   - 改 `app.js` 时递增 `index.html` 中 `app.js?v=N`
+
+3. **浏览器验收（cursor-ide-browser）**
+   - 打开 `http://127.0.0.1:8000`（或当前后端端口），**登录**后验证：
+     - 首页 `#app` 已挂载（无「界面渲染异常 / Vue 未挂载」）
+     - 本次改动涉及的路由/弹窗可打开（如：历史记录、AI 问答、OPS SPAN）
+   - 控制台无 `[SBA]` runtime-1 报错
+   - 未跑浏览器验收不得向用户宣称「前端已修复」
+
+## 新增模板能力时
+
+- 在 `setup()` 定义 reactive/ref/函数后，**同步写入末尾 `return { ... }`**
+- 弹窗类对象须含 `open:false` 默认值，并在 `closeAllPageOverlays` / Esc 中处理
+
+## 禁止
+
+- 仅跑 `npm run check` 通过就结束，不做浏览器打开验证
+- 在模板新增 `foo()` / `bar.open` 却不 export

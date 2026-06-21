@@ -1,0 +1,11 @@
+{
+  "name": "superbizagent-web-frontend",
+  "private": true,
+  "description": "校验脚本；主 UI 仍为 index.html + app.js，由 FastAPI 静态托管",
+  "scripts": {
+    "check:js": "node --check assets/js/app.js",
+    "check:vue-exports": "node ../scripts/check_vue_exports.mjs",
+    "check:vue-reactive": "node ../scripts/check_vue_reactive_props.mjs",
+    "check": "npm run check:js && npm run check:vue-exports && npm run check:vue-reactive"
+  }
+}

@@ -43,11 +43,12 @@ if exist "%SBA_REDIS_DIR%\redis-cli.exe" (
     echo [警告] 未找到 %SBA_REDIS_DIR%\redis-cli.exe，跳过 Redis 自启
 )
 
-echo [2/4] 释放 8000 端口（结束占用中的旧 uvicorn）...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING"') do (
-    taskkill /F /PID %%a >nul 2>&1
+echo [2/4] 清理旧后端（uvicorn 主进程 + --reload 遗留 worker）...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\backend\stop_backend.ps1"
+if errorlevel 1 (
+    echo [警告] stop_backend.ps1 返回非零，继续尝试启动
 )
-timeout /t 2 /nobreak >nul
+timeout /t 1 /nobreak >nul
 
 echo [3/4] 选择 Python 环境...
 set "PYTHON=py -3"

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from .link_hash import normalize_link_for_hash, url_hash as link_url_hash, links_same_identity
+from .link_hash import normalize_link_for_hash, url_hash as link_url_hash, links_same_identity, extract_link_fields
 from .config import runtime_agent_dir
 
 _RUNTIME_AGENT_DIR = runtime_agent_dir()
@@ -306,23 +306,45 @@ def add_or_update_task_in_history(task_data: Dict[str, Any]):
 
 
 def get_task_history(link: str = None, url_hash: str = None) -> Optional[Dict]:
-    """获取特定链接的历史记录（按稳定内容 hash）。"""
+    """获取特定链接的历史记录（按稳定内容 hash；并支持标准字段的宽松匹配）。"""
     if _db_enabled():
         row = _db_store().get_by_link_or_hash(link=link or "", url_hash=url_hash or "")
         return normalize_history_task(row) if row else None
     h = _load_history()
     tasks = h.get("tasks", [])
     target_hash = (url_hash or "").strip() or (link_url_hash(link) if link else "")
+    target_fields = extract_link_fields(link or "") if link else {}
     best = None
     for t in tasks:
         tlink = t.get("link") or ""
         if target_hash and link_url_hash(tlink) == target_hash:
             if best is None or (t.get("updated_at") or "") >= (best.get("updated_at") or ""):
                 best = t
-        elif link and links_same_identity(tlink, link):
+            continue
+        if link and links_same_identity(tlink, link):
             if best is None or (t.get("updated_at") or "") >= (best.get("updated_at") or ""):
                 best = t
+            continue
+        if target_fields:
+            t_fields = extract_link_fields(tlink)
+            if any(str(t_fields.get(k) or "").strip() == str(v).strip() for k, v in target_fields.items() if v):
+                if best is None or (t.get("updated_at") or "") >= (best.get("updated_at") or ""):
+                    best = t
     return best
+
+
+def get_history_task_by_id(task_id: str) -> Optional[Dict]:
+    """按 task id 获取单条历史记录（MariaDB 或 history.json）。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return None
+    if _db_enabled():
+        row = _db_store().get_by_task_id(tid)
+        return normalize_history_task(dict(row)) if row else None
+    for t in _load_history().get("tasks", []):
+        if (t.get("id") or "") == tid:
+            return normalize_history_task(dict(t))
+    return None
 
 
 def consolidate_history_by_url_hash() -> int:

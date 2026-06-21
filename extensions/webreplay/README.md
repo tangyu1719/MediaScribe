@@ -33,13 +33,16 @@ Chrome → `chrome://extensions` → 开发者模式 → **加载已解压的扩
 
 ## 与 SuperBizAgent 前端集成
 
-登录 Web 后，侧栏底部 **「浏览器自动化」** 父菜单（独立于「设置」）提供：
+登录 Web 后，侧栏 **「浏览器自动化」** 提供：
 
 - **脚本库**：导入/导出/查看步骤（数据存服务端 `api/webreplay/*`）
+- **CDP 录制**：无需扩展，附着 `--remote-debugging-port` Chrome，DOM 点击录制 + 步进截图 + 2s 帧时间轴
 - **扩展连接**：保存扩展 ID 与 MCP 示例
 - **使用指南**：构建与加载说明
 
 访问路径：`http://127.0.0.1:8000/webreplay`
+
+重放方式：脚本库内 **CDP 重放**（`POST /api/webreplay/cdp/replay/{id}`）或 **扩展重放**（MCP `run_script`）。
 
 ## 使用
 

@@ -104,6 +104,11 @@ def resolve_chat_api_credentials(cfg: Dict[str, Any]) -> Dict[str, str]:
         or "https://ark.cn-beijing.volces.com/api/v3"
     ).strip()
     model = str(cfg.get("ai_chat_model") or "").strip()
+    route_map = cfg.get("gateway_task_type_route") or {}
+    if isinstance(route_map, dict):
+        qa_ep = str(route_map.get("qa") or route_map.get("chat") or "").strip()
+        if qa_ep:
+            model = qa_ep
     for node in cfg.get("api_gateway_nodes") or []:
         if not isinstance(node, dict):
             continue
@@ -342,22 +347,9 @@ def get_session_messages(sid) -> List[Dict]:
 
 
 def _slim_ui_message(m: Dict) -> Dict:
-    out = {
-        "role": m.get("role"),
-        "content": m.get("content"),
-        "thinking": m.get("thinking"),
-        "span": m.get("span"),
-        "task_id": m.get("task_id"),
-        "result_status": m.get("result_status"),
-        "thinkingExpanded": m.get("thinkingExpanded", False),
-    }
-    if m.get("task_audit"):
-        out["task_audit"] = m.get("task_audit")
-    if m.get("ephemeral"):
-        out["ephemeral"] = True
-    if m.get("task_kind"):
-        out["task_kind"] = m.get("task_kind")
-    return out
+    from .chat_context_memory import slim_message_for_storage
+
+    return slim_message_for_storage(m)
 
 
 def save_session_state(
@@ -378,27 +370,40 @@ def save_session_state(
     if status:
         _sessions[sid]["status"] = status
     slim_msgs = None
+    slim_ct = cur_task
+    slim_hist = main_task_history
+    from .chat_context_memory import (
+        guard_session_payload_for_persist,
+        slim_cur_task_for_storage,
+        slim_main_task_history_for_storage,
+    )
+
     if messages is not None:
-        slim_msgs = [
-            _slim_ui_message(m)
-            for m in messages
-            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-        ]
+        slim_msgs, slim_ct, slim_hist = guard_session_payload_for_persist(
+            messages, cur_task, main_task_history
+        )
         _messages[sid] = slim_msgs
-    hist = main_task_history if isinstance(main_task_history, list) else None
+    else:
+        if isinstance(cur_task, dict):
+            slim_ct = slim_cur_task_for_storage(cur_task)
+        if isinstance(main_task_history, list):
+            slim_hist = slim_main_task_history_for_storage(main_task_history)
+    hist = slim_hist if isinstance(slim_hist, list) else None
     msgs_for_hist = slim_msgs if slim_msgs is not None else _messages.get(sid, [])
     if isinstance(hist, list) and not hist and msgs_for_hist:
         try:
             from .chat_context_memory import rebuild_main_task_history_from_messages
 
-            hist = rebuild_main_task_history_from_messages(msgs_for_hist)
+            hist = slim_main_task_history_for_storage(
+                rebuild_main_task_history_from_messages(msgs_for_hist)
+            )
         except Exception:
             pass
     _store_persist(
         sid,
         _sessions[sid],
         msgs_for_hist,
-        cur_task=cur_task,
+        cur_task=slim_ct,
         main_task_history=hist,
         prefs=prefs,
         mark_dirty=True,
@@ -411,27 +416,19 @@ def export_session_markdown(sid: str) -> str:
 
 
 def _persist_ui_messages(session_id: str, ui_messages: List[Dict], cur_task: Optional[Dict] = None):
-    """将前端完整消息结构落盘（含 thinking/span）。"""
+    """落盘 UI 消息：仅 transcript + 步骤摘要（全量 IO 在 SPAN/Redis）。"""
     _bootstrap_sessions()
     if session_id not in _sessions:
         return
-    slim = []
-    for m in ui_messages:
-        if not isinstance(m, dict):
-            continue
-        slim.append({
-            "role": m.get("role"),
-            "content": m.get("content"),
-            "thinking": m.get("thinking"),
-            "span": m.get("span"),
-            "thinkingExpanded": m.get("thinkingExpanded", False),
-        })
+    from .chat_context_memory import guard_session_payload_for_persist
+
+    slim, slim_ct, _ = guard_session_payload_for_persist(ui_messages, cur_task, None)
     _messages[session_id] = [
         {"role": x["role"], "content": x.get("content") or ""}
         for x in slim
         if x.get("role") in ("user", "assistant")
     ]
-    _store_persist(session_id, _sessions[session_id], slim, cur_task=cur_task, mark_dirty=True)
+    _store_persist(session_id, _sessions[session_id], slim, cur_task=slim_ct, mark_dirty=True)
 
 
 def _sse(event: str, data: Dict) -> str:
@@ -885,16 +882,16 @@ async def _yield_react_reasoning_analysis(
     act_text = ""
     yield _sse("thought_step_start", {
         "trace_id": trace_id, "task_id": task_id,
-        "step_id": step_id, "step_name": "推理分析 / 工具调用规划",
+        "step_id": step_id, "step_name": "ReAct 推理",
         "step_type": "llm_call", "status": SUB_ACTING,
-        "status_text": "推理分析中…",
+        "status_text": "思考中…",
         "sub_plan_id": sub_plan_id, "sub_index": sub_index,
         "node_kind": "llm_call", "llm_powered": True,
         "step_lane": "execution", "phase": "react_round",
     })
     yield _sse("step_think_start", {
         "trace_id": trace_id, "task_id": task_id, "step_id": step_id,
-        "step_name": "推理分析 / 工具调用规划",
+        "step_name": "ReAct 推理",
         "sub_plan_id": sub_plan_id, "sub_index": sub_index,
         "llm_powered": True, "phase": "react_round",
     })
@@ -964,7 +961,7 @@ async def _yield_react_reasoning_analysis(
     yield _sse("thought_step_end", {
         "trace_id": trace_id, "task_id": task_id,
         "step_id": step_id,
-        "step_name": "推理分析 / 工具调用规划",
+        "step_name": "ReAct 推理",
         "status": SUB_DONE,
         "elapsed_ms": cost_ms,
         "status_text": "完成",
@@ -995,6 +992,14 @@ def _is_simple_intent(q: str) -> bool:
         _looks_like_task_status_inquiry,
     )
 
+    low = m.lower()
+    meta_self_hints = (
+        "你是谁", "你是什么", "你有什么能力", "你能做什么", "你可以做什么",
+        "介绍一下你自己", "介绍你自己", "你有什么本事",
+    )
+    if any(h in m or h in low for h in meta_self_hints):
+        return True
+
     # 续接/恢复/进度追问：不得在未判归属前标 simple（如「继续」「那你继续做啊」）
     if _looks_like_task_resume(m) or _looks_like_task_status_inquiry(m):
         return False
@@ -1005,7 +1010,6 @@ def _is_simple_intent(q: str) -> bool:
 
     if _has_link_analysis_intent(m) or _looks_like_task_recall(m):
         return False
-    low = m.lower()
     simple_hints = (
         "你好", "您好", "嗨", "hello", "hi", "hey",
         "你是谁", "你是什么", "什么模型", "哪个模型", "谁开发", "谁做的",
@@ -1017,8 +1021,8 @@ def _is_simple_intent(q: str) -> bool:
     )
     if len(m) <= 56 and any(h in m or h in low for h in simple_hints):
         return True
-    # 短追问（含「现在呢」「好了吗」）不得判 simple，须结合主任务续接
-    if any(h in m for h in ("呢", "吗", "么", "咋", "如何", "怎么", "怎样")):
+    # 短追问（含「现在呢」「好了吗」）不得判 simple；「什么」中的「么」不算追问
+    if re.search(r"(吗|呢|咋|如何|怎么|怎样)", m):
         return False
     if "?" in m or "？" in m:
         if len(m) <= 32:
@@ -1102,7 +1106,7 @@ def _filter_rag_tools_when_prefetched(
     rag_prefetch_done: bool,
     rag_slice_count: int,
 ) -> tuple[List[Any], Dict[str, Any]]:
-    """编排段已 RAG 预取时，执行段不再暴露检索类工具，避免重复 rag_search。"""
+    """编排/预取已命中切片时，执行段不再暴露检索类工具，避免重复 rag_search。"""
     if not rag_prefetch_done or rag_slice_count <= 0:
         return tools, meta
     kept = [
@@ -1283,6 +1287,14 @@ async def chat_stream_v2(
                 client_main_task_history=client_main_task_history,
                 memory_prepared=memory_prepared,
                 orch_pipeline_nodes=orch_pipeline_nodes,
+                _precomputed={
+                    "cfg": cfg,
+                    "provider": provider,
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "model_resolved": model_resolved,
+                    "system_prompt": system_prompt,
+                },
             ):
                 yield _lg_ev
             return
@@ -1931,7 +1943,11 @@ async def chat_stream_v2(
             "bundle": {
                 "task_kind": intent_task_kind,
                 "use_main_task": use_main_task,
-                "needs_rag": bool(rag_prefetch and use_main_task),
+                "needs_rag": bool(
+                    rag_prefetch
+                    and use_main_task
+                    and bool((intent_rewrite_snapshot or {}).get("needs_rag"))
+                ),
                 "react_memory": react_memory,
                 "framework": framework,
             },
@@ -2014,14 +2030,17 @@ async def chat_stream_v2(
             sub_plan_id=rag_sub_plan_id,
             phase="rag",
         )
-        yield _sse("thought_step_start", {
+        from .tool_invoke_qualifier import INVOKE_FIXED, attach_invoke_to_payload
+
+        yield _sse("thought_step_start", attach_invoke_to_payload({
             "trace_id": trace_id, "task_id": task_id, "step_id": rag_handle.step_id,
             "step_name": "RAG 检索", "step_type": "tool_call", "status": "running", "status_text": "执行中…",
             "input_text": json.dumps({"query": rag_query}, ensure_ascii=False),
             "operation": "RAG 检索", "target": rag_query[:80], "node_kind": "tool_call",
             "sub_plan_id": rag_sub_plan_id, "sub_index": rag_sub_index,
             "step_lane": "prefetch", "phase": "rag",
-        })
+        }, mode=INVOKE_FIXED, tool_name="rag_retrieve", action_label="知识库检索",
+           purpose="执行段预取", query=rag_query))
         rag_err: Optional[str] = None
         rag_hits: List[Any] = []
         try:
@@ -2056,7 +2075,7 @@ async def chat_stream_v2(
         rag_cost_ms = int(rag_payload.get("cost_ms") or 0)
         rag_output_text = dumps_step_output(rag_payload)
         rag_brief = brief_from_payload(rag_payload)
-        yield _sse("thought_step_end", {
+        yield _sse("thought_step_end", attach_invoke_to_payload({
             "trace_id": trace_id, "task_id": task_id, "step_id": rag_handle.step_id,
             "step_name": "RAG 检索", "status": "completed" if not rag_err else "failed",
             "elapsed_ms": rag_cost_ms, "status_text": "完成" if not rag_err else "失败",
@@ -2067,7 +2086,8 @@ async def chat_stream_v2(
             "token_count": max(12, len(rag_output_text) // 4),
             "sub_plan_id": rag_sub_plan_id, "sub_index": rag_sub_index, "node_kind": "tool_call",
             "step_lane": "prefetch",
-        })
+        }, mode=INVOKE_FIXED, tool_name="rag_retrieve", action_label="知识库检索",
+           purpose="执行段预取", query=rag_query))
         yield _sse("span_update", {
             "task_id": task_id, "step_id": rag_handle.step_id, "step_name": "RAG 检索",
             "elapsed_ms": rag_cost_ms, "status": "completed" if not rag_err else "failed",
@@ -2164,14 +2184,17 @@ async def chat_stream_v2(
                 phase="web",
             )
             web_target = (web_search_queries[0] if web_search_queries else rewritten_q)[:80]
-            yield _sse("thought_step_start", {
+            from .tool_invoke_qualifier import INVOKE_FIXED, attach_invoke_to_payload
+
+            yield _sse("thought_step_start", attach_invoke_to_payload({
                 "trace_id": trace_id, "task_id": task_id, "step_id": web_handle.step_id,
                 "step_name": "调用 web_search", "step_type": "tool_call", "status": "running", "status_text": "执行中…",
                 "input_text": json.dumps(web_input_doc, ensure_ascii=False),
                 "operation": "联网搜索", "target": web_target, "node_kind": "tool_call",
                 "sub_plan_id": web_sub_plan_id, "sub_index": web_sub_index,
                 "step_lane": "prefetch", "phase": "web",
-            })
+            }, mode=INVOKE_FIXED, tool_name="web_search", action_label="联网搜索",
+               purpose="执行段预取", query=web_target))
             try:
                 web_block = await asyncio.get_running_loop().run_in_executor(
                     _executor,
@@ -2212,7 +2235,7 @@ async def chat_stream_v2(
             web_output_text = dumps_step_output(web_payload)
             web_brief = brief_from_payload(web_payload)
             yield _sse("thinking_delta", {"trace_id": trace_id, "task_id": task_id, "step_id": web_handle.step_id, "content": "联网搜索结果已返回…"})
-            yield _sse("thought_step_end", {
+            yield _sse("thought_step_end", attach_invoke_to_payload({
                 "trace_id": trace_id, "task_id": task_id, "step_id": web_handle.step_id,
                 "step_name": "调用 web_search", "status": "completed", "elapsed_ms": web_cost_ms, "status_text": "完成",
                 "timestamp": datetime.now().strftime("%H:%M:%S"), "description": web_brief, "result_brief": web_brief,
@@ -2221,7 +2244,8 @@ async def chat_stream_v2(
                 "token_count": max(12, len(web_output_text) // 4),
                 "sub_plan_id": web_sub_plan_id, "sub_index": web_sub_index, "node_kind": "tool_call",
                 "step_lane": "prefetch",
-            })
+            }, mode=INVOKE_FIXED, tool_name="web_search", action_label="联网搜索",
+               purpose="执行段预取", query=web_target))
             yield _sse("span_update", {
                 "task_id": task_id, "step_id": web_handle.step_id, "step_name": "联网搜索",
                 "elapsed_ms": web_cost_ms, "status": "completed",
@@ -2545,6 +2569,7 @@ async def chat_stream_v2(
                 distinct_fail_limit = max(1, int(cfg.get("chat_distinct_tool_fail_limit", 3) or 3))
                 tool_round = 0
                 react_round_idx = 0
+                react_tools_seen: set[str] = set()
                 failed_tool_names: set[str] = set()
                 pipeline_poll_sec = float(cfg.get("chat_pipeline_poll_sec") or 4.0)
                 pipeline_wait_sec = float(cfg.get("chat_pipeline_wait_sec") or 0) or max(
@@ -2624,6 +2649,19 @@ async def chat_stream_v2(
                             react_round_idx += 1
                             tool_sub_plan_id, tool_sub_index = _alloc_step_group()
                             react_step_id = _new_id("step_")
+                            yield _sse(
+                                "execution_round_start",
+                                {
+                                    "trace_id": trace_id,
+                                    "task_id": task_id,
+                                    "sub_plan_id": tool_sub_plan_id,
+                                    "sub_index": tool_sub_index,
+                                    "react_round": react_round_idx,
+                                    "tool_name": fn,
+                                    "phase": "react_round",
+                                    "step_lane": "execution",
+                                },
+                            )
                             async for _react_ev in _yield_react_reasoning_analysis(
                                 trace_id=trace_id,
                                 task_id=str(task_id or ""),
@@ -2658,9 +2696,23 @@ async def chat_stream_v2(
                                 else None
                             )
                             step_id_tool = span_handle.step_id if span_handle else _new_id("step_")
+                            from .tool_invoke_qualifier import (
+                                attach_invoke_to_payload,
+                                resolve_react_invoke_mode,
+                            )
+
                             tool_call_label = f"调用 {fn}"
-                            yield _sse(
-                                "thought_step_start",
+                            _tool_query_hint = str(
+                                args.get("query") or args.get("q") or ""
+                            ).strip()
+                            _react_invoke_mode = resolve_react_invoke_mode(
+                                tool_name=fn,
+                                rag_prefetch_done=_rag_prefetch_done_flag,
+                                rag_slice_count=_rag_slice_count,
+                                react_round=react_round_idx,
+                                seen_tools=react_tools_seen,
+                            )
+                            _tool_invoke = attach_invoke_to_payload(
                                 {
                                     "trace_id": trace_id,
                                     "task_id": task_id,
@@ -2684,7 +2736,11 @@ async def chat_stream_v2(
                                     "phase": "tool",
                                     "step_lane": "execution",
                                 },
+                                mode=_react_invoke_mode,
+                                tool_name=fn,
+                                query=_tool_query_hint,
                             )
+                            yield _sse("thought_step_start", _tool_invoke)
                             tool_obj = by_name.get(fn)
                             tool_err: Optional[str] = None
                             raw_out: Any = None
@@ -2808,6 +2864,13 @@ async def chat_stream_v2(
                                     break
                             if tool_err is None and isinstance(raw_out, dict) and raw_out.get("error"):
                                 tool_err = str(raw_out.get("error"))
+                            if not tool_err and fn and not str(fn).startswith("skill_"):
+                                try:
+                                    from .board_usage_stats import record_tool_usage_by_name
+
+                                    record_tool_usage_by_name(str(fn), event="invoke")
+                                except Exception:
+                                    pass
                             if fn.startswith("skill_") and _skill_result_is_doc_only(raw_out):
                                 tool_err = (
                                     "SKILL 仅返回说明文档，未实际执行；"
@@ -2931,35 +2994,41 @@ async def chat_stream_v2(
                             )
                             yield _sse(
                                 "thought_step_end",
-                                {
-                                    "trace_id": trace_id,
-                                    "task_id": task_id,
-                                    "step_id": step_id_tool,
-                                    "step_name": tool_call_label,
-                                    "status": "completed" if not tool_err else "failed",
-                                    "elapsed_ms": cost_tool,
-                                    "status_text": "完成" if not tool_err else "失败",
-                                    "timestamp": datetime.now().strftime("%H:%M:%S"),
-                                    "description": tool_brief,
-                                    "result_brief": tool_brief,
-                                    "input_text": json.dumps(
-                                        {
-                                            "schema_version": 1,
-                                            "tool_call": True,
-                                            "tool_name": fn,
-                                            "tool_args": args,
-                                        },
-                                        ensure_ascii=False,
-                                    )[:4000],
-                                    "output_text": out_s,
-                                    "phase": "tool",
-                                    "success": not tool_err,
-                                    "sub_plan_id": tool_sub_plan_id,
-                                    "sub_index": tool_sub_index,
-                                    "node_kind": "tool_call",
-                                    "step_lane": "execution",
-                                },
+                                attach_invoke_to_payload(
+                                    {
+                                        "trace_id": trace_id,
+                                        "task_id": task_id,
+                                        "step_id": step_id_tool,
+                                        "step_name": tool_call_label,
+                                        "status": "completed" if not tool_err else "failed",
+                                        "elapsed_ms": cost_tool,
+                                        "status_text": "完成" if not tool_err else "失败",
+                                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                        "description": tool_brief,
+                                        "result_brief": tool_brief,
+                                        "input_text": json.dumps(
+                                            {
+                                                "schema_version": 1,
+                                                "tool_call": True,
+                                                "tool_name": fn,
+                                                "tool_args": args,
+                                            },
+                                            ensure_ascii=False,
+                                        )[:4000],
+                                        "output_text": out_s,
+                                        "phase": "tool",
+                                        "success": not tool_err,
+                                        "sub_plan_id": tool_sub_plan_id,
+                                        "sub_index": tool_sub_index,
+                                        "node_kind": "tool_call",
+                                        "step_lane": "execution",
+                                    },
+                                    mode=_react_invoke_mode,
+                                    tool_name=fn,
+                                    query=_tool_query_hint,
+                                ),
                             )
+                            react_tools_seen.add(fn)
                             yield _sse(
                                 "span_update",
                                 {

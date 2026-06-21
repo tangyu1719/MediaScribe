@@ -54,16 +54,24 @@ CDP_PORTS = tuple(
 )
 
 
+def _xhs_cdp_attach_only() -> bool:
+    v = (_os.environ.get("SBA_XHS_CDP_ATTACH_ONLY") or "1").strip().lower()
+    return v not in ("0", "false", "no")
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Chrome CDP 启动
 # ═══════════════════════════════════════════════════════════════════
 
 def _kill_chrome():
-    """强制关闭所有 Chrome 进程。"""
+    """仅关闭 CDP 模式 Chrome 进程（含 --remote-debugging-port），保护日常 Chrome。"""
     try:
         subprocess.run(
-            ["taskkill", "/F", "/IM", "chrome.exe"],
-            capture_output=True, timeout=10,
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'remote-debugging-port' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+            capture_output=True, timeout=15,
         )
         time.sleep(2)
     except Exception:
@@ -81,20 +89,27 @@ def _remove_locks():
 
 
 def _start_chrome_cdp() -> bool:
-    """启动 Chrome 并开启 CDP 监听（使用 PowerShell 确保稳定启动）。"""
+    """启动 Chrome 并开启 CDP 监听（方案 A 默认禁用，不杀用户 Chrome）。"""
+    if _xhs_cdp_attach_only():
+        _log.warning(
+            "[社媒订阅-Cookie|cookie_manager._start_chrome_cdp|Chrome|硬编执行|拒绝] attach-only 禁止 taskkill 重启 Chrome"
+        )
+        return False
     _kill_chrome()
     time.sleep(2)
     _remove_locks()
 
-    profile = Path(_os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data"
+    from .chrome_profile_prep import bootstrap_cdp_profile_from_owner, cdp_chrome_user_data_dir
+
+    bootstrap_cdp_profile_from_owner()
+    cdp_ud = str(cdp_chrome_user_data_dir()).replace("\\", "\\\\")
 
     ps_script = f"""
 Stop-Process -Name chrome -Force -ErrorAction SilentlyContinue
 Start-Sleep 3
-Remove-Item '{profile}\\SingletonLock' -Force -ErrorAction SilentlyContinue
-Remove-Item '{profile}\\SingletonCookie' -Force -ErrorAction SilentlyContinue
-Remove-Item '{profile}\\SingletonSocket' -Force -ErrorAction SilentlyContinue
-$p = Start-Process 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' -ArgumentList '--remote-debugging-port={CDP_PORT}', ('--user-data-dir={profile}'), '--profile-directory=Default', '--remote-allow-origins=*' -PassThru
+$cdpUd = '{cdp_ud}'
+New-Item -ItemType Directory -Force -Path $cdpUd | Out-Null
+$p = Start-Process 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' -ArgumentList '--remote-debugging-port={CDP_PORT}', ('--user-data-dir=' + $cdpUd), '--profile-directory=Default', '--remote-allow-origins=*' -PassThru
 Start-Sleep 10
 if ($p.HasExited) {{ Write-Output ('EXITED:' + $p.ExitCode) }} else {{ Write-Output ('PID:' + $p.Id) }}
 """
@@ -159,11 +174,93 @@ def _cdp_port_ready(port: int) -> bool:
         return False
 
 
+def _desktop_chrome_shortcut_path() -> Optional[Path]:
+    p = Path(_os.environ.get("USERPROFILE", "")) / "Desktop" / "Google Chrome.lnk"
+    return p if p.is_file() else None
+
+
+def read_desktop_chrome_cdp_port() -> Optional[int]:
+    """读取用户桌面 Chrome 快捷方式里的 CDP 端口（与用户日常浏览器一致）。"""
+    lnk = _desktop_chrome_shortcut_path()
+    if not lnk:
+        return None
+    try:
+        import win32com.client  # type: ignore
+
+        sh = win32com.client.Dispatch("WScript.Shell")
+        sc = sh.CreateShortcut(str(lnk))
+        args = str(sc.Arguments or "")
+        m = re.search(r"remote-debugging-port=(\d+)", args, re.I)
+        return int(m.group(1)) if m else None
+    except Exception:
+        pass
+    try:
+        args = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('"
+                    + str(lnk).replace("'", "''")
+                    + "'); $s.Arguments"
+                ),
+            ],
+            text=True,
+            timeout=8,
+        ).strip()
+        m = re.search(r"remote-debugging-port=(\d+)", args, re.I)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def find_cdp_port_from_running_chrome() -> Optional[int]:
+    """从正在运行的 chrome.exe 命令行解析 --remote-debugging-port。"""
+    try:
+        out = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" "
+                "| ForEach-Object { $_.CommandLine }",
+            ],
+            text=True,
+            timeout=12,
+            stderr=subprocess.DEVNULL,
+        )
+        seen: list[int] = []
+        for m in re.finditer(r"remote-debugging-port=(\d+)", out or "", re.I):
+            p = int(m.group(1))
+            if p not in seen:
+                seen.append(p)
+        for p in seen:
+            if _cdp_port_ready(p):
+                _log.info(
+                    "[社媒订阅-Cookie|cookie_manager.find_cdp_port_from_running_chrome|Chrome|硬编执行|发现] port=%s",
+                    p,
+                )
+                return p
+    except Exception as ex:
+        _log.debug("find_cdp_port_from_running_chrome skip: %s", ex)
+    return None
+
+
 def find_cdp_port() -> Optional[int]:
-    """返回首个可用的 Chrome CDP 端口。"""
-    for port in CDP_PORTS:
+    """返回首个可用的 Chrome CDP 端口（快捷方式 → 进程命令行 → 默认端口列表）。"""
+    prefer = read_desktop_chrome_cdp_port()
+    ports = list(CDP_PORTS)
+    if prefer and prefer not in ports:
+        ports.insert(0, prefer)
+    elif prefer:
+        ports = [prefer] + [p for p in ports if p != prefer]
+    for port in ports:
         if _cdp_port_ready(port):
             return port
+    proc_port = find_cdp_port_from_running_chrome()
+    if proc_port:
+        return proc_port
     return None
 
 
@@ -188,12 +285,26 @@ def _extract_cookies_for_platform(platform: str, navigate: bool = True, *, port:
     domain_key = PLATFORM_DOMAINS[platform][0].lstrip(".")
     for t in tabs:
         url = t.get("url", "")
-        if domain_key in url and "/login" not in url:
-            ws_url = t["webSocketDebuggerUrl"]
-            _log.info("复用现有 tab: %s", url[:80])
-            break
+        if domain_key not in url or "/login" in url:
+            continue
+        if "web-static" in url or url.rstrip("/").endswith("sw.js"):
+            continue
+        # 跳过无 uid 的 /user/profile（会 404，且会被误当作「已登录 tab」反复复用）
+        if re.search(r"/user/profile/?(\?|$)", url, re.I) and not re.search(
+            r"/user/profile/[a-f0-9]{24}", url, re.I
+        ):
+            continue
+        ws_url = t["webSocketDebuggerUrl"]
+        _log.info("复用现有 tab: %s", url[:80])
+        break
 
     if not ws_url and navigate:
+        if platform == "xiaohongshu" and _xhs_cdp_attach_only():
+            _log.warning(
+                "[社媒订阅-Cookie|cookie_manager._extract_cookies_for_platform|xiaohongshu|硬编执行|拒绝] "
+                "方案A不通过 CDP 新开 tab；请在 Chrome 打开小红书页面"
+            )
+            return {}
         open_url = PLATFORM_EXTRACT_URLS.get(
             platform,
             PLATFORM_LOGIN_URLS.get(platform, f"https://www.{domain_key}"),
@@ -327,6 +438,64 @@ def probe_xhs_cookies_logged_in(cookies: Dict[str, str]) -> Dict[str, Any]:
         return {"ok": False, "logged_in": False, "guest": True, "error": str(ex)}
 
 
+def diagnose_xhs_cookies() -> Dict[str, Any]:
+    """诊断磁盘/Chrome Cookie 是否为登录态（区分访客 guest）。"""
+    from .chrome_profile_prep import (
+        chrome_cdp_blocked_by_default_user_data,
+        cdp_chrome_user_data_dir,
+    )
+    from .xhs_local_browser import _browser_config_chrome, _browser_running, is_browser_google_signed_in
+
+    file_ck = load_cookies("xiaohongshu") or {}
+    file_probe = probe_xhs_cookies_logged_in(file_ck) if file_ck else {"logged_in": False, "guest": True}
+    port = find_cdp_port()
+    cfg = _browser_config_chrome()
+    chrome_running = _browser_running(cfg)
+    chrome_signed = is_browser_google_signed_in(cfg) if chrome_running else False
+    cdp_blocked = chrome_cdp_blocked_by_default_user_data()
+    hint = ""
+    action = ""
+    if cdp_blocked:
+        hint = (
+            "Chrome 149 已禁止在「默认 User Data」目录开启 CDP（9223 参数会被静默忽略）。"
+            f"请完全退出 Chrome 后，双击桌面「Google Chrome CDP 9223」快捷方式"
+            f"（使用独立目录 {cdp_chrome_user_data_dir()}），再点「从 Chrome 同步 Cookie」。"
+        )
+        action = "use_cdp_profile_shortcut"
+    elif file_probe.get("guest") and file_ck and chrome_running and chrome_signed and not port:
+        hint = (
+            "Chrome 里已登录，但 CDP 未就绪。请用桌面「Google Chrome CDP 9223」快捷方式启动"
+            f"（目录 {cdp_chrome_user_data_dir()}，非默认 User Data），然后点「从 Chrome 同步 Cookie」。"
+        )
+        action = "enable_cdp_and_sync"
+    elif file_probe.get("guest") and file_ck:
+        hint = (
+            "磁盘 Cookie 为访客态（有 web_session 但未登录）。"
+            "公开笔记评论有时仍能读 DOM，但 UP/收藏订阅必须同步真实登录 Cookie。"
+        )
+        action = "login_and_sync"
+    elif not file_probe.get("logged_in") and not file_ck:
+        hint = "无 Cookie 文件。请在本机 Chrome 登录小红书，或点「从 Chrome 同步 Cookie」。"
+        action = "login_and_sync"
+    elif port and file_probe.get("guest"):
+        hint = "CDP 已就绪，请点击「从 Chrome 同步 Cookie」把浏览器登录态写入后端。"
+        action = "sync_cookies"
+    return {
+        "file_count": len(file_ck),
+        "logged_in": bool(file_probe.get("logged_in")),
+        "guest": bool(file_probe.get("guest")),
+        "nickname": file_probe.get("nickname") or "",
+        "user_id": file_probe.get("user_id") or "",
+        "cdp_port": port,
+        "chrome_running": chrome_running,
+        "chrome_signed_in": chrome_signed,
+        "cdp_blocked_default_profile": cdp_blocked,
+        "cdp_user_data_dir": str(cdp_chrome_user_data_dir()),
+        "hint": hint,
+        "action": action,
+    }
+
+
 def save_cookies_if_better(
     platform: str, cookies: Dict[str, str], *, owner_nickname: str = ""
 ) -> Dict[str, str]:
@@ -337,8 +506,8 @@ def save_cookies_if_better(
         return cookies
     probe = probe_xhs_cookies_logged_in(cookies)
     nick = str(probe.get("nickname") or "")
-    owner_needle = (owner_nickname or os.environ.get("SBA_XHS_OWNER_NICKNAME") or "").strip()
-    if probe.get("logged_in") and owner_needle:
+    owner_needle = (owner_nickname or _os.environ.get("SBA_XHS_OWNER_NICKNAME") or "").strip()
+    if probe.get("logged_in") and owner_needle and nick:
         compact_nick = re.sub(r"[、·\s]", "", nick)
         compact_needle = re.sub(r"[、·\s]", "", owner_needle)
         if compact_needle and compact_needle not in compact_nick and owner_needle not in nick:

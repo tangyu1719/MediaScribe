@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -124,6 +125,89 @@ def ops_dispatch_log_incident(msg: str, level: str, *, task_id: Optional[str] = 
         except Exception as exc:
             _log.warning(
                 "[OPS运维-日志事件|ops_hooks.ops_dispatch_log_incident|log|Agent执行|失败] "
+                "上报失败; error_type=%s; error_message=%s",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+
+    _run_async(_worker)
+
+
+def ops_dispatch_span_failure(step: Dict[str, Any]) -> None:
+    """SPAN 步骤 failed/timeout 时自动触发运维 Agent 分析（去重冷却）。"""
+    if not step or step.get("status") not in ("failed", "timeout"):
+        return
+    if os.environ.get("OPS_LOG_INCIDENT_DISABLE", "").strip().lower() in ("1", "true", "yes"):
+        return
+    sid = str(step.get("step_id") or "")
+    tid = str(step.get("task_id") or "")
+    fp = _fingerprint("span_fail", f"{tid}:{sid}:{step.get('error_message') or step.get('status')}")
+    if not _incident_allow(fp):
+        return
+
+    def _worker() -> None:
+        try:
+            from .ops import ops_monitor_task
+
+            link = ""
+            try:
+                from .task_manager import get_task
+
+                mem = get_task(tid) or {}
+                link = str(mem.get("link") or "")
+            except Exception:
+                pass
+            if not link:
+                try:
+                    from .span_audit import get_task as _span_get
+
+                    st = _span_get(tid) or {}
+                    link = str(st.get("user_query") or "")
+                except Exception:
+                    pass
+            logs = _collect_logs(tid, max_lines=160)
+            logs.insert(
+                0,
+                f"[SPAN] {step.get('step_name')} ({step.get('step_type')}) "
+                f"status={step.get('status')} step_id={sid}",
+            )
+            inp = step.get("input_payload")
+            out = step.get("output_payload")
+            try:
+                logs.append("input_payload=" + json.dumps(inp, ensure_ascii=False)[:4000])
+            except Exception:
+                logs.append("input_payload=" + str(inp)[:4000])
+            try:
+                logs.append("output_payload=" + json.dumps(out, ensure_ascii=False)[:4000])
+            except Exception:
+                logs.append("output_payload=" + str(out)[:4000])
+            err = {
+                "type": str(step.get("step_type") or "SpanFailure"),
+                "message": str(
+                    step.get("error_message") or step.get("stop_reason") or step.get("status") or ""
+                )[:4000],
+                "step_id": sid,
+                "step_name": step.get("step_name"),
+                "task_id": tid,
+            }
+            res = ops_monitor_task(
+                link=link or "_span_failure_",
+                task_id=tid or f"span_{fp[:10]}",
+                status="failed",
+                logs=logs,
+                error_info=err,
+            )
+            if res.get("ok"):
+                _log.info(
+                    "[OPS运维-SPAN失败|ops_hooks.ops_dispatch_span_failure|span_step|Agent执行|完成] "
+                    "已触发运维分析; task_id=%s; step_id=%s; report=%s",
+                    tid,
+                    sid,
+                    str(res.get("report_path") or "")[-80:],
+                )
+        except Exception as exc:
+            _log.warning(
+                "[OPS运维-SPAN失败|ops_hooks.ops_dispatch_span_failure|span_step|Agent执行|失败] "
                 "上报失败; error_type=%s; error_message=%s",
                 type(exc).__name__,
                 str(exc)[:200],

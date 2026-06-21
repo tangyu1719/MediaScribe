@@ -24,6 +24,18 @@ MEMORY_MODE_SUMMARY = "summary"
 KEEP_RECENT_MESSAGES = 8
 MIN_MESSAGES_TO_COMPRESS = 12
 MAX_FOLD_CHARS = 14_000
+# 落盘与运行时 guard（UI thinking/span 不计入 LLM，但会撑爆 JSON 与 event loop）
+MAX_PERSISTED_MESSAGES = 40
+MAX_MAIN_TASK_HISTORY_STORED = 32
+SESSION_DOC_SOFT_BYTES = 450_000
+MAX_STORED_CONTENT_CHARS = 12_000
+MAX_STORED_STEP_BRIEF_CHARS = 280
+MAX_STORED_RESULT_MSG_CHARS = 6000
+MAX_STORED_THINK_DESC_CHARS = 240
+# 编排 IO / SPAN 详情走 Redis·SPAN 任务链，禁止写入会话 JSON
+_SPAN_STORAGE_KEYS = frozenset({
+    "task_id", "trace_id", "task_kind", "ephemeral", "persist_main_task", "status",
+})
 
 _NEW_TASK_HINTS = (
     "新任务", "新问题", "换个问题", "另外", "重新开", "不要继续", "另起", "开新",
@@ -82,19 +94,265 @@ def memory_prefs_from_doc(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _json_size(obj: Any) -> int:
+    try:
+        return len(json.dumps(obj, ensure_ascii=False))
+    except Exception:
+        return len(str(obj))
+
+
 def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """估算 messages 占用（含 thinking/span，与落盘体积一致）。"""
     chars = 0
     for m in messages or []:
         if not isinstance(m, dict):
             continue
-        chars += len(str(m.get("content") or ""))
-        thinking = m.get("thinking") or []
-        if isinstance(thinking, list):
-            for t in thinking:
-                if isinstance(t, dict):
-                    chars += len(str(t.get("description") or "")) + len(str(t.get("output_text") or ""))
-    summary = ""
+        chars += _json_size(m)
     return max(1, chars // 2)
+
+
+def estimate_session_doc_tokens(doc: Optional[Dict[str, Any]]) -> int:
+    """整份会话文档 token 粗估（用于压缩阈值，避免只算 content 导致永不压缩）。"""
+    if not doc:
+        return 1
+    parts = [
+        doc.get("messages") or [],
+        doc.get("cur_task") or {},
+        doc.get("main_task_history") or [],
+        (doc.get("memory_meta") or {}).get("summary_text") or "",
+    ]
+    chars = sum(_json_size(p) for p in parts)
+    return max(1, chars // 2)
+
+
+async def load_session_document_async(session_id: str) -> Dict[str, Any]:
+    """大 JSON 读盘走线程池，避免阻塞 event loop。"""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {}
+    raw = await asyncio.to_thread(get_session_document, sid)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def slim_thinking_step_for_storage(step: Any) -> Dict[str, Any]:
+    """用户视角落盘：做了啥(what) + 结果(result)；状态类字段由 UI 实时展示，不入 session。"""
+    if not isinstance(step, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    if step.get("step_id"):
+        out["step_id"] = step.get("step_id")
+    kind = step.get("kind")
+    if not kind and step.get("node_kind") == "tool_call":
+        kind = "tool"
+    if kind:
+        out["kind"] = kind
+    what = str(step.get("what") or step.get("step_name") or step.get("operation") or "").strip()
+    result = str(step.get("result") or step.get("result_brief") or step.get("description") or "").strip()
+    if what:
+        out["what"] = what[:MAX_STORED_STEP_BRIEF_CHARS]
+    if result:
+        out["result"] = result[:MAX_STORED_RESULT_MSG_CHARS]
+    return out
+
+
+def slim_span_for_storage(span: Any) -> Dict[str, Any]:
+    if not isinstance(span, dict) or not span:
+        return {}
+    return {k: span.get(k) for k in _SPAN_STORAGE_KEYS if span.get(k) is not None}
+
+
+def slim_message_for_storage(msg: Any) -> Dict[str, Any]:
+    """
+    会话 JSON 只保留 UI 可渲染的摘要 + 正文；完整工具 IO / ReAct 链在 SPAN·Redis。
+    """
+    if not isinstance(msg, dict):
+        return {}
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+        return {}
+    content = str(msg.get("content") or "")
+    if len(content) > MAX_STORED_CONTENT_CHARS:
+        content = content[: MAX_STORED_CONTENT_CHARS - 20] + "\n\n…（正文已截断）"
+    thinking_raw = msg.get("thinking") or []
+    thinking: List[Dict[str, Any]] = []
+    if isinstance(thinking_raw, list):
+        thinking = [slim_thinking_step_for_storage(t) for t in thinking_raw if isinstance(t, dict)]
+        thinking = [t for t in thinking if t]
+    out: Dict[str, Any] = {
+        "role": role,
+        "content": content,
+        "thinking": thinking or None,
+        "span": slim_span_for_storage(msg.get("span")),
+        "task_id": msg.get("task_id"),
+        "result_status": msg.get("result_status"),
+        "thinkingExpanded": bool(msg.get("thinkingExpanded", False)),
+    }
+    if msg.get("task_audit"):
+        ta = msg.get("task_audit")
+        if isinstance(ta, dict):
+            out["task_audit"] = {
+                k: ta.get(k)
+                for k in ("task_id", "task_kind", "status", "ephemeral", "user_query", "query_summary")
+                if ta.get(k) is not None
+            }
+    if msg.get("ephemeral"):
+        out["ephemeral"] = True
+    if msg.get("task_kind"):
+        out["task_kind"] = msg.get("task_kind")
+    return out
+
+
+def slim_cur_task_for_storage(cur_task: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(cur_task, dict) or not cur_task:
+        return None
+    steps_in = cur_task.get("steps") or []
+    steps: List[Dict[str, Any]] = []
+    if isinstance(steps_in, list):
+        for s in steps_in[-16:]:
+            if isinstance(s, dict):
+                steps.append(slim_thinking_step_for_storage(s))
+    out = {
+        k: cur_task.get(k)
+        for k in (
+            "task_id", "user_query", "query_summary", "status", "task_kind",
+            "sub_plan_id", "group_seq",
+        )
+        if cur_task.get(k) is not None
+    }
+    if steps:
+        out["steps"] = steps
+    return out
+
+
+def slim_main_task_history_for_storage(hist: Any) -> List[Dict[str, Any]]:
+    if not isinstance(hist, list):
+        return []
+    slim: List[Dict[str, Any]] = []
+    for h in hist[-MAX_MAIN_TASK_HISTORY_STORED:]:
+        if not isinstance(h, dict) or not h.get("task_id"):
+            continue
+        slim.append(
+            {
+                k: h.get(k)
+                for k in (
+                    "task_id", "user_query", "query_summary", "status", "task_kind",
+                    "result_status", "async_pipeline_pending",
+                )
+                if h.get(k) is not None
+            }
+        )
+    return slim
+
+
+def guard_session_payload_for_persist(
+    messages: Optional[List[Any]],
+    cur_task: Optional[Dict[str, Any]],
+    main_task_history: Optional[List[Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """前端 PUT /state 必经：瘦身 + 条数上限（不在此调 LLM，避免流式期间反复摘要）。"""
+    slim_msgs = [
+        slim_message_for_storage(m)
+        for m in (messages or [])
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    ]
+    if len(slim_msgs) > MAX_PERSISTED_MESSAGES:
+        slim_msgs = slim_msgs[-MAX_PERSISTED_MESSAGES:]
+    slim_ct = slim_cur_task_for_storage(cur_task) if cur_task else None
+    slim_hist = slim_main_task_history_for_storage(main_task_history or [])
+    return slim_msgs, slim_ct, slim_hist
+
+
+def session_doc_byte_size(doc: Dict[str, Any]) -> int:
+    return _json_size(doc)
+
+
+def session_document_has_full_orchestration_io(doc: Optional[Dict[str, Any]]) -> bool:
+    """是否仍含应存 SPAN/Redis 的全量编排 IO（不应留在 session JSON）。"""
+    if not isinstance(doc, dict):
+        return False
+    for m in doc.get("messages") or []:
+        if not isinstance(m, dict):
+            continue
+        for t in m.get("thinking") or []:
+            if not isinstance(t, dict):
+                continue
+            if any(str(t.get(k) or "").strip() for k in ("input_text", "output_text", "think_text")):
+                return True
+            if (t.get("what") or t.get("result")) and not any(
+                t.get(k) for k in ("status", "phase", "node_kind", "result_brief", "step_name")
+            ):
+                continue
+            if t.get("step_name") or t.get("result_brief") or t.get("status"):
+                return True
+        span = m.get("span")
+        if isinstance(span, dict) and span.get("search_results"):
+            return True
+    return False
+
+
+def normalize_session_document_for_storage(doc: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """
+    会话落盘定案：transcript + 步骤摘要 + 指针。
+    返回 (瘦身后的 doc, 相对原文是否应回写磁盘)。
+    """
+    if not isinstance(doc, dict) or not doc:
+        return {}, False
+    pre_bytes = session_doc_byte_size(
+        {
+            "messages": doc.get("messages"),
+            "cur_task": doc.get("cur_task"),
+            "main_task_history": doc.get("main_task_history"),
+        }
+    )
+    out = dict(doc)
+    msgs = [
+        slim_message_for_storage(m)
+        for m in (doc.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+    msgs = [m for m in msgs if m]
+    if len(msgs) > MAX_PERSISTED_MESSAGES:
+        msgs = msgs[-MAX_PERSISTED_MESSAGES:]
+    out["messages"] = msgs
+    if isinstance(doc.get("cur_task"), dict):
+        out["cur_task"] = slim_cur_task_for_storage(doc["cur_task"])
+    else:
+        out["cur_task"] = doc.get("cur_task")
+    out["main_task_history"] = slim_main_task_history_for_storage(doc.get("main_task_history"))
+    post_bytes = session_doc_byte_size(
+        {
+            "messages": out.get("messages"),
+            "cur_task": out.get("cur_task"),
+            "main_task_history": out.get("main_task_history"),
+        }
+    )
+    changed = (
+        post_bytes < pre_bytes
+        or session_document_has_full_orchestration_io(doc)
+        or len(msgs) < len(doc.get("messages") or [])
+    )
+    return out, changed
+
+
+def persist_normalized_session_document(session_id: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """瘦身并落盘；供 GET 迁移与 prepare 回写共用。"""
+    sid = str(session_id or "").strip()
+    normalized, _ = normalize_session_document_for_storage(doc)
+    if not sid:
+        return normalized
+    sm = dict(normalized.get("session") or {})
+    sm["id"] = sid
+    persist_session(
+        sid,
+        sm,
+        normalized.get("messages") or [],
+        cur_task=normalized.get("cur_task"),
+        main_task_history=normalized.get("main_task_history") or [],
+        prefs=normalized.get("prefs"),
+        memory_meta=normalized.get("memory_meta"),
+        mark_dirty=True,
+    )
+    return normalized
 
 
 def context_usage(
@@ -109,7 +367,8 @@ def context_usage(
     memory_meta = (doc or {}).get("memory_meta") or {}
     summary_tok = int(memory_meta.get("summary_tokens_est") or 0)
     msg_tok = estimate_messages_tokens(messages)
-    total = msg_tok + summary_tok + max(0, int(extra_tokens))
+    doc_tok = estimate_session_doc_tokens(doc)
+    total = max(msg_tok, doc_tok) + summary_tok + max(0, int(extra_tokens))
     pct = min(100.0, round(total / max_tok * 100, 1))
     warn_line = int(mp["context_warn_ratio"] * 100)
     force_line = int(mp["context_force_ratio"] * 100)
@@ -536,8 +795,8 @@ def enrich_snapshot_for_continue_main(
                 out["query_keywords"] = kws[:8]
                 out["keywords"] = kws[:8]
     out["needs_rag"] = bool(
-        out.get("needs_rag") or rag_prefetch or infer_needs_rag_from_task_text(uq)
-    )
+        out.get("needs_rag") or infer_needs_rag_from_task_text(uq)
+    ) and bool(rag_prefetch)
     return out
 
 
@@ -659,6 +918,13 @@ def _message_belongs_to_task_row(message: str, task_row: Dict[str, Any]) -> bool
     msg = (message or "").strip()
     if not msg or not isinstance(task_row, dict):
         return False
+    try:
+        from .ai_chat import _is_simple_intent
+
+        if _is_simple_intent(msg):
+            return False
+    except Exception:
+        pass
     tid = str(task_row.get("task_id") or "").strip()
     if tid and tid in msg:
         return True
@@ -752,7 +1018,25 @@ def resolve_task_affiliation(
 
     belongs = _message_belongs_to_task_row(msg, recent)
     if not belongs and isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid:
-        belongs = not _looks_like_new_task(msg)
+        try:
+            from .ai_chat import _is_simple_intent
+
+            # 元问答/寒暄（你是谁、能做什么）不得因「有未结案主任务」强行续接
+            if _is_simple_intent(msg):
+                return None
+        except Exception:
+            pass
+        if _looks_like_new_task(msg):
+            return None
+        # 仅显式续接/进度/恢复类短句才默认续接，禁止吞掉新意图
+        if (
+            _looks_like_task_resume(msg)
+            or _looks_like_task_status_inquiry(msg)
+            or _looks_like_task_recall(msg)
+            or any(h in msg for h in _CONTINUE_HINTS)
+            or _looks_like_continuation(msg, cur_task if isinstance(cur_task, dict) else recent)
+        ):
+            belongs = True
 
     if not belongs:
         return None
@@ -774,13 +1058,24 @@ def _looks_like_continuation(message: str, cur_task: Optional[Dict[str, Any]]) -
     m = (message or "").strip()
     if not m:
         return False
+    try:
+        from .ai_chat import _is_simple_intent
+
+        # 元问答/寒暄（你是谁、能做什么）不得因句短而判为续接
+        if _is_simple_intent(m):
+            return False
+    except Exception:
+        pass
+    if _looks_like_new_task(m):
+        return False
     if any(h in m for h in _CONTINUE_HINTS):
         return True
     if cur_task and len(m) <= 48 and not any(k in m for k in ("帮我", "请帮", "分析", "查询", "搜索")):
         qsum = str(cur_task.get("query_summary") or cur_task.get("user_query") or "")
         if qsum and any(w in qsum for w in m.split() if len(w) >= 2):
             return True
-    return len(m) <= 24 and "?" not in m and "？" not in m
+    # 禁止「短句且无问号」泛化续接：易把「你是谁」类新意图误判为延续主任务
+    return False
 
 
 def _resolve_continue_task_id(
@@ -956,6 +1251,20 @@ def resolve_intent_mode(
     if affiliated:
         return affiliated
 
+    # 元问答/寒暄：有未结案主任务也须先走 simple 分流（每轮 QUERY 先意图识别）
+    try:
+        from .ai_chat import _is_simple_intent
+
+        if is_simple_heuristic and _is_simple_intent(msg):
+            return {
+                "mode": "simple",
+                "task_id": "",
+                "skip_orchestration": True,
+                "reason": "元问答/寒暄，不续接未结案主任务",
+            }
+    except Exception:
+        pass
+
     # 追问进度/结果优先于「含链接关键词」误判为新任务（如「链接分析好了吗」）
     if _looks_like_task_status_inquiry(msg) or _looks_like_task_recall(msg):
         tid = _resolve_continue_task_id(cur_task, hist)
@@ -1001,6 +1310,14 @@ def resolve_intent_mode(
         return {"mode": "new_main", "task_id": "", "skip_orchestration": False, "reason": "用户要求开启新任务"}
 
     if active and tid:
+        # 元问答/寒暄：未结案主任务也不得吞掉 simple 直答
+        if is_simple_heuristic and _is_simple_intent(msg) and not _looks_like_continuation(msg, cur_task):
+            return {
+                "mode": "simple",
+                "task_id": "",
+                "skip_orchestration": True,
+                "reason": "元问答/寒暄，不续接未结案主任务",
+            }
         # 主任务未结案时：短追问（如「现在呢？」）一律延续，禁止落回无上下文 simple chat
         if _looks_like_continuation(msg, cur_task) or not _looks_like_new_task(msg):
             return {
@@ -1012,6 +1329,14 @@ def resolve_intent_mode(
             }
 
     if is_simple_heuristic:
+        # 元问答/寒暄：即使有未结案主任务也走 simple，不续接 MCP 主任务
+        if _is_simple_intent(msg) and not _looks_like_continuation(msg, cur_task):
+            return {
+                "mode": "simple",
+                "task_id": "",
+                "skip_orchestration": True,
+                "reason": "元问答/寒暄，不续接未结案主任务",
+            }
         recent = _get_recent_main_task(cur_task, hist)
         if recent and not _looks_like_new_task(msg):
             tid = str(recent.get("task_id") or "").strip() or _resolve_continue_task_id(cur_task, hist)
@@ -1715,7 +2040,7 @@ def compress_session_fifo(
         }
     )
     doc = dict(doc)
-    doc["messages"] = recent
+    doc["messages"] = [slim_message_for_storage(m) for m in recent if isinstance(m, dict)]
     doc["memory_meta"] = memory_meta
     sm = dict(doc.get("session") or {})
     sm["context_tokens_est"] = estimate_messages_tokens(recent) + summary_tok
@@ -1777,7 +2102,9 @@ async def prepare_session_memory(
 ) -> Dict[str, Any]:
     """发送前：评估占用，必要时 LLM 会话摘要 / 强制存档。"""
     _t0 = time.perf_counter()
-    doc = get_session_document(session_id) or {}
+    doc = await load_session_document_async(session_id)
+    if not doc:
+        doc = {}
     if client_cur_task and isinstance(client_cur_task, dict):
         doc["cur_task"] = client_cur_task
     if isinstance(client_history, list) and client_history:
@@ -1785,9 +2112,11 @@ async def prepare_session_memory(
     msgs = doc.get("messages") or []
     if not doc.get("main_task_history"):
         doc["main_task_history"] = rebuild_main_task_history_from_messages(msgs)
+    doc, _norm_changed = normalize_session_document_for_storage(doc)
     prefs = memory_prefs_from_doc(doc)
     usage = context_usage(doc, extra_tokens=extra_tokens, prefs=prefs)
     events: List[Dict[str, Any]] = []
+    _pre_bytes = session_doc_byte_size(doc)
 
     if usage["should_pre_summarize"] and usage["mode"] == MEMORY_MODE_SUMMARY:
         doc = await asyncio.to_thread(
@@ -1865,6 +2194,18 @@ async def prepare_session_memory(
     memory_meta["mode"] = usage["mode"]
     memory_meta["last_pct"] = usage["pct"]
 
+    _post_bytes = session_doc_byte_size(
+        {
+            "messages": doc.get("messages"),
+            "cur_task": doc.get("cur_task"),
+            "main_task_history": doc.get("main_task_history"),
+            "memory_meta": memory_meta,
+        }
+    )
+    if _norm_changed or _post_bytes < _pre_bytes or _pre_bytes > SESSION_DOC_SOFT_BYTES:
+        doc["memory_meta"] = memory_meta
+        await asyncio.to_thread(persist_normalized_session_document, session_id, doc)
+
     _ms = int((time.perf_counter() - _t0) * 1000)
     _log.info(
         "[AI问答-会话记忆|chat_context_memory.prepare_session_memory|session:%s|硬编执行|完成] "
@@ -1911,6 +2252,39 @@ def peek_continue_main_intent(
         main_task_history=main_task_history,
     )
     return str(decision.get("mode") or "") == "continue_main"
+
+
+def peek_fast_continue_eligible(
+    message: str,
+    *,
+    cur_task: Optional[Dict[str, Any]] = None,
+    main_task_history: Optional[List] = None,
+) -> bool:
+    """
+    是否可走「延续主任务快径」：仅显式续接/恢复/进度追问，禁止元问答与新话题误续接。
+    其余 QUERY 必须走意图识别节点（含 LLM）。
+    """
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    try:
+        from .ai_chat import _is_simple_intent
+
+        if _is_simple_intent(msg):
+            return False
+    except Exception:
+        pass
+    if _looks_like_new_task(msg):
+        return False
+    if extract_task_id_from_message(msg):
+        return True
+    if _looks_like_task_resume(msg) or _looks_like_task_status_inquiry(msg) or _looks_like_task_recall(msg):
+        return True
+    if any(h in msg for h in _CONTINUE_HINTS):
+        return True
+    if _looks_like_continuation(msg, cur_task):
+        return True
+    return False
 
 
 async def prepare_llm_context(
@@ -2011,7 +2385,7 @@ def build_agent_llm_messages(
         if not isinstance(h, dict) or h.get("role") not in ("user", "assistant"):
             continue
         content = str(h.get("content") or "").strip()
-        if not content or content.startswith("正在连接"):
+        if not content or content.startswith(("正在处理", "正在连接")):
             continue
         if content in ("正在准备…", "正在编排…"):
             continue

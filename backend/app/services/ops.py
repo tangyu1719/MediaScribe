@@ -146,7 +146,17 @@ def ops_get_events(limit: int = 120) -> Dict:
     return {"ok": True, "data": {"events": list(reversed(evts))}}
 
 
-def ops_add_event(method: str, path: str, status_code: int, cost_ms: int) -> Dict:
+def ops_add_event(
+    method: str,
+    path: str,
+    status_code: int,
+    cost_ms: int,
+    *,
+    query: str = "",
+    error_detail: str = "",
+    request_brief: str = "",
+    response_brief: str = "",
+) -> Dict:
     global _cost_total_ms, _cost_sample_n
     evt = {
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -154,6 +164,10 @@ def ops_add_event(method: str, path: str, status_code: int, cost_ms: int) -> Dic
         "path": path,
         "status_code": status_code,
         "cost_ms": cost_ms,
+        "query": (query or "")[:500],
+        "error_detail": (error_detail or "")[:2000],
+        "request_brief": (request_brief or "")[:1500],
+        "response_brief": (response_brief or "")[:3000],
     }
     _ops_events.append(evt)
     if len(_ops_events) > 10000:
@@ -487,3 +501,46 @@ def ops_get_dashboard() -> Dict:
             "eval": eval_block,
         },
     }
+
+
+_scheduled_job_events: List[Dict[str, Any]] = []
+
+
+def ops_add_scheduled_job_event(
+    *,
+    job_key: str,
+    run_id: str,
+    trigger: str,
+    status: str,
+    summary: str,
+    duration_ms: int,
+    error_message: str = "",
+) -> Dict[str, Any]:
+    evt = {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "job_key": job_key,
+        "run_id": run_id,
+        "trigger": trigger,
+        "status": status,
+        "summary": (summary or "")[:500],
+        "duration_ms": int(duration_ms or 0),
+        "error_message": (error_message or "")[:2000],
+    }
+    _scheduled_job_events.append(evt)
+    if len(_scheduled_job_events) > 2000:
+        _scheduled_job_events[:] = _scheduled_job_events[-1000:]
+    ops_add_event(
+        "JOB",
+        f"/internal/scheduled-job/{job_key}",
+        200 if status == "completed" else 500,
+        duration_ms,
+        error_detail=error_message or "",
+        response_brief=summary,
+    )
+    return evt
+
+
+def ops_get_scheduled_job_events(limit: int = 100) -> Dict[str, Any]:
+    lim = max(1, min(500, int(limit or 100)))
+    items = list(reversed(_scheduled_job_events[-lim:]))
+    return {"ok": True, "items": items, "count": len(items)}

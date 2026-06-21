@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=40">
+<link rel="stylesheet" href="/assets/css/app.css?v=58">
 </head>
 <body>
+<div id="sba-boot-loading" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#ebe8e2);color:#64748b;font:14px/1.5 system-ui,sans-serif;z-index:99998">正在加载…</div>
 <div id="sba-modal-root" aria-live="polite"></div>
 <!-- 导航图标精灵：统一 24 线性描边风格 -->
 <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
@@ -24,10 +25,13 @@
 <symbol id="icon-ops" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
 <symbol id="icon-webreplay" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><path d="M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M4.9 19.1l2.1-2.1M16.9 7.1l2.1-2.1"/></symbol>
 <symbol id="icon-subscribe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></symbol>
+<symbol id="icon-reader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/><path d="M8 7h8M8 11h6"/></symbol>
 <symbol id="icon-user" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="icon-sched" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
 <symbol id="icon-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></symbol>
 </svg>
 <div id="app" v-cloak>
+  <div v-if="sidePanelFs.open" class="rss-panel-fs-backdrop" @click="closeSidePanelFs" aria-hidden="true"></div>
   <div id="auth-debug-bar" style="display:none;background:#dc2626;color:#fff;padding:8px 16px;font-size:12px;text-align:center;position:sticky;top:0;z-index:99999">
     ! 认证状态异常: <span id="auth-debug-msg"></span>
     <button onclick="window.location.href='/login.html'" style="margin-left:12px;padding:4px 12px;border:1px solid rgba(255,255,255,.4);border-radius:8px;background:transparent;color:#fff;cursor:pointer;font-size:11px">重新登录</button>
@@ -53,16 +57,29 @@
       <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
     </button>
     <div class="ni-subwrap">
-      <div class="ni-subgrp" :class="{expanded:subscribeXhsOpen}">
+      <div class="ni-subbranch" :class="{expanded:subscribeXhsOpen}">
         <button type="button" class="ni ni-sub ni-sub-parent" :class="{on:page==='subscribe',expanded:subscribeXhsOpen}" @click="onSubscribeXhsNavClick">
           <span class="ni-txt">小红书</span>
           <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
         </button>
-        <div class="ni-subwrap ni-subwrap--l3">
-          <button type="button" class="ni ni-sub ni-sub-l3" :class="{on:page==='subscribe'&&sub.sec==='up'}" @click="openSubscribeSec('up')"><span class="ni-txt">UP订阅</span></button>
-          <button type="button" class="ni ni-sub ni-sub-l3" :class="{on:page==='subscribe'&&sub.sec==='fav'}" @click="openSubscribeSec('fav')"><span class="ni-txt">收藏夹</span></button>
+        <div class="ni-subblock">
+          <button type="button" class="ni ni-sub" :class="{on:page==='subscribe'&&sub.sec==='up'}" @click="openSubscribeSec('up')"><span class="ni-txt">UP订阅</span></button>
+          <button type="button" class="ni ni-sub" :class="{on:page==='subscribe'&&sub.sec==='fav'}" @click="openSubscribeSec('fav')"><span class="ni-txt">收藏夹</span></button>
+          <button type="button" class="ni ni-sub" :class="{on:page==='subscribe'&&sub.sec==='bind'}" @click="openSubscribeSec('bind')"><span class="ni-txt">小红书绑定</span></button>
         </div>
       </div>
+    </div>
+  </div>
+  <div class="ni-grp sched-grp" :class="{expanded:schedOpen&&!navCollapsed}">
+    <button type="button" class="ni ni-parent" :class="{on:page==='sched',expanded:schedOpen}" :title="navCollapsed?'定时任务':'定时任务（展开子项）'" @click="onSchedNavClick">
+      <span class="ni-ic" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-sched"/></svg>
+      </span>
+      <span class="ni-txt">定时任务</span>
+      <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
+    </button>
+    <div class="ni-subwrap">
+      <button type="button" class="ni ni-sub" :class="{on:page==='sched'}" @click="openSchedSec('jobs')"><span class="ni-txt">任务管理</span></button>
     </div>
   </div>
   <div class="ni-grp webreplay-grp" :class="{expanded:webreplayOpen&&!navCollapsed}">
@@ -74,9 +91,12 @@
       <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
     </button>
     <div class="ni-subwrap">
-      <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='scripts'}" @click="openWebreplaySec('scripts')"><span class="ni-txt">脚本库</span></button>
-      <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='bridge'}" @click="openWebreplaySec('bridge')"><span class="ni-txt">扩展连接</span></button>
-      <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='guide'}" @click="openWebreplaySec('guide')"><span class="ni-txt">使用指南</span></button>
+      <div class="ni-subblock">
+        <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='scripts'}" @click="openWebreplaySec('scripts')"><span class="ni-txt">脚本库</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='cdp'}" @click="openWebreplaySec('cdp')"><span class="ni-txt">CDP 录制</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='bridge'}" @click="openWebreplaySec('bridge')"><span class="ni-txt">扩展连接</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='webreplay'&&wr.sec==='guide'}" @click="openWebreplaySec('guide')"><span class="ni-txt">使用指南</span></button>
+      </div>
     </div>
   </div>
   <div class="ni-grp" :class="{expanded:settingsOpen&&!navCollapsed}">
@@ -88,9 +108,11 @@
       <span v-show="!navCollapsed" class="ni-chev" aria-hidden="true">▼</span>
     </button>
     <div class="ni-subwrap">
-      <button v-if="isAdmin" type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='agent'}" @click="openSettingsSec('agent')"><span class="ni-txt">网关与路由</span></button>
-      <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='link'}" @click="openSettingsSec('link')"><span class="ni-txt">链接分析配置</span></button>
-      <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='im'}" @click="openSettingsSec('im')"><span class="ni-txt">IM 机器人</span></button>
+      <div class="ni-subblock">
+        <button v-if="isAdmin" type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='agent'}" @click="openSettingsSec('agent')"><span class="ni-txt">网关与路由</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='link'}" @click="openSettingsSec('link')"><span class="ni-txt">链接分析配置</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='im'}" @click="openSettingsSec('im')"><span class="ni-txt">IM 机器人</span></button>
+      </div>
     </div>
   </div>
   </div>
@@ -153,6 +175,23 @@
     <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg></div>流程与链接输入</div>
       <div class="fr link-link-row"><span class="fl">视频链接</span><input class="gi" v-model="v.link" placeholder="粘贴链接或整段分享口令（自动识别 URL）…" @keyup.enter="startProc"/></div>
       
+      <!-- 任务备注与关键词 -->
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>任务备注与关键词</div>
+        <div class="fr" style="flex-wrap:wrap;gap:8px">
+          <label class="link-inline-check" style="align-items:center;gap:6px">重要度
+            <input class="gi" type="number" min="1" max="10" v-model.number="v.importance" style="width:52px;text-align:center" title="1-10，仅排队等待时影响执行顺序"/>
+          </label>
+          <div class="q-importance-bar q-importance-bar--inline" :title="'重要度 '+clampImportance(v.importance)+'/10'">
+            <div class="q-importance-fill" :style="{width:taskImportancePct(v.importance)}"></div>
+            <span class="q-importance-num">{{ clampImportance(v.importance) }}</span>
+          </div>
+        </div>
+        <div class="fr"><span class="fl">备注</span><input class="gi" v-model="v.taskNote" placeholder="可选，便于区分同批任务"/></div>
+        <div class="fr"><span class="fl">关键词</span><input class="gi" v-model="v.taskKeywords" placeholder="逗号或空格分隔，参与元数据提取"/></div>
+        <p style="font-size:10px;color:var(--t3);margin-top:6px">重要度仅对<strong>排队中</strong>任务生效：数值越大越先执行；同级按提交先后。开始执行后不再参与排序。</p>
+      </div>
+
       <!-- User Prompt -->
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
         <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></div>User Prompt<span style="font-size:10px;color:var(--t3);font-weight:400;margin-left:8px">最多 10000 字符，将同时发送给摘要和原文 Agent</span><button class="btn btn-o btn-xs" style="margin-left:auto" @click="v.sp=!v.sp">{{v.sp?'收起':'展开编辑'}}</button></div>
@@ -211,34 +250,115 @@
       <input ref="outDirInp" type="file" style="display:none" webkitdirectory directory multiple @change="onOutDirNative"/>
     </div>
     <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>队列中的任务</div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <p style="font-size:11px;color:var(--t3)">多链接可并行；卡片<strong>从左到右</strong>按最近提交/重新执行时间排序（重跑同卡片会置顶到最左）。待处理任务可用 ↑↓ 微调顺序。</p>
-        <button v-if="taskQueue.length>0" type="button" class="btn btn-xs btn-o" @click="cleanupQueueTasks()">清理已完成</button>
+      <div class="task-queue-filter">
+        <div class="task-queue-filter-row">
+          <input class="gi" v-model="taskQueueFilter.query" placeholder="标题检索：智能体 / 面试 / Java …（近义词）" @input="onTaskQueueFilterQueryInput" @keydown.enter.prevent="onTaskQueueFilterQueryInput"/>
+          <input class="gi" v-model="taskQueueFilter.author" placeholder="作者筛选" style="max-width:140px"/>
+          <select class="gi" v-model="taskQueueFilter.sort" style="max-width:130px">
+            <option value="default">默认顺序（导入/执行）</option>
+            <option value="updated">更新时间</option>
+            <option value="importance">重要度</option>
+          </select>
+          <button type="button" class="btn btn-o btn-xs task-queue-read-filter-btn" :class="{on:taskQueueFilter.enableRead&&taskQueueFilter.readStatus==='unread'}" @click="toggleTaskQueueReadFilter('unread')">仅未读</button>
+          <button type="button" class="btn btn-o btn-xs task-queue-read-filter-btn" :class="{on:taskQueueFilter.enableRead&&taskQueueFilter.readStatus==='read'}" @click="toggleTaskQueueReadFilter('read')">仅已读</button>
+          <button type="button" class="btn btn-o btn-xs" @click="resetTaskQueueFilter">重置</button>
+        </div>
+        <div class="task-queue-filter-row task-queue-filter-checks">
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableTitle"/> 标题</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableAuthor"/> 作者</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableSource"/> 导入渠道</label>
+        </div>
+        <div v-if="taskQueueFilter.enableSource" class="task-queue-filter-row task-queue-filter-checks">
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.manual"/> 手动导入</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_creator"/> 订阅博主</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_favorites"/> 订阅收藏夹</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.link_scan"/> 链接扫描</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.chat"/> 对话导入</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.catalog_seed"/> 目录摘录</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.rss"/> RSS 订阅</label>
+          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.other"/> 其他</label>
+        </div>
+        <div v-if="taskQueueFilter.expandedTerms&&taskQueueFilter.expandedTerms.length" class="task-queue-suggest">
+          <span class="task-queue-suggest-label">推荐检索词：</span>
+          <button v-for="term in taskQueueFilter.expandedTerms" :key="'tq-'+term" type="button" class="btn btn-o btn-xs task-queue-suggest-chip" @click="taskQueueFilter.query=term;onTaskQueueFilterQueryInput()">{{term}}</button>
+        </div>
+        <div v-if="taskQueueAuthorFacets.length" class="task-queue-author-facets">
+          <span class="task-queue-suggest-label">作者归类：</span>
+          <button v-for="a in taskQueueAuthorFacets.slice(0,12)" :key="'auth-'+a.author_name" type="button" class="btn btn-o btn-xs task-queue-suggest-chip" :class="{on:taskQueueFilter.author===a.author_name}" @click="pickTaskQueueAuthor(a.author_name)">{{a.author_name}} ({{a.count}})</button>
+        </div>
+        <p v-if="taskQueueFilterActive()||taskQueue.length" class="task-queue-filter-meta">显示 {{ displayedTaskQueue.length }} / {{ filteredTaskQueue.length }} 条{{ filteredTaskQueue.length!==taskQueue.length ? '（总 '+taskQueue.length+'）' : '' }}</p>
       </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap">
+        <p style="font-size:11px;color:var(--t3);flex:1;min-width:0">多链接可并行；卡片<strong>从左到右</strong>按最近提交/重新执行时间排序。排队中任务按<strong>重要度</strong>优先执行（同级先进先出），可用 ↑↓ 微调同级顺序。</p>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;flex-wrap:wrap">
+          <template v-if="queueBatchMode">
+            <label v-if="displayedTaskQueue.length" class="link-inline-check q-batch-all" @click.stop>
+              <input type="checkbox" :checked="queueBatchSelAllChecked()" @change="toggleQueueBatchSelAll()"/> 全选当前页
+            </label>
+            <button type="button" class="btn btn-xs btn-d" :disabled="!queueBatchSelCount()" @click="batchDeleteQueueTasks()">删除选中 ({{ queueBatchSelCount() }})</button>
+            <button type="button" class="btn btn-xs btn-p" @click="exitQueueBatchMode()">完成</button>
+          </template>
+          <button v-else type="button" class="btn btn-xs btn-o" :disabled="!displayedTaskQueue.length" @click="toggleQueueBatchMode()" title="进入多选模式，批量删除卡片">编辑</button>
+          <select class="inp inp-xs" style="width:64px" :value="taskQueuePaging.page_size" @change="setTaskQueuePageSize($event.target.value)" title="每页卡片数（双行浏览模式下生效）">
+            <option :value="8">8</option><option :value="12">12</option><option :value="16">16</option><option :value="24">24</option><option :value="48">48</option>
+          </select>
+          <button type="button" class="btn btn-xs btn-o" :disabled="taskQueueViewMode!=='compact'||taskQueuePaging.page<=1" @click="taskQueuePagePrev">上一页</button>
+          <span style="font-size:11px;color:var(--t3);white-space:nowrap">{{ taskQueueViewMode==='compact' ? (taskQueuePaging.page+' / '+taskQueuePageCount()) : '全部' }}</span>
+          <button type="button" class="btn btn-xs btn-o" :disabled="taskQueueViewMode!=='compact'||taskQueuePaging.page>=taskQueuePageCount()" @click="taskQueuePageNext">下一页</button>
+          <button type="button" class="btn btn-xs btn-o" @click="toggleTaskQueueViewMode" :aria-expanded="taskQueueViewMode==='expanded'" :title="taskQueueViewModeTitle()">{{ taskQueueViewModeLabel() }}</button>
+          <button v-if="taskQueue.length>0" type="button" class="btn btn-xs btn-o" @click="cleanupQueueTasks()">清理已完成</button>
+        </div>
+      </div>
+      <div class="q-grid-wrap" :class="[taskQueueViewMode==='compact'?'q-grid-wrap--compact':'q-grid-wrap--expanded', queueBatchMode?'q-grid-wrap--batch':'']">
       <div class="q-grid">
-        <div v-for="(t, idx) in taskQueue" :key="t.task_id" class="q-card" :class="{sel:t.task_id===logFocusId, 'q-unread':taskIsUnread(t)}" @click="selectQueueTask(t.task_id)" :style="{borderLeft:t.status==='pending'?'3px solid var(--warn)':t.status==='running'||t.status==='started'?'3px solid var(--ok)':t.status==='failed'||t.status==='cancelled'?'3px solid var(--err)':'3px solid var(--t3)'}">
-          <button type="button" class="q-card-close" title="移除此卡片" aria-label="移除此卡片" @click.stop="deleteQueueTask(t.task_id)">×</button>
+        <div v-for="(t, idx) in displayedTaskQueue" :key="t.task_id" class="q-card" :class="{sel:!queueBatchMode&&t.task_id===logFocusId,'q-card-batch':queueBatchMode&&isQueueBatchSelected(t.task_id)}" :style="queueCardBorderStyle(t)" @click="onQueueCardClick(t)">
+          <label v-if="queueBatchMode" class="q-card-check" @click.stop>
+            <input type="checkbox" :checked="isQueueBatchSelected(t.task_id)" @change="toggleQueueBatchSel(t.task_id,$event)"/>
+          </label>
+          <button v-if="!queueBatchMode" type="button" class="q-card-close" title="移除此卡片" aria-label="移除此卡片" @click.stop="deleteQueueTask(t.task_id)">×</button>
           <div class="qt">
             <span class="q-title-main">{{ taskCardHeadTitle(t) }}</span>
             <span v-if="t.platform" class="q-platform">· {{ t.platform }}</span>
           </div>
-          <div v-if="taskCardSubTitle(t)" class="q-subtitle">{{ taskCardSubTitle(t) }}</div>
+          <div v-if="taskSourceLabel(t)||taskAuthorName(t)" class="q-subtitle q-source-line" :title="(taskSourceLabel(t)||'')+(taskAuthorName(t)?(' · 作者：'+taskAuthorName(t)):'')">
+            <span v-if="taskSourceLabel(t)">来源：{{ taskSourceLabel(t) }}</span>
+            <span v-if="taskAuthorName(t)"> · 作者：{{ taskAuthorName(t) }}</span>
+          </div>
           <div class="q-meta-row">
             <span v-if="t.updated_at" class="q-updated" :title="t.updated_at">更新 {{ taskQueueFmtTime(t.updated_at) }}</span>
-            <button v-if="taskShowReadBadge(t)" type="button" class="q-read-badge" :class="taskIsUnread(t)?'q-read-unread':'q-read-done'" :disabled="!taskIsUnread(t)" :title="taskIsUnread(t)?'点击标记为已读':'已读'" @click.stop="markQueueTaskRead(t)">{{ taskReadLabel(t) }}</button>
+            <button v-if="taskShowReadBadge(t)" type="button" class="q-read-badge" :class="taskIsUnread(t)?'q-read-unread':'q-read-done'" :disabled="!taskIsUnread(t)" :title="taskIsUnread(t)?'点击标记为已读':'已读'" @click.stop.prevent="markQueueTaskRead(t)">{{ taskReadLabel(t) }}</button>
           </div>
           <div class="qs">
-            <span :style="{color:t.status==='pending'?'var(--warn)':t.status==='running'||t.status==='started'?'var(--ok)':t.status==='failed'||t.status==='cancelled'?'var(--err)':'var(--t3)'}">{{ histStatusLabel(t) }}</span>
-            <span v-if="t.stage">· {{ t.stage }}</span>
+            <span
+              v-if="t.status==='failed'"
+              class="q-status-jump"
+              :style="{color:taskCardStatusColor(t)}"
+              role="link"
+              tabindex="0"
+              title="跳转到下方 ERROR 日志"
+              @click.stop="jumpToTaskErrorLog(t.task_id)"
+              @keydown.enter.stop.prevent="jumpToTaskErrorLog(t.task_id)"
+            >{{ taskCardStatusText(t) }}</span>
+            <span v-else :style="{color:taskCardStatusColor(t)}">{{ taskCardStatusText(t) }}</span>
           </div>
           <div v-if="taskCardMetricsLine(t)" class="q-metrics">{{ taskCardMetricsLine(t) }}</div>
           <div v-if="taskFeishuHint(t)" class="q-feishu-hint">{{ taskFeishuHint(t) }}</div>
-          <div class="qp"><i :style="{width:(t.progress||0)+'%'}"></i></div>
-          <a v-if="t.link" :href="t.link" target="_blank" rel="noopener noreferrer" class="q-link" :title="t.link" @click.stop>{{ shortLink(t.link, 64) }}</a>
+          <div v-if="taskCardExtractedKeywordsLine(t)" class="q-extracted-kw" :title="taskCardExtractedKeywordsLine(t)">{{ taskCardExtractedKeywordsLine(t) }}</div>
+          <div class="q-importance-row" @click.stop>
+            <span class="q-importance-label">重要度</span>
+            <span class="q-importance-badge" :style="{color:taskImportanceColor(t.importance),borderColor:taskImportanceColor(t.importance),background:taskImportanceBg(t.importance)}" :title="'执行优先级 '+clampImportance(t.importance)+'/10'+(t.status!=='pending'?'（已开始，仅展示）':'')">{{ clampImportance(t.importance) }}</span>
+            <input v-if="t.status==='pending'" class="q-importance-input" type="number" min="1" max="10" :value="clampImportance(t.importance)" @change="updateQueueImportance(t,$event)" title="1-10，仅 pending 可改"/>
+          </div>
+          <div v-if="taskShowProgress(t)" class="qp"><i :style="{width:(t.progress||0)+'%'}"></i></div>
+          <a v-if="taskCardLinkUrl(t)" :href="taskCardLinkUrl(t)" target="_blank" rel="noopener noreferrer" class="q-link" :title="taskCardLinkUrl(t)" @click.stop>{{ shortLink(taskCardLinkUrl(t), 64) }}</a>
           <div class="q-artifacts" @click.stop>
             <button type="button" class="btn btn-xs btn-artifact" :class="taskHasMd(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHasMd(t)" title="浏览器预览 Markdown（淡黄色主题渲染）" @click.stop="openTaskMd(t)">MD</button>
-            <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHtmlReady(t)" title="系统默认浏览器打开 HTML" @click.stop="openTaskHtml(t)">HTML</button>
+            <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :title="taskHtmlClickTitle(t)" @click.stop="onTaskHtmlClick(t)">HTML</button>
             <button type="button" class="btn btn-xs btn-o" :disabled="!taskHasMd(t)&&!taskHasHtml(t)" title="资源管理器中显示 MD/HTML 位置" @click.stop="openTaskArtifactsLocation(t)">位置</button>
+            <button type="button" class="btn btn-xs btn-artifact" :class="queueTaskNoteBtnClass(t)" :title="queueTaskNoteBtnTitle(t)" @click.stop="toggleQueueTaskNote(t)">备注</button>
+          </div>
+          <div v-if="isQueueTaskNoteOpen(t)" class="q-note-panel" @click.stop>
+            <textarea class="q-note-inp" :value="t.task_note||''" placeholder="填写备注…" rows="2" @change="saveQueueTaskMeta(t,'note',$event)"></textarea>
           </div>
           <div class="q-actions">
             <template v-if="t.status==='pending'">
@@ -254,7 +374,8 @@
             </template>
           </div>
         </div>
-        <div v-if="!taskQueue.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">暂无运行中任务。提交链接后将显示在此。</div>
+        <div v-if="!displayedTaskQueue.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">{{ taskQueue.length ? '无匹配任务，请调整筛选条件。' : '暂无运行中任务。提交链接后将显示在此。' }}</div>
+      </div>
       </div>
       <div v-if="v.htmlStat" style="margin-top:10px;font-size:12px" :style="{color:v.htmlStat==='completed'||v.htmlStat==='ok'?'var(--ok)':v.htmlStat==='failed'?'var(--err)':'var(--warn)'}">HTML：{{ v.htmlMsg || v.htmlStat }}</div>
     </div>
@@ -272,7 +393,7 @@
         <div class="term-h"><span class="d3 r"></span><span class="d3 y"></span><span class="d3 g"></span><span>process.log</span></div>
         <div id="lb" class="term-b" style="height:220px">
           <template v-if="logs.length">
-            <div v-for="(ln,i) in logs" :key="i" class="ll" :class="logRowClass(ln.level)">
+            <div v-for="(ln,i) in logs" :key="i" :id="'log-row-'+i" class="ll" :class="[logRowClass(ln.level), {'ll-highlight': logHighlightIdx === i}]">
               <span class="ts">{{ln.timestamp}}</span><span class="lv">{{ln.message}}</span>
             </div>
           </template>
@@ -300,30 +421,128 @@
         <p v-if="subForm.error" class="rss-err">{{subForm.error}}</p>
       </div>
       <div class="rss-layout">
-        <div class="glass rss-feeds">
-          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>已订阅 UP</div>
-          <div v-if="!subList.length" class="rss-empty">暂无订阅。需配置 MariaDB（SBA_DATABASE_URL）与有效小红书 Cookie。</div>
-          <button v-for="s in subList" :key="s.subscription_id" type="button" class="rss-feed-card" :class="{on:subSelId===s.subscription_id}" @click="selectSubscription(s.subscription_id)">
-            <div class="rss-feed-title">{{s.display_name||s.creator_id}}</div>
-            <div class="rss-feed-meta">{{s.status}} · offset {{s.cursor_offset||0}}{{s.initial_backfill_done?' · 增量':' · 回填中'}}</div>
-            <div class="rss-feed-meta" style="margin-top:2px">{{subFmtTime(s.last_fetch_at)||'未同步'}}</div>
-          </button>
-          <div v-if="subSelId" class="btns" style="margin-top:10px;flex-wrap:wrap">
-            <button type="button" class="btn btn-p btn-xs" @click="runCreatorProfile(subSelId)">生成 UP 画像</button>
-            <button type="button" class="btn btn-o btn-xs" @click="loadSubProfile(subSelId)">查看画像</button>
-            <button type="button" class="btn btn-o btn-xs" @click="syncSubscription(subSelId)">同步</button>
-            <button v-if="subSelRow&&subSelRow.status==='active'" type="button" class="btn btn-o btn-xs" @click="pauseSubscription(subSelId)">暂停</button>
-            <button v-if="subSelRow&&subSelRow.status==='paused'" type="button" class="btn btn-o btn-xs" @click="resumeSubscription(subSelId)">恢复</button>
-            <button type="button" class="btn btn-danger btn-xs" @click="deleteSubscription(subSelId)">删除</button>
+        <div class="glass rss-feeds" :class="{'rss-panel-fullscreen': isSidePanelFs('sub-up-feeds')}">
+          <header class="rss-panel-hd">
+            <div class="st rss-panel-title"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>UP 与关注（统一列表）</div>
+            <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('sub-up-feeds')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('sub-up-feeds')">{{isSidePanelFs('sub-up-feeds')?'收起':'全屏'}}</button>
+          </header>
+          <div class="rss-panel-toolbar">
+          <p style="font-size:11px;color:var(--t2);margin:0 0 8px;line-height:1.5">已订阅 UP 与<strong>收藏笔记博主候选</strong>合并展示。点「拉取」每批最多入库 <strong>20 位新博主</strong>（MariaDB 持久化，刷新不丢）。列表按<strong>最近拉取/同步时间</strong>排序，不是拼音序。</p>
+          <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:8px">
+            <button type="button" class="btn btn-p btn-xs" :disabled="favUpForm.pulling" @click="pullFollowUps(false)">{{favUpForm.pulling?'拉取中…':'拉取收藏博主'}}</button>
+            <button type="button" class="btn btn-o btn-xs" :disabled="favUpForm.pulling" @click="pullFollowUps(true)" title="cursor 归零，从最新收藏重新扫描">从头拉取</button>
+            <button type="button" class="btn btn-o btn-xs" :disabled="favUpForm.loading" @click="loadFollowUps">刷新列表</button>
+          </div>
+          <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:0">
+            <input class="gi" v-model="favUpForm.query" placeholder="筛选：智能体 / 面试 / Java …（近义词）" style="flex:1;min-width:min(100%,160px)" @keydown.enter="loadFollowUps"/>
+            <select class="gi" v-model="favUpForm.subscribed" style="max-width:110px" @change="loadFollowUps">
+              <option value="all">全部</option>
+              <option value="no">未订阅</option>
+              <option value="yes">已订阅</option>
+            </select>
+            <button type="button" class="btn btn-o btn-xs" @click="loadFollowUps">查询</button>
+          </div>
+          <p v-if="favUpForm.error" class="rss-err" style="margin-top:8px">{{favUpForm.error}}</p>
+          <p v-if="favUpForm.hint" class="rss-feed-meta" style="margin:6px 0 0">{{favUpForm.hint}}</p>
+          <p v-if="favUpForm.expandedTerms.length" class="rss-feed-meta" style="margin:6px 0 0;font-size:10px;color:var(--t3)">近义词：{{favUpForm.expandedTerms.join(' · ')}}</p>
+          </div>
+          <div class="rss-panel-scroll">
+          <div v-if="!upUnifiedList.length&&!favUpForm.pulling&&!favUpForm.loading" class="rss-empty">暂无 UP。添加订阅或点「拉取关注 UP」。</div>
+          <div v-for="u in upUnifiedList" :key="u.creator_id" class="up-unified-card glass" :class="{on:upSelId===u.creator_id,'up-unified-card--subscribed':u.already_subscribed}">
+            <button type="button" class="up-unified-card-head" @click="selectUpCard(u)">
+              <div class="rss-feed-title">{{u.display_name||u.creator_id}}</div>
+              <div class="rss-feed-meta">
+                <template v-if="u.already_subscribed">{{u.status||'active'}} · offset {{u.cursor_offset||0}}{{u.initial_backfill_done?' · 增量':' · 回填中'}} · {{subFmtTime(u.last_fetch_at)||'未同步'}}</template>
+                <template v-else>候选 · 收藏 {{u.note_count||0}} 篇<span v-if="u.has_profile"> · 有画像</span></template>
+              </div>
+              <div v-if="(u.sample_titles||[]).length&&!u.already_subscribed" class="rss-feed-meta" style="margin-top:2px">{{(u.sample_titles||[])[0]}}</div>
+            </button>
+            <div v-if="upSelId===u.creator_id" class="btns up-unified-card-actions">
+              <template v-if="u.already_subscribed">
+                <button type="button" class="btn btn-p btn-xs" @click.stop="runCreatorProfile(u.subscription_id)">生成 UP 画像</button>
+                <button type="button" class="btn btn-o btn-xs" @click.stop="loadSubProfile(u.subscription_id)">查看画像</button>
+                <button type="button" class="btn btn-o btn-xs" @click.stop="syncSubscription(u.subscription_id)">同步</button>
+                <button v-if="u.status==='active'" type="button" class="btn btn-o btn-xs" @click.stop="pauseSubscription(u.subscription_id)">暂停</button>
+                <button v-if="u.status==='paused'" type="button" class="btn btn-o btn-xs" @click.stop="resumeSubscription(u.subscription_id)">恢复</button>
+                <button type="button" class="btn btn-danger btn-xs" @click.stop="deleteSubscription(u.subscription_id)">删除订阅</button>
+              </template>
+              <template v-else>
+                <button type="button" class="btn btn-p btn-xs" :disabled="favUpForm.subscribing" @click.stop="subscribeFollowUp(u,false)">{{favUpForm.subscribing?'处理中…':'加入订阅'}}</button>
+                <button type="button" class="btn btn-o btn-xs" :disabled="favUpForm.subscribing" @click.stop="subscribeFollowUp(u,true)">订阅并同步</button>
+                <button type="button" class="btn btn-o btn-xs" :disabled="favUpForm.profiling" @click.stop="profileFollowUp(u)">{{favUpForm.profiling?'画像中…':'生成画像'}}</button>
+                <button type="button" class="btn btn-danger btn-xs" :disabled="favUpForm.removing" @click.stop="removeFollowUp(u)">移出关注</button>
+              </template>
+            </div>
+          </div>
           </div>
         </div>
-        <div class="glass rss-articles">
-          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>{{subViewTab==='digest'?'批次 Digest':'UP 人物画像'}}</div>
-          <div v-if="subSelId" style="margin-bottom:8px;display:flex;gap:6px">
+        <div class="glass rss-articles" :class="{'rss-panel-fullscreen': isSidePanelFs('sub-up-detail')}">
+          <header class="rss-panel-hd">
+            <div class="st rss-panel-title"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>{{subViewTab==='digest'?'批次 Digest':'UP 人物画像'}}</div>
+            <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('sub-up-detail')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('sub-up-detail')">{{isSidePanelFs('sub-up-detail')?'收起':'全屏'}}</button>
+          </header>
+          <div v-if="subSelId" class="rss-panel-toolbar" style="display:flex;gap:6px;flex-wrap:wrap">
             <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='digest'}" @click="subViewTab='digest';loadSubDigest(subSelId)">Digest</button>
+            <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='blog'}" @click="subViewTab='blog';loadSubBlogNotes(subSelId)">博客信息<span v-if="subBlogNotes.total" class="xhs-profile-dot" :title="subBlogNotes.total+' 条'"></span></button>
+            <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='links'}" @click="subViewTab='links';loadSubLinkCards(subSelId)">链接卡片<span v-if="subLinkPaging.total" class="xhs-profile-dot" :title="subLinkPaging.total+' 条'"></span></button>
             <button type="button" class="btn btn-o btn-xs" :class="{on:subViewTab==='profile'}" @click="subViewTab='profile';loadSubProfile(subSelId)">画像<span v-if="subProfile.hasData" class="xhs-profile-dot" title="已有画像"></span></button>
           </div>
-          <div v-if="!subSelId" class="rss-empty">选择左侧 UP 查看 digest 或人物画像。</div>
+          <div class="rss-panel-scroll">
+          <div v-if="!subSelId" class="rss-empty">选择左侧 UP 查看 digest、博客信息或人物画像。</div>
+          <template v-else-if="subViewTab==='blog'">
+            <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:8px">
+              <button type="button" class="btn btn-p btn-xs" :disabled="subBlogNotes.seedBusy" @click="seedSubCatalog(60,false)">{{subBlogNotes.seedBusy?'摘录中…':'摘录前60链接'}}</button>
+              <button type="button" class="btn btn-o btn-xs" :disabled="subBlogNotes.seedBusy" @click="seedSubCatalog(15,false)">摘录前15</button>
+              <button type="button" class="btn btn-o btn-xs" :disabled="subBlogNotes.seedBusy" @click="seedSubCatalog(60,true)">摘录并入队</button>
+              <button type="button" class="btn btn-o btn-xs" :disabled="subBlogNotes.seedBusy" @click="repairSubCatalogLinks">修复裸链</button>
+              <button type="button" class="btn btn-o btn-xs" @click="loadSubBlogNotes(subSelId)">刷新</button>
+            </div>
+            <p v-if="subBlogNotes.error" class="rss-err">{{subBlogNotes.error}}</p>
+            <p v-if="subBlogNotes.total" class="rss-feed-meta" style="margin-bottom:6px">已摘录 {{subBlogNotes.total}} 条博客链接（analysis_status=catalog/queued/…）</p>
+            <div v-if="subBlogNotes.loading" class="rss-empty">加载中…</div>
+            <div v-else-if="!subBlogNotes.items.length" class="rss-empty">暂无博客信息。点「摘录前N链接」从 UP 主页拉取并写入。</div>
+            <div v-else class="xhs-blog-notes-list">
+              <div v-for="(n,idx) in subBlogNotes.items" :key="n.note_id" class="xhs-blog-note-row">
+                <span class="xhs-blog-note-seq">{{idx+1}}</span>
+                <div class="xhs-blog-note-body">
+                  <div class="rss-feed-title">{{n.title||n.note_id}}</div>
+                  <div class="rss-feed-meta">{{n.analysis_status||'catalog'}} · {{n.content_type||'?'}} · {{n.note_id}}<span v-if="n.has_xsec_token===false" style="color:var(--warn,#d97706);margin-left:6px">· 裸链缺 token（打开可能「页面不见了」）</span></div>
+                  <a v-if="n.canonical_url" class="rss-feed-meta" :href="n.canonical_url" target="_blank" rel="noopener" style="word-break:break-all">{{n.canonical_url}}</a>
+                </div>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="subViewTab==='links'">
+            <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center">
+              <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='grid'}" @click="setSubLinkViewMode('grid')">卡片铺开</button>
+              <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='row'}" @click="setSubLinkViewMode('row')">一行显示</button>
+              <label style="font-size:11px;color:var(--t3)">每页</label>
+              <select class="inp inp-xs" style="width:64px" :value="subLinkPaging.page_size" @change="setSubLinkPageSize($event.target.value)">
+                <option :value="10">10</option><option :value="20">20</option><option :value="50">50</option>
+              </select>
+              <button type="button" class="btn btn-o btn-xs" :disabled="subLinkPaging.page<=1" @click="subLinkPagePrev">上一页</button>
+              <span style="font-size:11px;color:var(--t3)">{{subLinkPaging.page}} / {{Math.max(1,Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20)))}}</span>
+              <button type="button" class="btn btn-o btn-xs" :disabled="subLinkPaging.page>=Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20))" @click="subLinkPageNext">下一页</button>
+              <button type="button" class="btn btn-o btn-xs" @click="loadSubLinkCards(subSelId)">刷新</button>
+            </div>
+            <div v-if="subLinkPaging.loading" class="rss-empty">加载链接卡片…</div>
+            <div v-else :class="subLinkPaging.view==='row'?'sub-link-rows':'q-grid fav-card-grid'">
+              <div v-for="c in subLinkCards" :key="c.url_hash||c.note_id" class="q-card fav-card sub-link-card" :class="favCardClass(c)" @click="openSubscriptionLinkTask(c)">
+                <div class="qt"><span class="q-title-main">{{c.title||c.note_id||'未命名'}}</span></div>
+                <div v-if="linkCardSourceLine(c)" class="q-subtitle q-source-line">{{linkCardSourceLine(c)}}</div>
+                <div v-if="c.task_note" class="q-subtitle">备注：{{c.task_note}}</div>
+                <div class="qs"><span :style="{color:favCardStatusColor(c)}">{{favCardStatusText(c)}}</span></div>
+                <a v-if="c.canonical_url" :href="c.canonical_url" target="_blank" rel="noopener noreferrer" class="q-link" @click.stop>{{shortLink(c.canonical_url,56)}}</a>
+                <div class="q-artifacts" @click.stop>
+                  <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.md_status)" :disabled="c.md_status!=='ready'" @click.stop="c.doc_path&&openOut(outputMdPreviewUrl(c.doc_path))">{{subLinkArtifactLabel('MD',c.md_status)}}</button>
+                  <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.html_status)" :disabled="c.html_status!=='ready'" @click.stop="c.html_path&&openOut(outputMdPreviewUrl(c.html_path))">{{subLinkArtifactLabel('HTML',c.html_status)}}</button>
+                  <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.feishu_status)" :disabled="c.feishu_status!=='ready'" @click.stop="c.feishu_doc_url&&openOut(c.feishu_doc_url)">{{subLinkArtifactLabel('飞书',c.feishu_status)}}</button>
+                </div>
+                <p v-if="c.error_message" class="fav-card-err">{{c.error_message}}</p>
+              </div>
+              <div v-if="!subLinkCards.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">暂无链接卡片。同步后会写入链接库，点击卡片跳转链接页全量任务卡。</div>
+            </div>
+          </template>
           <template v-else-if="subViewTab==='digest'">
             <div v-if="!subDigest.digest_md" class="rss-empty">暂无 digest。点击「同步」拉取并分析新笔记。</div>
             <div v-else class="xhs-sub-digest" v-html="renderSubDigestMd(subDigest.digest_md)"></div>
@@ -405,36 +624,133 @@
               <p v-if="subProfile.profile_md_path" class="xhs-profile-path">已持久化：{{subProfile.profile_md_path}}</p>
             </div>
           </template>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 小红书收藏夹订阅：启动/每日0点同步，仅分析新增收藏 -->
+    <!-- 小红书绑定：Cookie / CDP / 登录态 -->
+    <div v-show="sub.sec==='bind'" class="xhs-sub-page">
+      <div class="glass">
+        <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>小红书绑定</div>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:8px">绑定<strong>本人</strong>小红书账号（三点、水 / 9545679835），供收藏夹订阅与关注 UP 拉取使用。Chrome 149 起须用桌面<strong>「Google Chrome CDP 9223」</strong>快捷方式（独立 SBA-Chrome-CDP 目录）。</p>
+        <ul style="font-size:11px;color:var(--t2);margin:0 0 10px 18px;line-height:1.6">
+          <li><strong>评论读取</strong>：公开笔记评论区，通常<strong>无需登录</strong>（有 Cookie 可抓更多）</li>
+          <li><strong>UP 订阅</strong>：他人主页公开笔记，需小红书 Cookie 登录态</li>
+          <li><strong>收藏夹订阅</strong>：仅本人账号可见，需<strong>三点、水</strong>登录；优先 Cookie 模式，CDP 可选增强</li>
+        </ul>
+        <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <button type="button" class="btn btn-p btn-xs" :disabled="favForm.cookieSyncing" @click="refreshFavoritesCookies()">{{favForm.cookieSyncing?'同步 Cookie…':'从 Chrome 同步 Cookie'}}</button>
+          <button type="button" class="btn btn-o btn-xs" @click="ldXhsBinding()">刷新状态</button>
+        </div>
+        <p v-if="favForm.error" class="rss-err">{{favForm.error}}</p>
+        <div v-if="favProgress.message" class="fav-progress" :class="'fav-progress--'+favProgress.level">
+          <span v-if="favProgress.total>0" class="fav-progress-step">{{favProgress.step}}/{{favProgress.total}}</span>
+          <span class="fav-progress-msg">{{favProgress.message}}</span>
+        </div>
+        <div class="rss-feed-meta" style="margin-top:8px;line-height:1.7">
+          <div>Chrome Profile：{{favSession.chrome_profile_ok?'已就绪':'未就绪'}} · GAIA「{{favSession.chrome_gaia||'—'}}」</div>
+          <div>CDP：{{favSession.cdp_ready?'9223 已连接':'未连接'}} · Cookie 登录：{{favSession.cookie_logged_in?'是':'否'}}</div>
+          <div>小红书昵称：{{favSession.xhs_nickname||'—'}} · 本人校验：{{favSession.xhs_owner_ok?'通过':'未通过'}}</div>
+          <div>拉取模式：{{favSession.fetch_mode||'none'}}{{favSession.prefer_cookie_fetch?'（Cookie 优先）':''}}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 小红书收藏夹订阅：offset 批次同步 + 卡片 -->
     <div v-show="sub.sec==='fav'" class="xhs-sub-page">
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg></div>我的收藏夹订阅</div>
-        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">绑定<strong>三点、水</strong>（小红书号 9545679835）个人收藏夹。须使用本机 <strong>Chrome 有光账号</strong>（liyouguang2@gmail.com）并已开启 CDP（<code>--remote-debugging-port=9223</code>）；系统仅 CDP 附着现有 Chrome，<strong>不会新开浏览器</strong>，避免 Cookie 丢失。启动与每日 0:00 自动同步，首次建基线后仅分析新增收藏。</p>
-        <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
-          <button type="button" class="btn btn-p btn-xs" :disabled="favForm.syncing" @click="syncFavorites()">{{favForm.syncing?'同步中…':'立即同步'}}</button>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:8px">默认<strong>全量同步</strong>收藏；可选填每批数量限制单次条数。url_hash 与历史库重合的笔记默认跳过不导入。Cookie / CDP 绑定请至「小红书绑定」页。</p>
+        <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center">
+          <label style="font-size:11px;color:var(--t2);white-space:nowrap">每批数量（可选）</label>
+          <input class="gi" type="number" min="1" max="80" placeholder="全量" v-model="favForm.syncBatchSize" style="max-width:72px" title="留空=全量同步；填写则限制每批条数"/>
+          <button type="button" class="btn btn-p btn-xs" :disabled="favForm.syncing" @click="syncFavorites()">{{favForm.syncing?'同步中…':'同步'}}</button>
           <button type="button" class="btn btn-o btn-xs" @click="ldFavorites()">刷新</button>
         </div>
         <p v-if="favForm.error" class="rss-err">{{favForm.error}}</p>
+        <div v-if="favProgress.message" class="fav-progress" :class="'fav-progress--'+favProgress.level">
+          <span v-if="favProgress.total>0" class="fav-progress-step">{{favProgress.step}}/{{favProgress.total}}</span>
+          <span class="fav-progress-msg">{{favProgress.message}}</span>
+        </div>
         <div v-if="favSub.subscription_id" class="rss-feed-meta" style="margin-top:6px">
           {{favSub.display_name||'三点、水-收藏夹'}} · 小红书号 {{favSub.red_id||'9545679835'}} · {{favSub.status||'active'}}
           <span v-if="favSub.initial_backfill_done"> · 增量模式</span>
-          <span v-else> · 基线建立中</span>
+          <span v-else> · offset 回填中（cursor {{favSub.cursor_offset||0}}）</span>
         </div>
-        <p v-if="!favSession.xhs_owner_ok||!favSession.cdp_ready" class="rss-err" style="margin-top:8px;font-size:12px">
-          Chrome 会话：{{favSession.chrome_gaia||'—'}} / 小红书 {{favSession.xhs_nickname||'未登录'}}
-          <span v-if="!favSession.cdp_ready"> · CDP 未就绪（请用有光 Chrome 加 <code>--remote-debugging-port=9223</code> 启动）</span>
-        </p>
-        <p v-else class="rss-feed-meta" style="margin-top:6px;color:var(--ok)">
-          Chrome「{{favSession.chrome_gaia}}」· 小红书「{{favSession.xhs_nickname}}」· CDP 已附着
-        </p>
+      </div>
+      <div class="glass" style="margin-top:10px">
+        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></div>订阅链接卡片（简化 · Redis）</div>
+        <p style="font-size:11px;color:var(--t3);margin-bottom:8px">序号：<strong>收藏#N</strong>=小红书收藏夹顺序；<strong>页内#N</strong>=当前分页内顺序（按入库时间）。点击卡片跳转链接页任务卡。</p>
+        <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center">
+          <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='grid'}" @click="setSubLinkViewMode('grid')">卡片铺开</button>
+          <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='row'}" @click="setSubLinkViewMode('row')">一行显示</button>
+          <label style="font-size:11px;color:var(--t3)">每页</label>
+          <select class="inp inp-xs" style="width:64px" :value="subLinkPaging.page_size" @change="setSubLinkPageSize($event.target.value)">
+            <option :value="10">10</option><option :value="20">20</option><option :value="50">50</option>
+          </select>
+          <button type="button" class="btn btn-o btn-xs" :disabled="subLinkPaging.page<=1" @click="subLinkPagePrev">上一页</button>
+          <span style="font-size:11px;color:var(--t3)">{{subLinkPaging.page}} / {{Math.max(1,Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20)))}} · 共 {{subLinkPaging.total||0}}</span>
+          <button type="button" class="btn btn-o btn-xs" :disabled="subLinkPaging.page>=Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20))" @click="subLinkPageNext">下一页</button>
+        </div>
+        <div v-if="favSyncReport.loading||subLinkPaging.loading" class="rss-empty">加载收藏卡片…</div>
+        <div v-else :class="subLinkPaging.view==='row'?'sub-link-rows':'q-grid fav-card-grid'">
+          <div v-for="c in favCards" :key="c.url_hash||c.note_id||c.seq" class="q-card fav-card sub-link-card" :class="favCardClass(c)" @click="openSubscriptionLinkTask(c)">
+            <div v-if="c.seq" class="fav-card-seq" :title="favCardSeqTitle(c)">{{favCardSeqText(c)}}</div>
+            <div class="qt">
+              <span class="q-title-main">{{c.title||c.note_id||'未命名'}}</span>
+              <span class="q-platform">· {{c.content_type==='video'?'视频':'图文'}}</span>
+            </div>
+            <div v-if="linkCardSourceLine(c)" class="q-subtitle q-source-line">{{linkCardSourceLine(c)}}</div>
+            <div v-if="c.task_note" class="q-subtitle">备注：{{c.task_note}}</div>
+            <div class="qs"><span :style="{color:favCardStatusColor(c)}">{{favCardStatusText(c)}}</span></div>
+            <a v-if="c.canonical_url" :href="c.canonical_url" target="_blank" rel="noopener noreferrer" class="q-link" @click.stop>{{shortLink(c.canonical_url,56)}}</a>
+            <div class="q-artifacts" @click.stop>
+              <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.md_status)" :disabled="c.md_status!=='ready'" @click.stop="c.doc_path&&openOut(outputMdPreviewUrl(c.doc_path))">{{subLinkArtifactLabel('MD',c.md_status)}}</button>
+              <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.html_status)" :disabled="c.html_status!=='ready'" @click.stop="c.html_path&&openOut(outputMdPreviewUrl(c.html_path))">{{subLinkArtifactLabel('HTML',c.html_status)}}</button>
+              <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.feishu_status)" :disabled="c.feishu_status!=='ready'" @click.stop="c.feishu_doc_url&&openOut(c.feishu_doc_url)">{{subLinkArtifactLabel('飞书',c.feishu_status)}}</button>
+            </div>
+            <p v-if="c.error_message" class="fav-card-err">{{c.error_message}}</p>
+          </div>
+          <div v-if="!favCards.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">暂无收藏卡片。点「同步」按发布时间连续性拉取并分析。</div>
+        </div>
+      </div>
+      <div v-if="favSyncReport.hasRun" class="glass" style="margin-top:10px">
+        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg></div>本次同步结果</div>
+        <div class="fav-sync-summary" v-if="favSyncReport.summary&&favSyncReport.summary.one_liner">
+          <strong>分析摘要：</strong>{{favSyncReport.summary.one_liner}}
+        </div>
+        <div class="fav-sync-stats" v-if="favSyncReport.run">
+          状态 {{favSyncReport.run.status||'—'}}
+          · 新增 {{favSyncReport.run.new_count??'—'}}
+          · 已分析 {{favSyncReport.run.analyzed_count??'—'}}
+          · 失败 {{favSyncReport.run.failed_count??0}}
+        </div>
+        <table class="fav-sync-table" v-if="favSyncReport.items.length">
+          <thead><tr><th title="收藏#=小红书顺序；无则页内序">序</th><th>标题</th><th>类型</th><th>任务状态</th><th>产物</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr v-for="(row,i) in favSyncReport.items" :key="row.note_id||i">
+              <td :title="favCardSeqTitle(row)">{{favCardSeqText(row)||('#'+(row.seq||i+1))}}</td>
+              <td><a v-if="row.canonical_url" :href="row.canonical_url" target="_blank" rel="noopener">{{row.title||row.note_id}}</a><span v-else>{{row.title||row.note_id}}</span></td>
+              <td>{{row.content_type==='video'?'视频':'图文'}}</td>
+              <td :class="{'fav-td-err':row.analysis_status==='failed'}">{{favCardStatusText(row)}}</td>
+              <td>
+                <a v-if="row.doc_path" :href="outputMdPreviewUrl(row.doc_path)" target="_blank" rel="noopener">{{pathBasename(row.doc_path)}}</a>
+                <span v-else>—</span>
+              </td>
+              <td class="fav-td-note">{{row.error_message||''}}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="favSyncReport.digest_md" class="xhs-sub-digest" style="margin-top:10px" v-html="renderSubDigestMd(favSyncReport.digest_md)"></div>
       </div>
       <div class="rss-layout">
-        <div class="glass rss-feeds">
-          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>收藏习惯画像</div>
+        <div class="glass rss-feeds" :class="{'rss-panel-fullscreen': isSidePanelFs('fav-habit')}">
+          <header class="rss-panel-hd">
+            <div class="st rss-panel-title"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>收藏习惯画像</div>
+            <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('fav-habit')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('fav-habit')">{{isSidePanelFs('fav-habit')?'收起':'全屏'}}</button>
+          </header>
+          <div class="rss-panel-scroll">
           <div v-if="!favHabit.top_authors||!favHabit.top_authors.length" class="rss-empty">暂无习惯数据。完成至少一批新增收藏分析后将累积作者/话题偏好。</div>
           <div v-else class="xhs-profile-cards">
             <div class="xhs-profile-card">
@@ -456,12 +772,18 @@
             </div>
           </div>
           <div v-if="favHabit.persona_md" class="xhs-sub-digest" style="margin-top:10px;font-size:12px" v-html="renderSubDigestMd(favHabit.persona_md.slice(0,3000))"></div>
+          </div>
         </div>
-        <div class="glass rss-articles">
-          <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>收藏批次 Digest</div>
+        <div class="glass rss-articles" :class="{'rss-panel-fullscreen': isSidePanelFs('fav-digest')}">
+          <header class="rss-panel-hd">
+            <div class="st rss-panel-title"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>收藏批次 Digest</div>
+            <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('fav-digest')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('fav-digest')">{{isSidePanelFs('fav-digest')?'收起':'全屏'}}</button>
+          </header>
+          <div class="rss-panel-scroll">
           <div v-if="!favDigest.digest_md" class="rss-empty">暂无 digest。新增收藏同步后将生成主题归类与优先级说明。</div>
           <div v-else class="xhs-sub-digest" v-html="renderSubDigestMd(favDigest.digest_md)"></div>
           <p v-if="favDigest.rag_degraded" style="font-size:11px;color:var(--warn);margin-top:10px">RAG 检索降级。</p>
+          </div>
         </div>
       </div>
     </div>
@@ -478,7 +800,7 @@
           <span class="orch-pillar-idx">◎</span>
           <div class="orch-pillar-h-text">
             <h2 class="orch-pillar-title">能力看板</h2>
-            <p class="orch-pillar-sub">SKILL · MCP · 分类检索 · 点击卡片打开详情与流程图</p>
+            <p class="orch-pillar-sub">SKILL · MCP · 分类检索 · 加入时间 / 使用热度筛选 · 点击卡片打开详情与流程图</p>
           </div>
           <div class="orch-mcp-actions">
             <button type="button" class="btn btn-p btn-xs" @click="importProjectSkillsBatch">批量导入 SKILL</button>
@@ -492,6 +814,19 @@
         </div>
         <div class="orch-board-search-row">
           <input class="gi orch-board-search" type="search" v-model="orchToolSearch" placeholder="搜索工具名、中文别名、描述、命令…" autocomplete="off" spellcheck="false"/>
+          <select class="gi orch-board-filter" v-model="orchBoardJoinRange" title="按 SKILL 加入时间筛选">
+            <option value="all">加入时间 · 全部</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="90d">近 90 天</option>
+          </select>
+          <select class="gi orch-board-filter" v-model="orchBoardSort" title="排序方式">
+            <option value="default">排序 · 默认分类</option>
+            <option value="join_desc">加入时间 · 最新</option>
+            <option value="join_asc">加入时间 · 最早</option>
+            <option value="heat_desc">使用热度 · 高→低</option>
+            <option value="heat_asc">使用热度 · 低→高</option>
+          </select>
           <span class="orch-board-stat">显示 {{ orchBoardFilteredItems.length }} / {{ orchBoardTotalCount }}</span>
         </div>
         <div v-if="!orchBoardByCategory.length" class="orch-dk-empty">暂无匹配项。可「批量导入 SKILL」或连接 MCP 后刷新。</div>
@@ -509,11 +844,13 @@
                 type="button"
                 class="orch-board-chip"
                 :class="'orch-board-chip-' + (it.type === 'mcp-server' ? 'mcp-server' : it.type)"
-                :title="it.description || it.name"
+                :title="orchBoardItemTitle(it)"
                 @click="orchBoardOpenItem(it)"
               >
                 <span class="orch-board-chip-type">{{ it.typeLabel }}</span>
                 <span class="orch-board-chip-name">{{ it.name }}<span v-if="it.aliasCn" class="orch-board-chip-cn">（{{ it.aliasCn }}）</span></span>
+                <span v-if="it.usageCount>0" class="orch-board-chip-heat" :title="'Agent 挂载/调用 '+it.usageCount+' 次'">🔥{{ it.usageCount }}</span>
+                <span v-if="it.createdAt" class="orch-board-chip-date" :title="'加入时间 '+it.createdAt">{{ it.createdAt.slice(5) }}</span>
                 <span v-if="it.board && it.board.source === 'llm'" class="orch-board-chip-ai">AI</span>
               </button>
             </div>
@@ -1388,7 +1725,7 @@
           <template v-if="taskHistDetailCounts(h)">
             <span class="task-hist-count-chip">固定层 {{ taskHistDetailCounts(h).fixed }}</span>
             <span class="task-hist-count-chip">开放层 {{ taskHistDetailCounts(h).open }}</span>
-            <span class="task-hist-count-chip">工具 {{ taskHistDetailCounts(h).tools }}</span>
+            <span class="task-hist-count-chip">步骤组 {{ taskHistDetailCounts(h).groups }}</span>
             <span class="task-hist-count-chip">步骤 {{ taskHistDetailCounts(h).steps }}</span>
           </template>
         </div>
@@ -1412,7 +1749,7 @@
         <div class="iag-hero-text">
           <p class="iag-kicker">服务端链路 · 仅管理员</p>
           <h2 class="iag-title">内部 Agent 配置</h2>
-          <p class="iag-lede">六类内部 Agent 的提示词与流水线开关写入 <span class="iag-mono-inline">config.json</span>；行为说明写入 <span class="iag-mono-inline">src/agent/agents/…</span> 对应 Markdown。这里决定摘要语气、成品结构与导出命名，不是终端用户的界面皮肤。</p>
+          <p class="iag-lede">七类内部 Agent 的提示词与流水线开关写入 <span class="iag-mono-inline">config.json</span>；行为说明写入对应 Markdown。这里决定摘要语气、成品结构与导出命名，不是终端用户的界面皮肤。</p>
         </div>
       </div>
     </section>
@@ -1528,10 +1865,29 @@
 
           <article class="iag-card">
             <header class="iag-card-h">
+              <h4 class="iag-h4">结构化元数据提取</h4>
+              <span class="iag-keytag">meta_extract_fields</span>
+            </header>
+            <p class="iag-phelp">除摘要 Agent 内置的 title/summary 外，按 JSON 字段定义主动提取元数据（真实 LLM 调用）。与知识库 metadata 模板字段对齐；可在 output_template 顶部插入 <code class="iag-chipcode">{meta_json}</code> 控制展示。</p>
+            <label class="iag-bool-label" style="margin-bottom:8px">
+              <input type="checkbox" v-model="iag.fields.meta_extract_enabled"/>
+              <span>启用元数据提取</span>
+            </label>
+            <div class="btns" style="margin:0 0 8px;flex-wrap:wrap">
+              <button type="button" class="btn btn-o btn-xs" @click="iagApplyKbMetaSchema">一键同步知识库 metadata 模板</button>
+              <button type="button" class="btn btn-o btn-xs" @click="iagResetMetaExtractFields">恢复默认字段</button>
+            </div>
+            <textarea class="gta iag-ta ta-mono" rows="10" v-model="iagMetaExtractFieldsJson" spellcheck="false" placeholder='[{"key":"domain","label":"领域","description":"…"}]'></textarea>
+            <label class="iag-label-s" style="margin-top:10px">提取 Prompt 补充（meta_extract_prompt）</label>
+            <textarea class="gta iag-ta" rows="4" v-model="iag.fields.meta_extract_prompt" placeholder="可选：对元数据提取的额外说明"></textarea>
+          </article>
+
+          <article class="iag-card">
+            <header class="iag-card-h">
               <h4 class="iag-h4">成品 Markdown 骨架</h4>
               <span class="iag-keytag">output_template</span>
             </header>
-            <p class="iag-phelp">决定保存下来的 .md 长什么样。花括号里是变量名；可在 AI 分析段后写 <code class="iag-chipcode">{comments_section}</code>，或留空由系统自动追加【评论区】。</p>
+            <p class="iag-phelp">决定保存下来的 .md 长什么样。花括号里是变量名；默认未写 <code class="iag-chipcode">{meta_json}</code> 时系统仍会在文首追加结构化 JSON。可在 AI 分析段后写 <code class="iag-chipcode">{comments_section}</code>。</p>
             <textarea class="gta iag-ta" rows="12" v-model="iag.fields.output_template"></textarea>
             <div class="iag-chiprow iag-chiprow--wrap">
               <span class="iag-chiplabel">插入变量</span>
@@ -1582,6 +1938,12 @@
         </aside>
       </div>
 
+      <div v-if="iag.tab==='reader_agent'" class="iag-mdsection iag-mdsection--top">
+        <div class="apz-layer-h">规范 Markdown（AGENT 文档 · 完整版）</div>
+        <p class="iag-phelp">完整规范文档；下方各模块字段与本文 ## 章节双向同步，保存时一并写入 <span class="iag-mono-inline">config.json</span> 与 AGENT.md。</p>
+        <textarea class="gta iag-mdta" rows="14" v-model="iag.md" placeholder="编辑 AGENT.md 全文…"></textarea>
+      </div>
+
       <div v-if="iag.tab==='longpage_diagram_legend_agent'" class="iag-diagram-styles glass-inset">
         <div class="apz-layer-h">图表样式预设（按类型）</div>
         <p class="iag-phelp">与长页 HTML 注入脚本、工具页 Mermaid/药丸流程图共用；保存写入 <span class="iag-mono-inline">config.json</span>，与老项目 <span class="iag-mono-inline">diagram_style_presets.py</span> 对齐。</p>
@@ -1596,7 +1958,7 @@
         </article>
       </div>
 
-      <div v-else class="iag-fields-block">
+      <div v-else-if="!iagIsGuidedTab()" class="iag-fields-block">
         <p v-if="iag.tab==='summary_agent' && iagRawMode" class="iag-banner">代码字段模式：按 <span class="iag-mono-inline">config.json</span> 键名展示全部字段，便于复制到脚本；保存与向导模式相同。</p>
         <div class="apz-layer-h iag-fields-h">提示词与输出控制（config.json）</div>
         <template v-for="k in iagGenericFieldKeys()" :key="iag.tab + '-' + k">
@@ -1625,7 +1987,42 @@
         </template>
       </div>
 
-      <div class="iag-mdsection">
+      <div v-if="iag.tab==='reader_agent'" class="iag-guided-stack">
+        <div class="apz-layer-h">模块化 Prompt（config.json · 按段编辑）</div>
+        <p class="iag-phelp iag-banner">各段对应 <code>reader_*</code> 变量，与上方 AGENT.md 的 ## 章节双向同步；运行时后端按段拼装 System Prompt。</p>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">系统人设</h4><span class="iag-keytag">reader_system_prompt</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_system_prompt') }}</p>
+          <textarea class="gta iag-ta" rows="4" v-model="iag.fields.reader_system_prompt" placeholder="AGENT.md 前言区（# 标题与 ## 1 之间）"></textarea>
+        </article>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">角色与任务</h4><span class="iag-keytag">reader_role_task</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_role_task') }}</p>
+          <textarea class="gta iag-ta" rows="6" v-model="iag.fields.reader_role_task" placeholder="对应 AGENT.md ## 1. 角色 + ## 2. 任务"></textarea>
+        </article>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">COT 动作框架</h4><span class="iag-keytag">reader_action_framework</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_action_framework') }}</p>
+          <textarea class="gta iag-ta" rows="5" v-model="iag.fields.reader_action_framework" placeholder="## 3. 动作框架"></textarea>
+        </article>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">必须遵守（DO）</h4><span class="iag-keytag">reader_standards_must</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_standards_must') }}</p>
+          <textarea class="gta iag-ta" rows="5" v-model="iag.fields.reader_standards_must" placeholder="## 4. 规范"></textarea>
+        </article>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">禁止（NOT DO）</h4><span class="iag-keytag">reader_no_doing</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_no_doing') }}</p>
+          <textarea class="gta iag-ta" rows="5" v-model="iag.fields.reader_no_doing" placeholder="## 5. 禁止"></textarea>
+        </article>
+        <article class="iag-card">
+          <header class="iag-card-h"><h4 class="iag-h4">回答输出模板</h4><span class="iag-keytag">reader_output_template</span></header>
+          <p class="iag-phelp">{{ iagHelpText('reader_output_template') }}</p>
+          <textarea class="gta iag-ta" rows="8" v-model="iag.fields.reader_output_template" placeholder="## 6. 输出格式（无需手写 ``` 围栏）"></textarea>
+        </article>
+      </div>
+
+      <div v-if="iag.tab!=='reader_agent'" class="iag-mdsection">
         <div class="apz-layer-h">规范 Markdown（AGENT 文档）</div>
         <textarea class="gta iag-mdta" rows="14" v-model="iag.md" placeholder="编辑后与上方字段一并保存到服务端…"></textarea>
       </div>
@@ -1792,12 +2189,18 @@
     <div class="mm-grid">
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg></div>多模态文档处理</div>
-        <p style="font-size:11px;color:var(--t3);margin-bottom:10px" v-if="mm.mode==='doc'">本地上传或从服务端白名单路径加入队列，再调用 <code style="color:var(--a2)">DocumentProcessor</code> 逐文件分析。</p>
+        <p style="font-size:11px;color:var(--t3);margin-bottom:10px" v-if="mm.mode==='doc'">本地上传或从服务端白名单路径加入队列，解析后<strong>默认导出 Markdown</strong> 到输出目录 <code style="color:var(--a2)">mm_exports/</code>；可选 TXT 与摘要 Agent 沉淀（含结构化元数据，配置见「内部 Agent → 摘要 Agent」）。</p>
         <p style="font-size:11px;color:var(--t3);margin-bottom:10px" v-else>流程图分块得分：PDF/图片 → CV 检框 → 泳道横切（<code style="color:var(--a2)">column_band_split</code>）→ 黑框吸附 → 几何得分与叠图预览。</p>
         <div class="mm-mode-row">
           <span class="fl">处理模式</span>
           <label class="mm-mode-opt"><input type="radio" value="doc" v-model="mm.mode"/> 普通文档</label>
           <label class="mm-mode-opt"><input type="radio" value="flowchart" v-model="mm.mode"/> 流程图分块得分</label>
+        </div>
+        <div v-if="mm.mode==='doc'" class="mm-export-opts">
+          <label class="mm-fc-lbl"><input type="checkbox" v-model="mm.exportTxt" @change="persistMmPrefs"/> 同时导出 TXT（默认关闭）</label>
+          <label class="mm-fc-lbl" title="走摘要 Agent 配置：润色、摘要、output_template 与结构化元数据提取">
+            <input type="checkbox" v-model="mm.summarize" @change="persistMmPrefs"/> 摘要化处理（含结构化元数据）
+          </label>
         </div>
         <div v-if="mm.mode==='flowchart'" class="mm-fc-opts">
           <label class="mm-fc-lbl">PDF 页码 <input class="gi gi-xs" type="number" min="1" v-model.number="mm.page" style="width:56px"/></label>
@@ -1809,7 +2212,7 @@
         <div class="mm-drop" @click="mmPickLocal" @dragover.prevent @drop.prevent="mmOnDrop">点击或拖拽文件到此处上传<br/><span style="font-size:10px;opacity:.85">写入服务端 output/mm_uploads</span></div>
         <div class="btns" style="margin-top:12px;flex-wrap:wrap">
           <button type="button" class="btn btn-o btn-xs" @click="openMmBrowse">从服务器浏览加入队列…</button>
-          <button type="button" class="btn btn-p btn-xs" @click="docProc" :disabled="mm.busy">{{mm.mode==='flowchart'?'流程图得分':'开始处理队列'}}</button>
+          <button type="button" class="btn btn-p btn-xs" @click="docProc" :disabled="mm.busy">{{mm.mode==='flowchart'?'流程图得分':'开始处理并导出'}}</button>
           <button type="button" class="btn btn-o btn-xs" @click="openOut">输出目录（服务端）</button>
         </div>
         <div class="btns" style="margin-top:8px;flex-wrap:wrap">
@@ -1890,8 +2293,12 @@
       </div>
     </div>
     <div class="rss-layout">
-      <div class="glass rss-feeds">
-        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>订阅源</div>
+      <div class="glass rss-feeds" :class="{'rss-panel-fullscreen': isSidePanelFs('rss-feeds')}">
+        <header class="rss-panel-hd">
+          <div class="st rss-panel-title"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>订阅源</div>
+          <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('rss-feeds')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('rss-feeds')">{{isSidePanelFs('rss-feeds')?'收起':'全屏'}}</button>
+        </header>
+        <div class="rss-panel-scroll">
         <div v-if="!rss.feeds.length&&!rss.loading" class="rss-empty">暂无订阅。在上方输入 Feed URL 开始。</div>
         <button v-for="f in rss.feeds" :key="f.id" type="button" class="rss-feed-card" :class="{on:rss.selFeedId===f.id}" @click="rssSelectFeed(f.id)">
           <div class="rss-feed-title">{{f.title||f.url}}</div>
@@ -1902,16 +2309,21 @@
           <button type="button" class="btn btn-o btn-xs" :disabled="rss.busy" @click="rssSyncOne(rss.selFeedId)">{{rss.syncActive?rss.syncStage||'同步中…':'同步此源'}}</button>
           <button type="button" class="btn btn-danger btn-xs" :disabled="rss.busy" @click="rssDeleteFeed(rss.selFeedId)">删除</button>
         </div>
+        </div>
       </div>
-      <div class="glass rss-articles">
-        <div class="st" style="margin-bottom:8px;flex-wrap:wrap;gap:8px">
-          <div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>
-          <span>{{rssArticleTitle()}}</span>
-          <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+      <div class="glass rss-articles" :class="{'rss-panel-fullscreen': isSidePanelFs('rss-articles')}">
+        <header class="rss-panel-hd">
+          <div class="st rss-panel-title" style="flex-wrap:wrap;gap:8px">
+            <div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div>
+            <span>{{rssArticleTitle()}}</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
             <button type="button" class="btn btn-o btn-xs" :class="{on:rss.filterUnread}" @click="rssToggleFilter('unread')">仅未读</button>
             <button type="button" class="btn btn-o btn-xs" :class="{on:rss.filterStarred}" @click="rssToggleFilter('star')">仅星标</button>
-          </span>
-        </div>
+            <button type="button" class="btn btn-o btn-xs rss-panel-fs-btn" :title="isSidePanelFs('rss-articles')?'退出全屏':'全屏展开'" @click="toggleSidePanelFs('rss-articles')">{{isSidePanelFs('rss-articles')?'收起':'全屏'}}</button>
+          </div>
+        </header>
+        <div class="rss-panel-scroll">
         <div v-if="!rss.items.length&&!rss.loading" class="rss-empty">暂无文章。添加订阅并同步后将显示在此。</div>
         <div v-for="it in rss.items" :key="it.id" class="rss-item" :class="{on:rss.selItemId===it.id,read:it.read,starred:it.starred}" @click="rssSelectItem(it.id)">
           <div class="rss-item-head">
@@ -1929,7 +2341,30 @@
             <a v-if="it.link" class="rss-item-link" :href="it.link" target="_blank" rel="noopener" @click.stop>打开原文 →</a>
           </div>
         </div>
+        </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══ PAGE: 文本阅读入口（阅读器在 /preview/md.html 弹窗） ═══ -->
+  <div v-show="page==='reader'" class="reader-hub">
+    <input id="reader-file-inp" type="file" accept=".md,.txt,.markdown,.mdx,text/plain,text/markdown" class="sr-only" @change="onReaderLocalFile"/>
+    <div class="glass reader-hub-card">
+      <header class="reader-hub-head">
+        <h1 class="reader-hub-title">文本阅读</h1>
+        <p class="reader-hub-sub">在独立窗口打开 Markdown 阅读器；分栏、标记与<strong>辅助阅读 Agent</strong>均在阅读器右下角。</p>
+        <button type="button" class="btn btn-p" @click="readerPickLocalFile">打开本地文件</button>
+      </header>
+      <section class="reader-hub-recent">
+        <h2 class="reader-hub-h2">最近打开</h2>
+        <p v-if="!rh.recent.length" class="reader-hub-empty">暂无记录，打开文件后将按最新修改时间显示在此。</p>
+        <ul v-else class="reader-hub-list">
+          <li v-for="(it, ix) in rh.recent" :key="it.id || ix" class="reader-hub-row" @click="readerOpenRecent(it)">
+            <span class="reader-hub-name">{{ it.name }}</span>
+            <span class="reader-hub-meta">{{ fmtRecentTime(it.mtime) }}</span>
+          </li>
+        </ul>
+      </section>
     </div>
   </div>
 
@@ -1949,6 +2384,7 @@
   <div v-show="page==='webreplay'" class="webreplay-page">
     <div class="sn">
       <div class="sn-i" :class="{on:wr.sec==='scripts'}" @click="openWebreplaySec('scripts')">脚本库</div>
+      <div class="sn-i" :class="{on:wr.sec==='cdp'}" @click="openWebreplaySec('cdp')">CDP 录制</div>
       <div class="sn-i" :class="{on:wr.sec==='bridge'}" @click="openWebreplaySec('bridge')">扩展连接</div>
       <div class="sn-i" :class="{on:wr.sec==='guide'}" @click="openWebreplaySec('guide')">使用指南</div>
     </div>
@@ -1957,7 +2393,7 @@
     <template v-if="wr.sec==='scripts'">
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-webreplay"/></svg></div>录制脚本库</div>
-        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">在 Chrome 扩展 <strong>WebReplay</strong> 中录制后，可在此导入 JSON 统一管理与备份；重放仍在已登录浏览器中由扩展执行。</p>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">支持 <strong>扩展 DOM 录制</strong> 与 <strong>CDP DOM 录制</strong>（均记录真实点击事件 + 选择器，非视频 CV）。脚本统一在此管理；重放可选扩展或 CDP。</p>
         <div class="btns" style="flex-wrap:wrap;gap:8px;margin-bottom:12px">
           <button type="button" class="btn btn-p btn-xs" :disabled="wr.loading" @click="ldWrScripts">刷新</button>
           <button type="button" class="btn btn-o btn-xs" @click="wrExportAll">导出全部</button>
@@ -1983,17 +2419,52 @@
                 <span class="wr-step-idx">{{i+1}}</span>
                 <span class="wr-step-kind">{{wrStepKindLabel(st)}}</span>
                 <span class="wr-step-desc">{{wrStepDesc(st)}}</span>
+                <img v-if="wrStepShotUrl(st)" class="wr-step-shot" :src="wrStepShotUrl(st)" :alt="'步骤'+(i+1)+'截图'" loading="lazy"/>
               </div>
               <p v-if="(wr.selDetail.steps||[]).length>40" style="font-size:11px;color:var(--t3)">仅展示前 40 步…</p>
             </div>
-            <div class="btns" style="margin-top:10px">
+            <div class="btns" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+              <button type="button" class="btn btn-p btn-xs" :disabled="wr.replayBusy" @click="wrReplayCdp(wr.selId)">CDP 重放</button>
+              <button type="button" class="btn btn-o btn-xs" :disabled="wr.replayBusy||!wr.bridge.extensionId" @click="wrReplayExt(wr.selDetail)">扩展重放</button>
               <button type="button" class="btn btn-o btn-xs" @click="wrExportOne(wr.selDetail)">导出此脚本</button>
               <button type="button" class="btn btn-danger btn-xs" @click="wrDeleteScript(wr.selId)">删除</button>
             </div>
+            <p v-if="wr.selDetail.source" class="wr-meta-line" style="margin-top:8px"><span>来源</span> {{wr.selDetail.source}}</p>
+            <p v-if="(wr.selDetail.frameTimeline||[]).length" class="wr-meta-line"><span>录屏帧</span> {{(wr.selDetail.frameTimeline||[]).length}} 张（2s/帧时间轴，仅供回看）</p>
           </div>
           <div class="wr-detail glass wr-detail--empty" v-else>
             <p style="font-size:12px;color:var(--t3);padding:24px 12px;text-align:center">选择左侧脚本查看步骤明细</p>
           </div>
+        </div>
+      </div>
+    </template>
+
+    <template v-if="wr.sec==='cdp'">
+      <div class="glass">
+        <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M10 8l6 4-6 4V8z"/></svg></div>CDP DOM 录制（无需扩展）</div>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:12px">附着本机已开 <code class="ta-mono">--remote-debugging-port</code> 的 Chrome：注入与扩展同款的 <strong>click/change 监听器</strong>，同步抓取每步截图 + 2 秒一帧的轻量录屏时间轴（仅供人工核对，重放仍走 DOM 选择器）。</p>
+        <div class="wr-cdp-status" :class="{ok:wr.cdp.connected}">
+          <span v-if="wr.cdp.connected">CDP 已连接 · 端口 {{wr.cdp.port}} · {{wr.cdp.tabCount}} 个可用标签</span>
+          <span v-else>{{wr.cdp.error||'未检测到 CDP，请先启动带调试端口的 Chrome'}}</span>
+          <button type="button" class="btn btn-o btn-xs" :disabled="wr.cdp.busy" @click="ldWrCdpStatus">刷新状态</button>
+        </div>
+        <div v-if="wr.cdp.tabs.length" class="wr-cdp-tabs">
+          <div class="wr-cdp-tabs-title">可附着标签（录制时将匹配 URL 片段）</div>
+          <button v-for="(t,i) in wr.cdp.tabs.slice(0,8)" :key="i" type="button" class="wr-cdp-tab" :class="{on:wr.cdp.tabHint===t.url}" @click="wr.cdp.tabHint=t.url">
+            <span class="wr-cdp-tab-title">{{t.title||'无标题'}}</span>
+            <span class="wr-cdp-tab-url">{{t.url}}</span>
+          </button>
+        </div>
+        <div class="fr" style="margin-top:12px"><span class="fl">脚本名</span><input class="gi" v-model="wr.cdp.recName" placeholder="例如：千帆笔记导出" :disabled="wr.cdp.recording"/></div>
+        <div class="btns" style="margin-top:12px;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn btn-p btn-xs" :disabled="!wr.cdp.connected||wr.cdp.recording||wr.cdp.busy" @click="wrCdpStartRecord">开始录制</button>
+          <button type="button" class="btn btn-o btn-xs" :disabled="!wr.cdp.recording||wr.cdp.busy" @click="wrCdpStopRecord">完成录制并保存</button>
+        </div>
+        <div v-if="wr.cdp.recording" class="wr-cdp-live">
+          <p><strong>录制中</strong> · 会话 {{wr.cdp.sessionId.slice(0,8)}}…</p>
+          <p>已记录 <strong>{{wr.cdp.stepCount}}</strong> 步 · 录屏帧 <strong>{{wr.cdp.frameCount}}</strong> 张</p>
+          <p class="wr-cdp-live-url">{{wr.cdp.tabUrl}}</p>
+          <p style="font-size:11px;color:var(--t3)">请在 Chrome 目标页操作；页面右下角有黄条提示。完成后点「完成录制并保存」。</p>
         </div>
       </div>
     </template>
@@ -2016,13 +2487,13 @@
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></div>使用指南</div>
         <ol class="wr-guide-list">
-          <li>构建扩展：<code class="ta-mono">extensions/webreplay</code> 目录执行 <code class="ta-mono">npm install && npm run build</code></li>
-          <li>Chrome 打开 <code class="ta-mono">chrome://extensions</code> → 开发者模式 → 加载已解压的扩展 → 选择 <code class="ta-mono">dist</code></li>
-          <li>在<strong>已登录</strong>的目标后台页面打开扩展 Popup，输入脚本名并「开始录制」</li>
-          <li>完成操作后点页面右下角黄条「完成」，脚本可在此「脚本库」导入/导出备份</li>
-          <li>重放：扩展 Popup 或 MCP 消息 <code class="ta-mono">run_script</code>（须在 Chrome 环境）</li>
+          <li><strong>路径 A · 扩展</strong>：构建 <code class="ta-mono">extensions/webreplay</code> → 加载 dist → Popup「开始录制」→ 黄条「完成」</li>
+          <li><strong>路径 B · CDP（免扩展）</strong>：Chrome 带 <code class="ta-mono">--remote-debugging-port=9222</code> 启动 → 打开目标页 → 本站「CDP 录制」开始/完成</li>
+          <li>两种路径均记录 <strong>真实 isTrusted 点击/输入</strong> + CSS/XPath/文本快照；附带每步截图与 2s 帧录屏时间轴（人工核对用，重放不靠 CV）</li>
+          <li>脚本库统一管理；重放可选 <strong>CDP 重放</strong> 或 <strong>扩展重放</strong>（须配置扩展 ID）</li>
+          <li>Agent 桥接：MCP 消息 <code class="ta-mono">run_script</code> 或 API <code class="ta-mono">/api/webreplay/cdp/replay/{id}</code></li>
         </ol>
-        <p style="font-size:11px;color:var(--t3);margin-top:12px">原理：DOM 事件 + CSS/XPath 定位（非视频坐标学习）。与 webXport 同类方案，本仓库实现为开源无付费墙版本。</p>
+        <p style="font-size:11px;color:var(--t3);margin-top:12px">原理：DOM 事件 + 多策略元素定位。与 webXport 同类方案；本仓库 WebReplay 为开源无付费墙实现。</p>
       </div>
     </template>
   </div>
@@ -2041,7 +2512,7 @@
     </div>
 
     <template v-if="st.sec==='agent'">
-      <p style="font-size:11px;color:var(--t3);margin-bottom:10px">API 节点池与各内部 Agent 的<strong>任务路由</strong>。各 Agent 的<strong>工作指令、输出控制字段与规范 Markdown</strong>请在主导航「内部 Agent 配置」中按 6 类分别维护。</p>
+      <p style="font-size:11px;color:var(--t3);margin-bottom:10px">API 节点池与各内部 Agent 的<strong>任务路由</strong>。各 Agent 的<strong>工作指令、输出控制字段与规范 Markdown</strong>请在主导航「内部 Agent 配置」中按 7 类分别维护。</p>
       <div class="sn">
         <div class="sn-i" :class="{on:st.sub==='gw'}" @click="st.sub='gw'">节点池</div>
         <div class="sn-i" :class="{on:st.sub==='rt'}" @click="st.sub='rt'">任务路由</div>
@@ -2212,9 +2683,81 @@
     </template>
   </div>
 
+  <!-- ═══ PAGE: 定时任务管理 ═══ -->
+  <div v-show="page==='sched'">
+    <div class="glass" style="margin-bottom:14px">
+      <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>定时任务管理</div>
+      <p style="font-size:12px;color:var(--t2);margin-bottom:10px">统一管理链接订阅同步等周期任务。入参已固定，可调整频率、启用状态，并支持单次测试执行。</p>
+      <div class="ops-g" style="margin-bottom:10px">
+        <div class="ops-c"><div class="k">调度器</div><div class="v" :style="{color:sched.st.scheduler_running?'var(--ok)':'var(--warn)'}">{{sched.st.scheduler_running?'运行中':'未启动'}}</div></div>
+        <div class="ops-c"><div class="k">注册任务</div><div class="v">{{sched.st.job_count||0}}</div></div>
+      </div>
+      <div class="btns" style="gap:6px">
+        <button type="button" class="btn btn-o btn-xs" :disabled="sched.loading" @click="ldSchedJobs">{{sched.loading?'加载中…':'刷新'}}</button>
+        <button type="button" class="btn btn-o btn-xs" @click="page='ops';op.sub='sj';ldOpSchedJobs()">运维日志</button>
+      </div>
+      <p v-if="sched.err" style="font-size:12px;color:var(--err);margin-top:8px">{{sched.err}}</p>
+    </div>
+    <div class="glass" style="margin-bottom:14px">
+      <div class="st">任务列表</div>
+      <table class="dtbl">
+        <thead><tr><th>任务</th><th>分类</th><th>频率</th><th>状态</th><th>上次执行</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr v-for="j in sched.jobs" :key="j.job_key">
+            <td>
+              <div style="font-weight:600">{{j.name}}</div>
+              <div style="font-size:10px;color:var(--t3)">{{j.job_key}}</div>
+              <div style="font-size:11px;color:var(--t2);max-width:320px">{{j.description}}</div>
+            </td>
+            <td>{{j.category}}</td>
+            <td>
+              <select class="gi" style="min-width:140px;font-size:11px" v-model="j._preset" @change="schedPresetChange(j)">
+                <option v-for="p in sched.presets" :key="p.key" :value="p.key">{{p.label}}</option>
+              </select>
+              <div v-if="j._preset==='DAILY_FIXED'||j._preset==='24H'" style="margin-top:4px;display:flex;gap:4px">
+                <input class="gi" type="number" min="0" max="23" style="width:52px" v-model.number="j.daily_hour" placeholder="时"/>
+                <input class="gi" type="number" min="0" max="59" style="width:52px" v-model.number="j.daily_minute" placeholder="分"/>
+              </div>
+              <input v-if="j._preset==='CUSTOM_INTERVAL'" class="gi" type="number" min="1" style="width:100px;margin-top:4px" v-model.number="j.custom_interval_minutes" placeholder="分钟"/>
+              <input v-if="j._preset==='CUSTOM_CRON'" class="gi" style="width:160px;margin-top:4px;font-size:11px" v-model="j.custom_cron" placeholder="分 时 日 月 周"/>
+            </td>
+            <td>
+              <label style="display:flex;align-items:center;gap:4px;font-size:11px">
+                <input type="checkbox" v-model="j._enabled" @change="schedSaveJob(j)"/> {{j.last_status||'—'}}
+              </label>
+            </td>
+            <td style="font-size:11px">{{(j.last_run_at||'').slice(0,19)}}<div v-if="j.last_error" style="color:var(--err)">{{j.last_error.slice(0,60)}}</div></td>
+            <td>
+              <button type="button" class="btn btn-p btn-xs" :disabled="sched.busyKey===j.job_key" @click="schedTestRun(j)">{{sched.busyKey===j.job_key?'执行中…':'测试执行'}}</button>
+              <button type="button" class="btn btn-o btn-xs" @click="schedSaveJob(j)">保存</button>
+            </td>
+          </tr>
+          <tr v-if="!sched.jobs.length"><td colspan="6" style="color:var(--t3)">暂无任务（需配置 SBA_DATABASE_URL）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="glass">
+      <div class="st">最近执行记录</div>
+      <table class="dtbl">
+        <thead><tr><th>时间</th><th>任务</th><th>触发</th><th>状态</th><th>摘要</th><th>耗时</th></tr></thead>
+        <tbody>
+          <tr v-for="r in sched.runs" :key="r.run_id">
+            <td style="font-size:11px">{{(r.started_at||'').slice(0,19)}}</td>
+            <td>{{r.job_key}}</td>
+            <td>{{r.trigger}}</td>
+            <td :style="{color:r.status==='completed'?'var(--ok)':r.status==='failed'?'var(--err)':'var(--warn)'}">{{r.status}}</td>
+            <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis">{{r.summary}}</td>
+            <td>{{(r.duration_ms/1000).toFixed(1)}}s</td>
+          </tr>
+          <tr v-if="!sched.runs.length"><td colspan="6" style="color:var(--t3)">暂无记录</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ═══ PAGE 8: OPS 运维 ═══ -->
   <div v-show="page==='ops'">
-    <div class="sn"><div class="sn-i" :class="{on:op.sub==='ag'}" @click="op.sub='ag';ldOpAg()">运维 Agent</div><div class="sn-i" :class="{on:op.sub==='sp'}" @click="op.sub='sp';ldOpSpansAll()">SPAN 观测</div><div class="sn-i" :class="{on:op.sub==='db'}" @click="op.sub='db';ldOp()">OPS 数据</div><div class="sn-i" :class="{on:op.sub==='ph'}" @click="op.sub='ph';ldOpHealth(false)">平台健康</div></div>
+    <div class="sn"><div class="sn-i" :class="{on:op.sub==='ag'}" @click="op.sub='ag';ldOpAg()">运维 Agent</div><div class="sn-i" :class="{on:op.sub==='sp'}" @click="op.sub='sp';ldOpSpansAll()">SPAN 观测</div><div class="sn-i" :class="{on:op.sub==='sj'}" @click="op.sub='sj';ldOpSchedJobs()">定时任务日志</div><div class="sn-i" :class="{on:op.sub==='ex'}" @click="op.sub='ex';ldOpExceptions()">异常提案</div><div class="sn-i" :class="{on:op.sub==='fb'}" @click="op.sub='fb';ldOpFeedback()">回答反馈</div><div class="sn-i" :class="{on:op.sub==='db'}" @click="op.sub='db';ldOp()">OPS 数据</div><div class="sn-i" :class="{on:op.sub==='ph'}" @click="op.sub='ph';ldOpHealth(false)">平台健康</div></div>
     <template v-if="op.sub==='ag'">
       <div class="glass" style="margin-bottom:14px">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>运维 Agent（ops_agent）</div>
@@ -2266,6 +2809,60 @@
         <pre class="ta-mono" style="font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;margin:0">{{op.reportBody}}</pre>
       </div>
     </template>
+    <template v-if="op.sub==='sj'">
+      <div class="glass" style="margin-bottom:14px">
+        <div class="st">定时任务执行日志</div>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">每次周期/测试执行的摘要、耗时与错误信息。完整记录见 MariaDB <code class="ta-mono">scheduled_job_runs</code>。</p>
+        <div class="btns" style="gap:6px;margin-bottom:10px">
+          <button type="button" class="btn btn-o btn-xs" :disabled="op.sjLoading" @click="ldOpSchedJobs">{{op.sjLoading?'加载中…':'刷新'}}</button>
+          <button type="button" class="btn btn-o btn-xs" @click="page='sched';ldSchedJobs()">任务管理</button>
+        </div>
+        <table class="dtbl">
+          <thead><tr><th>时间</th><th>任务</th><th>触发</th><th>状态</th><th>摘要</th><th>耗时</th><th>错误</th></tr></thead>
+          <tbody>
+            <tr v-for="r in op.sjRuns" :key="r.run_id||r.ts">
+              <td style="font-size:11px">{{(r.started_at||r.ts||'').slice(0,19)}}</td>
+              <td>{{r.job_key}}</td>
+              <td>{{r.trigger}}</td>
+              <td :style="{color:r.status==='completed'?'var(--ok)':r.status==='failed'?'var(--err)':'var(--warn)'}">{{r.status}}</td>
+              <td style="max-width:200px">{{r.summary}}</td>
+              <td>{{((r.duration_ms||0)/1000).toFixed(1)}}s</td>
+              <td style="max-width:160px;color:var(--err);font-size:11px">{{(r.error_message||'').slice(0,80)}}</td>
+            </tr>
+            <tr v-if="!op.sjRuns.length"><td colspan="7" style="color:var(--t3)">暂无定时任务日志</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+    <template v-if="op.sub==='ex'">
+      <div class="glass" style="margin-bottom:14px">
+        <div class="st">异常分类与解决码提案</div>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:10px">针对高频错误自动匹配分析；提案可直接复制发给 AI 执行修复。</p>
+        <div class="fr" style="margin-bottom:10px">
+          <input class="gi" v-model="op.exQuery" placeholder="粘贴错误信息或日志片段…" style="flex:1"/>
+          <button type="button" class="btn btn-p btn-xs" @click="ldOpExMatch">匹配提案</button>
+        </div>
+        <div v-if="op.exMatch" class="glass" style="margin-bottom:12px;background:var(--bg2)">
+          <div class="st">匹配结果 · {{op.exMatch.primary&&op.exMatch.primary.code}}</div>
+          <p style="font-size:12px;color:var(--t2)">{{op.exMatch.primary&&op.exMatch.primary.analysis}}</p>
+          <pre v-if="op.exMatch.primary" class="ta-mono" style="font-size:11px;white-space:pre-wrap;max-height:360px;overflow:auto;margin:0">{{op.exMatch.primary.proposal_md}}</pre>
+          <button type="button" class="btn btn-o btn-xs" style="margin-top:8px" v-if="op.exMatch.primary" @click="opCopyProposal(op.exMatch.primary.proposal_md)">复制提案给 AI</button>
+        </div>
+        <table class="dtbl">
+          <thead><tr><th>解决码</th><th>类别</th><th>严重度</th><th>标题</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="x in op.exCatalog" :key="x.code">
+              <td><code class="ta-mono">{{x.code}}</code></td>
+              <td>{{x.category}}</td>
+              <td>{{x.severity}}</td>
+              <td>{{x.title}}</td>
+              <td><button type="button" class="btn btn-o btn-xs" @click="opShowExDetail(x)">查看提案</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <pre v-if="op.exDetail" class="ta-mono" style="font-size:11px;white-space:pre-wrap;max-height:400px;overflow:auto;margin-top:12px">{{op.exDetail}}</pre>
+      </div>
+    </template>
     <template v-if="op.sub==='sp'">
       <div class="glass ops-span-hd" style="margin-bottom:14px">
         <div class="st">SPAN 任务观测（链接沉淀）</div>
@@ -2283,12 +2880,12 @@
         </div>
         <p v-if="op.err" style="font-size:12px;color:var(--err);margin-top:8px">{{op.err}}</p>
       </div>
-      <div class="ops-span-layout" style="margin-bottom:14px">
+      <div class="ops-span-layout" id="opsSpanDetail" style="margin-bottom:14px">
         <div class="glass ops-span-list">
           <div class="st" style="font-size:12px">任务列表</div>
           <table class="dtbl ops-span-task-tbl"><thead><tr><th>ID</th><th>状态</th><th>耗时</th><th>步骤</th></tr></thead>
           <tbody>
-            <tr v-for="t in op.spanTasks" :key="t.task_id" @click="opLoadSpanTask(t.task_id)" style="cursor:pointer" :class="{active:op.spanTaskId===t.task_id}">
+            <tr v-for="t in op.spanTasks" :key="t.task_id" @click="opLoadSpanTask(t.task_id,null,{openModal:true})" style="cursor:pointer" :class="{active:op.spanTaskId===t.task_id}">
               <td class="mono" :title="t.task_id">{{(t.task_id||'').slice(0,10)}}</td>
               <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(t.status)">{{t.status}}</span></td>
               <td>{{formatDuration(t.total_duration_ms)}}</td>
@@ -2310,6 +2907,7 @@
               <span>Token {{op.spanDetail.span_task.total_token_count||0}}</span>
               <span>步骤 {{op.spanDetail.span_task.completed_steps||0}}/{{op.spanDetail.span_task.total_steps||0}}</span>
             </div>
+            <button type="button" class="btn btn-p btn-xs" @click="opOpenSpanModalFromTask()">大屏查看</button>
           </div>
           <div class="ops-waterfall" v-if="(op.spanDetail.spans||[]).length">
             <div class="ops-waterfall-hd"><span>阶段</span><span>耗时分布（相对最慢阶段）</span><span>ms</span></div>
@@ -2332,6 +2930,10 @@
           </tbody></table>
           <div class="ops-io-panel" v-if="op.spanStepSel">
             <div class="st" style="font-size:12px">步骤 I/O · {{op.spanStepSel.step_name}} <code class="ta-mono" style="font-size:10px">{{op.spanStepSel.step_id}}</code></div>
+            <div class="btns" style="margin:6px 0 8px;flex-wrap:wrap;gap:6px">
+              <button type="button" class="btn btn-p btn-xs" :disabled="op.spanOpsBusy" @click="opTriggerSpanOpsAnalysis(op.spanStepSel)">{{op.spanOpsBusy?'分析中…':'触发运维分析'}}</button>
+              <span v-if="op.spanOpsMsg" class="ops-ops-msg">{{op.spanOpsMsg}}</span>
+            </div>
             <div class="ops-io-grid">
               <div class="ops-io-block">
                 <div class="ops-io-label">输入 payload</div>
@@ -2346,11 +2948,12 @@
                 <pre class="ops-io-pre ta-mono">{{opFmtJson(op.spanStepSel.tool_io_brief)}}</pre>
               </div>
               <div class="ops-io-block ops-io-block--full" v-if="op.spanStepSel.error_message">
-                <div class="ops-io-label" style="color:var(--err)">错误</div>
+                <div class="ops-io-label" style="color:var(--err)">错误详情</div>
                 <pre class="ops-io-pre ta-mono ops-io-pre--err">{{op.spanStepSel.error_message}}</pre>
               </div>
             </div>
           </div>
+          <p v-if="(op.spanDetail.text_logs||[]).length||(op.spanDetail.errors||[]).length" class="ops-span-log-hint">运行日志 {{(op.spanDetail.text_logs||[]).length}} 条 · 异常 {{(op.spanDetail.errors||[]).length}} 条 — 点击「大屏查看」或任务行查看完整 I/O 与日志</p>
         </div>
         <div class="glass ops-span-placeholder" v-else-if="!op.spanLoading">
           <p class="ops-empty">选择左侧任务查看链路瀑布图与接口/工具入出参</p>
@@ -2358,9 +2961,10 @@
       </div>
       <div class="glass">
         <div class="st">异常 SPAN（失败 / 超时步骤）</div>
+        <p class="ops-span-desc">点击行打开<strong>全屏详情</strong>（步骤 I/O、运行日志、异常）；流水线步骤失败时会<strong>自动触发运维 Agent 分析</strong>（5 分钟同指纹去重）。</p>
         <table class="dtbl"><thead><tr><th>任务</th><th>阶段</th><th>类型</th><th>错误</th><th>时间</th></tr></thead>
         <tbody>
-          <tr v-for="e in op.spanExceptions" :key="e.step_id" @click="opLoadSpanTask(e.task_id)" style="cursor:pointer">
+          <tr v-for="e in op.spanExceptions" :key="e.step_id" @click="opLoadSpanException(e)" style="cursor:pointer" :class="{active:op.spanExcSel&&op.spanExcSel.step_id===e.step_id}">
             <td class="mono">{{(e.task_id||'').slice(0,10)}}</td>
             <td>{{e.step_name}}</td>
             <td>{{opSpanTypeLabel(e.step_type)}}</td>
@@ -2369,6 +2973,37 @@
           </tr>
           <tr v-if="!op.spanExceptions.length"><td colspan="5" class="ops-empty">暂无异常 SPAN</td></tr>
         </tbody></table>
+      </div>
+    </template>
+    <template v-if="op.sub==='fb'">
+      <div class="glass" style="margin-bottom:14px">
+        <div class="st">回答反馈统计</div>
+        <div class="btns" style="gap:6px;margin-bottom:10px">
+          <label style="font-size:12px;color:var(--t2)">近
+            <select v-model.number="op.fb.days" @change="ldOpFeedback()" style="margin:0 4px">
+              <option :value="7">7</option><option :value="30">30</option><option :value="90">90</option>
+            </select>天
+          </label>
+          <button type="button" class="btn btn-p btn-xs" :disabled="op.fb.loading" @click="ldOpFeedback()">{{ op.fb.loading?'加载中…':'刷新' }}</button>
+        </div>
+        <p v-if="op.fb.err" style="color:var(--err);font-size:12px">{{ op.fb.err }}</p>
+        <div v-if="op.fb.data" class="ops-g" style="margin-bottom:12px">
+          <div class="ops-c"><div class="k">反馈数</div><div class="v">{{ op.fb.data.total_feedback }}</div></div>
+          <div class="ops-c"><div class="k">平均评分</div><div class="v">{{ op.fb.data.avg_rating }}</div></div>
+          <div class="ops-c"><div class="k">意图准确率</div><div class="v">{{ op.fb.data.overall_intent_accuracy }}%</div></div>
+          <div class="ops-c"><div class="k">意图评价数</div><div class="v">{{ op.fb.data.intent_eval_count }}</div></div>
+        </div>
+        <table v-if="op.fb.list.length" class="dtbl"><thead><tr><th>会话</th><th>消息</th><th>评分</th><th>意图</th><th>评论</th></tr></thead>
+        <tbody>
+          <tr v-for="(row,i) in op.fb.list" :key="i">
+            <td style="font-size:10px">{{ (row.session_id||'').slice(0,10) }}</td>
+            <td>{{ row.message_index }}</td>
+            <td>{{ row.rating||'—' }}</td>
+            <td>{{ row.intent_liked===true?'👍':row.intent_liked===false?'👎':'—' }} {{ row.corrected_intent||'' }}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">{{ row.comment||'—' }}</td>
+          </tr>
+        </tbody></table>
+        <p v-else-if="!op.fb.loading" style="font-size:12px;color:var(--t3)">暂无反馈数据</p>
       </div>
     </template>
     <div v-show="op.sub==='db'">
@@ -2393,7 +3028,7 @@
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-4"/></svg></div>最近 API 事件</div>
         <table class="dtbl ops-ev-tbl"><thead><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>耗时</th></tr></thead>
         <tbody>
-          <tr v-for="e in op.ev" :key="e.ts+e.path+e.method">
+          <tr v-for="e in op.ev" :key="e.ts+e.path+e.method" @click="opPickApiEvent(e)" style="cursor:pointer" :class="{active:op.apiEvtSel===e}">
             <td style="font-size:10px">{{e.ts}}</td>
             <td><span class="ops-method">{{e.method}}</span></td>
             <td class="mono" style="font-size:10px;max-width:320px;overflow:hidden;text-overflow:ellipsis" :title="e.path">{{e.path}}</td>
@@ -2402,6 +3037,26 @@
           </tr>
           <tr v-if="!op.ev.length"><td colspan="5" class="ops-empty">暂无事件</td></tr>
         </tbody></table>
+        <div class="ops-api-detail" v-if="op.apiEvtSel">
+          <div class="st" style="font-size:12px;margin-top:12px">接口详情 · {{op.apiEvtSel.method}} {{op.apiEvtSel.path}}</div>
+          <div class="ops-io-grid" style="margin-top:8px">
+            <div class="ops-io-block ops-io-block--full" v-if="op.apiEvtSel.query">
+              <div class="ops-io-label">Query</div>
+              <pre class="ops-io-pre ta-mono">{{op.apiEvtSel.query}}</pre>
+            </div>
+            <div class="ops-io-block ops-io-block--full" v-if="op.apiEvtSel.request_brief">
+              <div class="ops-io-label">请求体</div>
+              <pre class="ops-io-pre ta-mono">{{opFmtJson(op.apiEvtSel.request_brief)}}</pre>
+            </div>
+            <div class="ops-io-block ops-io-block--full" v-if="op.apiEvtSel.response_brief||op.apiEvtSel.error_detail">
+              <div class="ops-io-label" :style="{color:op.apiEvtSel.status_code>=400?'var(--err)':''}">响应体</div>
+              <pre class="ops-io-pre ta-mono" :class="{'ops-io-pre--err':op.apiEvtSel.status_code>=400}">{{opFmtJson(op.apiEvtSel.response_brief||op.apiEvtSel.error_detail)}}</pre>
+            </div>
+            <div class="ops-io-block ops-io-block--full" v-if="op.apiEvtSel.status_code<400&&!op.apiEvtSel.request_brief&&!op.apiEvtSel.response_brief">
+              <p class="ops-empty" style="margin:0">成功请求未记录 body（仅失败/4xx+ 采集入参出参）</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div v-show="op.sub==='ph'">
@@ -2701,7 +3356,9 @@
             <div class="chat-task-step-g-h">{{ execSubPlanTitle(plan, epi) }}</div>
             <div v-for="s in ((plan&&plan.steps)||[])" :key="s.step_id" class="chat-task-step-line">
               <span class="chat-task-step-ico" :class="stepStatusIcoClass(s)">{{ stepSuccessLabel(s) }}</span>
-              <span class="chat-task-step-name">{{ s.step_name || s.phase || '未命名步骤' }}</span>
+              <span v-if="formatInvokeModeLabel(s)" class="pill-invoke-tag chat-task-step-tag" :class="'pill-invoke-'+stepInvokeMode(s)">{{ formatInvokeModeLabel(s) }}</span>
+              <span class="chat-task-step-name">{{ stepDisplayName(s) }}</span>
+              <span v-if="stepInvokePurpose(s)" class="chat-task-step-purpose">{{ stepInvokePurpose(s) }}</span>
             </div>
           </div>
           </template>
@@ -2728,7 +3385,7 @@
               <div v-if="m.role==='assistant' && hasVisibleExecChain(execThinkingForMsg(m,i))" class="exec-process task-card" :class="{expanded:m.thinkingExpanded!==false}">
                 <div class="task-card-hdr task-bar-hdr" @click="m.thinkingExpanded=m.thinkingExpanded===false?true:false">
                   <span class="task-card-tag">{{ execCardLabel(m) }}</span>
-                  <span class="tool-chain-ms" v-if="execThinkingForMsg(m,i).some(s=>s.duration_ms>0)">{{ formatDuration(execThinkingForMsg(m,i).reduce((a,s)=>a+(s.duration_ms||0),0)) }}</span>
+                  <span class="tool-chain-ms" v-if="execThinkingForMsg(m,i).some(s=>stepUi(s).duration_ms>0)">{{ formatDuration(execThinkingForMsg(m,i).reduce((a,s)=>a+(stepUi(s).duration_ms||0),0)) }}</span>
                   <svg class="task-bar-chevron" :class="{open:m.thinkingExpanded!==false}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
                 <div class="task-card-body exec-body-expand" v-show="m.thinkingExpanded!==false">
@@ -2737,33 +3394,34 @@
                   <div v-if="plan" class="exec-subplan-panel" :style="{'--step-i':epi}">
                     <div class="exec-subplan-h">{{ execSubPlanTitle(plan, epi) }}</div>
                     <div v-for="(s,si) in ((plan&&plan.steps)||[])" :key="s.step_id||si" class="exec-step-wrap" :style="{'--step-i':si}">
-                      <div v-if="showOrchestrationThink(s)" class="exec-think-blue">
-                        <span class="exec-think-lbl">{{ (s.phase==='react_round'||s.phase==='react_think')?'ReAct 推理':'节点分析' }}</span>
-                        <span class="exec-think-txt">{{ formatOrchThinkDisplay(s) }}</span>
+                      <div v-if="stepIsReactThink(s)" class="exec-think-blue">
+                        <span class="exec-think-lbl">ReAct 推理</span>
+                        <span class="exec-think-txt" v-html="formatOrchThinkDisplay(s)"></span>
                       </div>
-                      <div class="exec-tool-pill" :class="execPillClass(s)">
+                      <div v-if="stepIsToolCall(s)||stepIsOrchExecPill(s)" class="exec-tool-pill" :class="execPillClass(s)">
                         <span class="pill-dot"></span>
-                        <template v-if="s.node_kind==='tool_call'">
-                          <span class="pill-name">{{ formatToolPillPrimary(s) }}</span>
+                        <template v-if="stepIsToolCall(s)">
+                          <span v-if="formatInvokeModeLabel(s)" class="pill-invoke-tag" :class="'pill-invoke-'+stepInvokeMode(s)">{{ formatInvokeModeLabel(s) }}</span>
+                          <span class="pill-name">{{ formatInvokeModeLabel(s)?(formatToolPillAction(s)+(stepInvokePurpose(s)?' · '+stepInvokePurpose(s):'')):formatToolPillPrimary(s) }}</span>
                           <span class="pill-result-lbl">结果</span>
                           <span class="pill-brief pill-brief-result">{{ formatToolPillResult(s) }}</span>
                         </template>
                         <template v-else>
-                          <span class="pill-name">{{ s.step_name }}</span>
-                          <span class="pill-brief" v-if="s.result_brief">{{ s.result_brief }}</span>
-                          <span class="pill-brief" v-else-if="s.description">{{ s.description }}</span>
+                          <span v-if="formatInvokeModeLabel(s)" class="pill-invoke-tag" :class="'pill-invoke-'+stepInvokeMode(s)">{{ formatInvokeModeLabel(s) }}</span>
+                          <span class="pill-name">{{ stepDisplayName(s) }}</span>
+                          <span class="pill-brief" v-if="s.result" v-html="s.result"></span>
                         </template>
                         <span class="pill-meta">
+                          <span class="pm pill-dur" v-if="stepUi(s).duration_ms!=null&&['done','completed'].includes(stepUi(s).status)">耗时 {{ formatDuration(stepUi(s).duration_ms) }}</span>
                           <span class="pm">{{ stepSuccessLabel(s) }}</span>
                           <span class="pm">置信 {{ stepConfidencePct(s) }}</span>
-                          <span class="pm">Token {{ s.token_count!=null?s.token_count:'—' }}</span>
-                          <span class="pm" v-if="s.duration_ms&&['done','completed'].includes(s.status)">{{ formatDuration(s.duration_ms) }}</span>
+                          <span class="pm">Token {{ stepUi(s).token_count!=null?stepUi(s).token_count:'—' }}</span>
                         </span>
                       </div>
-                      <div v-if="isRagDecisionStep(s)&&extractRagSlicesFromStep(s).length" class="rag-slices-panel">
-                        <div class="rag-slices-hdr">RAG 产出 · 知识库原文切片（{{ extractRagSlicesFromStep(s).length }} 条 · 含父文档与全文）</div>
+                      <div v-if="isRagDecisionStep(s)&&((m.ragPrefetchSlices&&m.ragPrefetchSlices.length)||extractRagSlicesFromStep(s).length)" class="rag-slices-panel">
+                        <div class="rag-slices-hdr">RAG 产出 · 知识库原文切片（{{ (m.ragPrefetchSlices||extractRagSlicesFromStep(s)).length }} 条 · 含父文档与全文）</div>
                         <div class="rag-slices-scroll">
-                          <article v-for="sl in extractRagSlicesFromStep(s)" :key="'rag-'+sl.ref_id+'-'+(sl.chunk_id||'')" class="rag-slice-card">
+                          <article v-for="sl in (m.ragPrefetchSlices||extractRagSlicesFromStep(s))" :key="'rag-'+sl.ref_id+'-'+(sl.chunk_id||'')" class="rag-slice-card">
                             <header class="rag-slice-meta">
                               <span class="rag-ref-tag">[{{ sl.ref_id }}]</span>
                               <button type="button" class="rag-slice-title rag-slice-link" @click="openRagSliceDetail(sl)">父文档：{{ ragSliceParentName(sl) }}（点击查看）</button>
@@ -2771,19 +3429,19 @@
                             </header>
                             <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：<button type="button" class="rag-slice-link" @click="openRagSliceDetail(sl)">{{ sl.source_file }}</button></div>
                             <div class="rag-slice-lbl">切片全文</div>
-                            <pre class="rag-slice-body">{{ sl.content }}</pre>
+                            <div class="rag-slice-body rag-rich-prose" v-html="renderRagSliceContent(sl.content)"></div>
                           </article>
                         </div>
                       </div>
-                      <details v-if="hasStepIo(s)" class="exec-io-panel" :class="s.node_kind==='tool_call'?'tool-io':'orch-io'" :open="s.io_expanded">
-                        <summary class="exec-io-summary-btn">{{ s.node_kind==='tool_call'?'输入 / 输出':'查看本步输入与输出（中文摘要 + JSON）' }}</summary>
+                      <details v-if="hasStepIo(s)" class="exec-io-panel" :class="stepIsToolCall(s)?'tool-io':'orch-io'" :open="stepUi(s).io_expanded">
+                        <summary class="exec-io-summary-btn">{{ stepIsToolCall(s)?'输入 / 输出':'查看本步输入与输出（中文摘要 + JSON）' }}</summary>
                         <div class="exec-io-in">
                           <span class="exec-io-lbl">输入</span>
-                          <pre class="exec-io-pre">{{ s.node_kind==='tool_call'?formatStepInputDisplay(s):formatOrchStepInputDisplay(s) }}</pre>
+                          <pre class="exec-io-pre">{{ stepIsToolCall(s)?formatStepInputDisplay(s):formatOrchStepInputDisplay(s) }}</pre>
                         </div>
                         <div class="exec-io-out">
-                          <span class="exec-io-lbl">{{ isDocStepOutput(s)?'输出（链接/地址）':(s.node_kind==='tool_call'?'输出（JSON）':'输出（中文摘要 + JSON）') }}</span>
-                          <pre class="exec-io-pre">{{ s.node_kind==='tool_call'?formatStepOutputDisplay(s):formatOrchStepOutputDisplay(s) }}</pre>
+                          <span class="exec-io-lbl">{{ isDocStepOutput(s)?'输出（链接/地址）':(stepIsToolCall(s)?'输出（JSON）':'输出（中文摘要 + JSON）') }}</span>
+                          <pre class="exec-io-pre">{{ stepIsToolCall(s)?formatStepOutputDisplay(s):formatOrchStepOutputDisplay(s) }}</pre>
                         </div>
                       </details>
                     </div>
@@ -2794,36 +3452,113 @@
               <div v-if="m.content||m.role==='user'" class="msg-answer-wrap">
                 <div v-if="m.role==='assistant'&&m.answerStageLabel" class="answer-stage-lbl">{{ m.answerStageLabel }}</div>
                 <div class="msg-bubble chat-prose" :class="{'is-streaming':m._answerStreaming}" v-html="renderMsg(m)"></div>
-                <div v-if="m.role==='assistant'&&m.ragPrefetchSlices&&m.ragPrefetchSlices.length" class="rag-slices-panel rag-slices-answer">
-                  <div class="rag-slices-hdr">RAG 产出 · 检索切片（{{ m.ragPrefetchSlices.length }} 条 · 父文档 + 全文）</div>
-                  <div class="rag-slices-scroll">
-                    <article v-for="sl in m.ragPrefetchSlices" :key="'ans-rag-'+sl.ref_id+'-'+(sl.chunk_id||'')" class="rag-slice-card">
-                      <header class="rag-slice-meta">
-                        <span class="rag-ref-tag">[{{ sl.ref_id }}]</span>
-                        <button type="button" class="rag-slice-title rag-slice-link" @click="openRagSliceDetail(sl)">父文档：{{ ragSliceParentName(sl) }}（点击查看）</button>
-                        <span v-if="sl.score!=null" class="rag-slice-score">score {{ Number(sl.score).toFixed(4) }}</span>
-                      </header>
-                      <div v-if="sl.source_file" class="rag-slice-src" :title="sl.source_file">父文档路径：<button type="button" class="rag-slice-link" @click="openRagSliceDetail(sl)">{{ sl.source_file }}</button></div>
-                      <div class="rag-slice-lbl">切片全文</div>
-                      <pre class="rag-slice-body">{{ sl.content }}</pre>
-                    </article>
+                <div v-if="m.role==='assistant'&&ragCitationSlicesForMsg(m).length" class="msg-rag-cite-wrap">
+                  <div class="web-search-panel rag-cite-panel">
+                    <div class="web-search-hd">文献切片明细 · {{ ragCitationSlicesForMsg(m).length }} 条</div>
+                    <ol class="web-search-list rag-cite-list">
+                      <li v-for="sl in ragCitationSlicesForMsg(m)" :key="'cite-s-'+sl.ref_id+'-'+(sl.source_file||sl.parent_name)" class="web-search-item rag-cite-item">
+                        <div class="web-search-item-title">
+                          <span class="rag-ref-tag">[{{ sl.ref_id }}]</span>
+                          {{ sl.parent_name }}
+                        </div>
+                        <div v-if="sl.source_file" class="web-search-url">父文档路径：{{ sl.source_file }}</div>
+                        <details class="rag-cite-details" open>
+                          <summary class="rag-cite-summary">切片全文（可展开）</summary>
+                          <div class="rag-cite-body rag-rich-prose" v-html="renderRagSliceContent(sl.slice_content)"></div>
+                        </details>
+                        <details v-if="sl.source_file" class="rag-cite-details" @toggle="onRagCiteParentToggle($event, sl)">
+                          <summary class="rag-cite-summary">父文档全文（点击展开加载真实正文）</summary>
+                          <p v-if="ragParentBodyLoading(sl.source_file)" class="rag-cite-loading">正在从知识库加载父文档…</p>
+                          <div v-else-if="ragParentBodyText(sl.source_file)" class="rag-cite-body rag-rich-prose" v-html="renderRagSliceContent(ragParentBodyText(sl.source_file))"></div>
+                          <p v-else class="rag-cite-hint">展开后将自动拉取知识库切片并拼接为父文档全文</p>
+                        </details>
+                        <span v-if="sl.score!=null" class="rag-cite-score">score {{ Number(sl.score).toFixed(4) }}</span>
+                      </li>
+                    </ol>
+                  </div>
+                </div>
+                <div v-if="m.role==='assistant'&&ragCitationAnnotationsForMsg(m).length" class="msg-rag-cite-wrap">
+                  <div class="web-search-panel rag-cite-panel rag-anno-panel">
+                    <div class="web-search-hd">注释 · {{ ragCitationAnnotationsForMsg(m).length }} 条</div>
+                    <ol class="web-search-list rag-cite-list">
+                      <li v-for="an in ragCitationAnnotationsForMsg(m)" :key="'cite-a-'+an.index" class="web-search-item rag-cite-item rag-anno-item">
+                        <div class="web-search-item-title">注释 {{ an.index }}</div>
+                        <details class="rag-cite-details" open>
+                          <summary class="rag-cite-summary">逻辑链路与置信度（可展开）</summary>
+                          <pre class="rag-cite-body">{{ an.text }}</pre>
+                        </details>
+                      </li>
+                    </ol>
                   </div>
                 </div>
                 <div v-if="m.role==='user'" class="msg-actions user-actions">
                   <button type="button" class="msg-act" @click="copyQueryToInput(m)">复制提问</button>
                 </div>
-                <div v-if="m.role==='assistant'&&(m.content||m.span)&&c.chatPrefs.showFooterOps!==false" class="msg-footer-bar">
-                  <div class="msg-footer-ops">
-                    <span class="mf-chip" title="运维会话标识">运维 · {{ (c.sid||'').slice(0,8) || '—' }}</span>
-                    <span class="mf-chip">Token {{ (m.span&&m.span.total_token_count)!=null?m.span.total_token_count:'—' }}</span>
-                    <span class="mf-chip" v-if="m.span&&m.span.total_duration_ms">耗时 {{ formatDuration(m.span.total_duration_ms) }}</span>
-                    <span class="mf-chip" :class="msgErrClass(m)" title="任务结果状态">状态 {{ msgErrLabel(m) }}</span>
+                <div v-if="m.role==='assistant'&&(m.content||m.span)&&c.chatPrefs.showFooterOps!==false" class="msg-footer-wrap">
+                  <!-- 评价区独占一行，避免与运维 Token 底栏挤在同一 flex 行 -->
+                  <div v-if="!m._answerStreaming&&m._feedbackReady!==false" class="msg-feedback-row">
+                      <span class="fb-label">评价：</span>
+                      <span class="fb-stars">
+                        <button v-for="star in 5" type="button" class="fb-star"
+                          :class="{on:msgFeedback(m).rating>=star,hover:msgFeedback(m)._hoverStar>=star}"
+                          :title="star+'星'"
+                          @click="setMsgRating(m,star,i)"
+                          @mouseenter="msgFeedback(m)._hoverStar=star"
+                          @mouseleave="msgFeedback(m)._hoverStar=0"
+                        >★</button>
+                      </span>
+                      <span v-if="msgFeedback(m).rating>0" class="fb-rating-text">{{ ['','很差','较差','一般','较好','很好'][msgFeedback(m).rating] }}</span>
+                      <span v-if="feedbackIntentLabel(m)" class="fb-intent-label">意图：{{ feedbackIntentLabel(m) }}</span>
+                      <span class="fb-intent">
+                        <button type="button" class="fb-intent-btn" :class="{on:msgFeedback(m).intent_liked===true,off:msgFeedback(m).intent_liked===false}" title="意图理解正确" @click="toggleIntentLike(m,true,i)">👍</button>
+                        <button type="button" class="fb-intent-btn" :class="{on:msgFeedback(m).intent_liked===false,off:msgFeedback(m).intent_liked===true}" title="意图理解有误" @click="toggleIntentLike(m,false,i)">👎</button>
+                      </span>
+                      <span v-if="msgFeedback(m).intent_liked===false" class="fb-intent-correct">
+                        <span v-if="msgFeedback(m)._intentAltLoading" class="fb-alt-hint">加载备选意图…</span>
+                        <span v-else-if="msgFeedback(m)._intentAltError" class="fb-alt-hint">{{ msgFeedback(m)._intentAltError }}</span>
+                        <template v-else-if="msgFeedback(m)._intentAlt">
+                          <span v-if="(msgFeedback(m)._intentAlt.suggested||[]).length" class="fb-alt-row">
+                            <span class="fb-alt-label">AI 推测：</span>
+                            <button v-for="(s,j) in msgFeedback(m)._intentAlt.suggested" :key="'s'+j" type="button" class="fb-alt-chip" @click="pickIntentAlternative(m,s.label,s.code,i)">{{ s.label }}</button>
+                          </span>
+                          <span class="fb-alt-row">
+                            <span class="fb-alt-label">标准意图：</span>
+                            <button v-for="(b,j) in (msgFeedback(m)._intentAlt.builtin||[])" :key="'b'+j" type="button" class="fb-alt-chip" @click="pickIntentAlternative(m,b.label,b.code,i)">{{ b.label }}</button>
+                          </span>
+                        </template>
+                        正确意图：
+                        <select v-model="msgFeedback(m).corrected_intent" @change="submitIntentFeedback(m,i)">
+                          <option value="">— 选择 —</option>
+                          <option v-for="il in intentLabels" :value="il">{{ il }}</option>
+                        </select>
+                        <input v-model="msgFeedback(m)._customIntent" class="fb-custom-intent" placeholder="自定义" maxlength="24" @keyup.enter="applyCustomIntentCorrection(m,i)" />
+                        <button type="button" class="msg-act btn-xs" @click="applyCustomIntentCorrection(m,i)">确定</button>
+                      </span>
+                      <span v-if="msgFeedback(m)._ratingSubmitted" class="fb-done">✓ 已评</span>
+                  </div>
+                  <div class="msg-footer-bar">
+                    <div class="msg-footer-ops">
+                      <span class="mf-chip" title="运维会话标识">运维 · {{ (c.sid||'').slice(0,8) || '—' }}</span>
+                      <span class="mf-chip">Token {{ (m.span&&m.span.total_token_count)!=null?m.span.total_token_count:'—' }}</span>
+                      <span class="mf-chip" v-if="m.span&&m.span.total_duration_ms">耗时 {{ formatDuration(m.span.total_duration_ms) }}</span>
+                      <span class="mf-chip" :class="msgErrClass(m)" title="任务结果状态">状态 {{ msgErrLabel(m) }}</span>
+                    </div>
+                    <div v-if="c.chatPrefs.showCopyExport!==false" class="msg-footer-actions">
+                      <button type="button" class="msg-act" @click="copyMsg(m)">复制</button>
+                      <button type="button" class="msg-act" @click="exportMsgMd(m,i)">导出 MD</button>
+                    </div>
+                  </div>
+                  <!-- 非 5 星：可选补充反馈（与星级分开提交） -->
+                  <div v-if="!m._answerStreaming&&msgFeedback(m)._showCommentBox" class="fb-comment-panel">
+                    <textarea v-model="msgFeedback(m).comment" class="fb-comment-input" rows="2" maxlength="500" placeholder="哪里不满意？补充说明可选，点「提交反馈」才会保存"></textarea>
+                    <div class="fb-comment-actions">
+                      <button type="button" class="msg-act" @click="dismissFeedbackComment(m)">跳过</button>
+                      <button type="button" class="msg-act fb-comment-submit" :disabled="!msgFeedback(m).comment.trim()||msgFeedback(m)._commentPending" @click="submitFeedbackComment(m,i)">
+                        {{ msgFeedback(m)._commentSubmitted ? '已提交' : '提交反馈' }}
+                      </button>
+                    </div>
                   </div>
                   <div v-if="m.span&&((m.span.web_search||m.span.webSearch||m.span.search_results||m.span.searchResults||m.span.web_result||m.span.webResult))" class="msg-web-search-wrap" v-html="renderWebSearchPanel(m.span)"></div>
-                  <div v-if="c.chatPrefs.showCopyExport!==false" class="msg-footer-actions">
-                    <button type="button" class="msg-act" @click="copyMsg(m)">复制</button>
-                    <button type="button" class="msg-act" @click="exportMsgMd(m,i)">导出 MD</button>
-                  </div>
                 </div>
               </div>
             </div>
@@ -2886,10 +3621,20 @@
               <button v-for="(opt,oi) in c.chatHitl.toolOptions" :key="opt.id||opt.action||oi" type="button" class="btn btn-o btn-xs" @click="chatHitlToolOption(opt.id||opt.action)">{{ opt.label||opt.id||opt.action }}</button>
             </div>
           </div>
+          <div v-else-if="c.chatHitl.kind==='task_switch_confirm'" class="chat-hitl-body">
+            <p class="chat-hitl-hint">当前有未结案主任务。新问题将创建新任务；也可选择继续执行当前任务。</p>
+          </div>
           <div class="chat-hitl-actions">
-            <button type="button" class="btn btn-p btn-xs" @click="chatHitlConfirm">确认继续</button>
-            <button type="button" class="btn btn-o btn-xs" @click="chatHitlPause">暂停编排</button>
-            <button v-if="c.chatHitl.kind==='rewrite_confirm'" type="button" class="btn btn-o btn-xs" @click="chatHitlReintent">重新识别意图</button>
+            <template v-if="c.chatHitl.kind==='task_switch_confirm'">
+              <button type="button" class="btn btn-p btn-xs" @click="chatHitlConfirm">创建新任务</button>
+              <button type="button" class="btn btn-o btn-xs" @click="chatHitlContinueCurrentTask">继续当前任务</button>
+              <button type="button" class="btn btn-o btn-xs" @click="chatHitlPause">暂停</button>
+            </template>
+            <template v-else>
+              <button type="button" class="btn btn-p btn-xs" @click="chatHitlConfirm">确认继续</button>
+              <button type="button" class="btn btn-o btn-xs" @click="chatHitlPause">暂停编排</button>
+              <button v-if="c.chatHitl.kind==='rewrite_confirm'" type="button" class="btn btn-o btn-xs" @click="chatHitlReintent">重新识别意图</button>
+            </template>
           </div>
           <p class="chat-hitl-foot">主按钮或 Enter：确认继续；流式中可点 ■ 暂停网络请求。</p>
         </div>
@@ -3029,7 +3774,7 @@
       </div>
     </header>
     <div class="task-hist-modal-body">
-      <p v-if="taskHistModalLoading" class="chat-task-hist-empty">正在加载双快照与工具链…</p>
+      <p v-if="taskHistModalLoading" class="chat-task-hist-empty">正在加载双快照与步骤组…</p>
       <template v-else-if="taskHistModalDetail">
         <section class="task-hist-modal-section">
           <h4 class="task-hist-modal-sec-title">基础元数据（meta）</h4>
@@ -3069,50 +3814,77 @@
           </section>
         </div>
         <section class="task-hist-subtbl-wrap">
-          <h4 class="task-hist-modal-sec-title">工具链调用（tool_outputs）</h4>
-          <table class="dtbl task-hist-subtbl" v-if="(taskHistModalDetail.tool_outputs||[]).length">
-            <thead><tr>
-              <th>{{ taskFieldLabel('tool_name') }}</th>
-              <th>{{ taskFieldLabel('status') }}</th>
-              <th>{{ taskFieldLabel('brief') }}</th>
-              <th>{{ taskFieldLabel('react_round') }}</th>
-              <th>{{ taskFieldLabel('sub_plan_id') }}</th>
-            </tr></thead>
-            <tbody>
-              <tr v-for="(t,ti) in taskHistModalDetail.tool_outputs" :key="'tool-'+ti">
-                <td class="task-hist-field-k">{{ t.tool_name }}</td>
-                <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(t.status)">{{ taskFieldDisplayValue('status',t.status) }}</span></td>
-                <td class="task-hist-cell-val" :title="t.output_preview">{{ t.brief || t.output_preview || '—' }}</td>
-                <td class="mono">{{ t.react_round!=null?t.react_round:'—' }}</td>
-                <td class="mono">{{ t.sub_plan_id||'—' }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="chat-task-hist-empty">暂无工具链记录</p>
-        </section>
-        <section class="task-hist-subtbl-wrap">
-          <h4 class="task-hist-modal-sec-title">SPAN 步骤 / 子任务链（steps）</h4>
-          <table class="dtbl task-hist-subtbl" v-if="(taskHistModalDetail.steps||[]).length">
-            <thead><tr>
-              <th>{{ taskFieldLabel('step_name') }}</th>
-              <th>{{ taskFieldLabel('step_type') }}</th>
-              <th>{{ taskFieldLabel('status') }}</th>
-              <th>{{ taskFieldLabel('duration_ms') }}</th>
-              <th>{{ taskFieldLabel('token_count') }}</th>
-              <th>{{ taskFieldLabel('decision') }}</th>
-            </tr></thead>
-            <tbody>
-              <tr v-for="s in taskHistModalDetail.steps" :key="s.step_id||s.step_name">
-                <td>{{ s.step_name }}</td>
-                <td><span class="ops-type-tag">{{ taskStepTypeLabel(s.step_type) }}</span></td>
-                <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(s.status)">{{ taskFieldDisplayValue('status',s.status) }}</span></td>
-                <td class="mono">{{ s.duration_ms!=null?s.duration_ms+' ms':'—' }}</td>
-                <td class="mono">{{ s.token_count!=null?s.token_count:'—' }}</td>
-                <td>{{ taskFieldDisplayValue('decision',s.decision) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="chat-task-hist-empty">暂无 SPAN 步骤</p>
+          <h4 class="task-hist-modal-sec-title">步骤组 / 子任务链（sub_plan_groups）</h4>
+          <p class="task-hist-subplan-hint">以步骤组为粒度展示；组内可含多轮工具调用。点击行展开该组详情。</p>
+          <div v-if="taskHistSubPlanGroups(taskHistModalDetail).length" class="task-hist-subplan-list">
+            <div
+              v-for="(plan,pi) in taskHistSubPlanGroups(taskHistModalDetail)"
+              :key="(plan&&plan.sub_plan_id)||('pg'+pi)"
+              class="task-hist-subplan-row"
+              :class="{open:c.taskSubPlanSel&&c.taskSubPlanSel.sub_plan_id===plan.sub_plan_id&&Number(c.taskSubPlanSel.sub_index)===Number(plan.sub_index)}"
+            >
+              <button type="button" class="task-hist-subplan-head" @click="openTaskSubPlanDetail(plan)">
+                <span class="task-hist-subplan-title">{{ execSubPlanTitle(plan, pi) }}</span>
+                <span class="task-hist-subplan-tags">
+                  <span v-for="mode in taskSubPlanInvokeTags(plan)" :key="mode" class="pill-invoke-tag" :class="'pill-invoke-'+mode">{{ taskSubPlanInvokeTagLabel(mode) }}</span>
+                </span>
+                <span class="task-hist-subplan-meta">
+                  <span class="ops-pill" :class="'ops-pill--'+taskSubPlanStatusClass(plan.status)">{{ taskSubPlanStatusLabel(plan.status) }}</span>
+                  <span class="mono">{{ plan.step_count||0 }} 步</span>
+                  <span v-if="plan.tool_count" class="mono">{{ plan.tool_count }} 次工具</span>
+                </span>
+                <svg class="task-hist-subplan-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div v-if="c.taskSubPlanSel&&c.taskSubPlanSel.sub_plan_id===plan.sub_plan_id&&Number(c.taskSubPlanSel.sub_index)===Number(plan.sub_index)" class="task-hist-subplan-detail">
+                <div class="task-hist-subplan-detail-meta">
+                  <span><strong>{{ taskFieldLabel('sub_plan_id') }}</strong> <code class="mono">{{ plan.sub_plan_id||'—' }}</code></span>
+                  <span><strong>{{ taskFieldLabel('sub_index') }}</strong> {{ plan.sub_index||'—' }}</span>
+                  <span v-if="plan.step_lane"><strong>lane</strong> {{ plan.step_lane }}</span>
+                </div>
+                <table class="dtbl task-hist-subtbl task-hist-subplan-steps-tbl">
+                  <thead><tr>
+                    <th>{{ taskFieldLabel('invoke_mode') }}</th>
+                    <th>{{ taskFieldLabel('invoke_purpose') }}</th>
+                    <th>{{ taskFieldLabel('step_name') }}</th>
+                    <th>{{ taskFieldLabel('status') }}</th>
+                    <th>{{ taskFieldLabel('duration_ms') }}</th>
+                    <th>{{ taskFieldLabel('react_round') }}</th>
+                  </tr></thead>
+                  <tbody>
+                    <tr v-for="(s,si) in (plan.steps||[])" :key="s.step_id||('ps'+si)">
+                      <td>
+                        <span v-if="formatInvokeModeLabel(s)" class="pill-invoke-tag" :class="'pill-invoke-'+stepInvokeMode(s)">{{ formatInvokeModeLabel(s) }}</span>
+                        <span v-else>—</span>
+                      </td>
+                      <td>{{ stepInvokePurpose(s)||'—' }}</td>
+                      <td class="task-hist-cell-val" :title="taskSubPlanDetailStepName(s)">{{ taskSubPlanDetailStepName(s) }}</td>
+                      <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(s.status)">{{ taskFieldDisplayValue('status',s.status) }}</span></td>
+                      <td class="mono">{{ s.duration_ms!=null?s.duration_ms+' ms':'—' }}</td>
+                      <td class="mono">{{ s.react_round!=null?s.react_round:'—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-for="(s,si) in (plan.steps||[])" :key="'io-'+(s.step_id||si)" class="task-hist-subplan-io-block">
+                  <div class="task-hist-subplan-io-h">{{ taskSubPlanDetailStepName(s) }} · I/O</div>
+                  <div class="task-hist-subplan-io-grid">
+                    <div class="task-hist-subplan-io-col">
+                      <div class="ops-io-label">{{ taskFieldLabel('input_payload') }}</div>
+                      <pre class="ops-io-pre ta-mono">{{ taskSubPlanDetailPayload(s,'input_payload') }}</pre>
+                    </div>
+                    <div class="task-hist-subplan-io-col">
+                      <div class="ops-io-label">{{ taskFieldLabel('output_payload') }}</div>
+                      <pre class="ops-io-pre ta-mono">{{ taskSubPlanDetailPayload(s,'output_payload') }}</pre>
+                    </div>
+                    <div v-if="s.result" class="task-hist-subplan-io-col task-hist-subplan-io-full">
+                      <div class="ops-io-label">结果摘要</div>
+                      <pre class="ops-io-pre ta-mono">{{ s.result }}</pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p v-else class="chat-task-hist-empty">暂无步骤组记录</p>
         </section>
       </template>
       <p v-else class="chat-task-hist-empty">详情加载失败，请点「刷新」重试</p>
@@ -3144,6 +3916,120 @@
     <div class="btns" style="margin-top:10px">
       <button type="button" class="btn btn-o btn-xs" @click="openArtifactModalExplorer">资源管理器</button>
       <button type="button" class="btn btn-d btn-xs" style="margin-left:auto" @click="modalArtifact.show=false">关闭</button>
+    </div>
+  </div>
+</div>
+<div v-if="opsSpanModal.open" class="modal-mask ops-span-modal-mask" @click.self="closeOpsSpanModal">
+  <div class="ops-span-modal-box" @click.stop role="dialog" aria-modal="true" aria-labelledby="ops-span-modal-title">
+    <header class="ops-span-modal-head">
+      <div class="ops-span-modal-head-main">
+        <h3 id="ops-span-modal-title">SPAN 详情</h3>
+        <p class="ops-span-modal-sub">{{ opsSpanModal.title || opsSpanModal.link || '（无标题）' }}</p>
+        <div class="ops-span-modal-meta-row">
+          <span class="mono">{{ opsSpanModal.taskId }}</span>
+          <template v-if="opsSpanModal.spanTask">
+            <span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(opsSpanModal.spanTask.status)">{{opsSpanModal.spanTask.status}}</span>
+            <span>{{formatDuration(opsSpanModal.spanTask.total_duration_ms)}}</span>
+            <span>Token {{opsSpanModal.spanTask.total_token_count||0}}</span>
+            <span>步骤 {{opsSpanModal.spanTask.completed_steps||0}}/{{opsSpanModal.spanTask.total_steps||0}}</span>
+          </template>
+        </div>
+      </div>
+      <div class="ops-span-modal-head-actions">
+        <button type="button" class="btn btn-p btn-xs" :disabled="op.spanOpsBusy||!opsSpanModal.stepSel" @click="opTriggerSpanOpsAnalysis(opsSpanModal.stepSel)">{{op.spanOpsBusy?'分析中…':'运维分析'}}</button>
+        <span v-if="op.spanOpsMsg" class="ops-ops-msg">{{op.spanOpsMsg}}</span>
+        <button type="button" class="btn btn-d btn-xs" @click="closeOpsSpanModal">关闭（Esc）</button>
+      </div>
+    </header>
+    <div class="ops-span-modal-tabs">
+      <button type="button" class="btn btn-xs" :class="opsSpanModal.tab==='io'?'btn-p':'btn-o'" @click="opsSpanModal.tab='io'">步骤 I/O</button>
+      <button type="button" class="btn btn-xs" :class="opsSpanModal.tab==='log'?'btn-p':'btn-o'" @click="opsSpanModal.tab='log'">运行日志 ({{opsSpanModal.textLogs.length}})</button>
+      <button type="button" class="btn btn-xs" :class="opsSpanModal.tab==='err'?'btn-p':'btn-o'" @click="opsSpanModal.tab='err'">异常 ({{opsSpanModal.errors.length}})</button>
+      <button type="button" class="btn btn-xs" :class="opsSpanModal.tab==='span'?'btn-p':'btn-o'" @click="opsSpanModal.tab='span'">SPAN 链路 ({{opsSpanModal.spans.length}})</button>
+    </div>
+    <div class="ops-span-modal-body">
+      <div v-if="opsSpanModal.loading" class="ops-span-modal-empty">加载中…</div>
+      <template v-else>
+        <div v-show="opsSpanModal.tab==='io'" class="ops-span-modal-io">
+          <div class="ops-span-modal-step-list">
+            <table class="dtbl hist-span-tbl ops-span-step-tbl"><thead><tr><th>阶段</th><th>类型</th><th>状态</th><th>耗时</th></tr></thead>
+            <tbody>
+              <tr v-for="s in opsSpanModal.spans" :key="'m-'+s.step_id" :class="['span-row--'+(s.status||''), {active:opsSpanModal.stepSel&&opsSpanModal.stepSel.step_id===s.step_id}]" @click="opPickSpanStepInModal(s)" style="cursor:pointer">
+                <td>{{s.step_name}}</td>
+                <td><span class="ops-type-tag">{{opSpanTypeLabel(s.step_type)}}</span></td>
+                <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(s.status)">{{s.status}}</span></td>
+                <td class="mono">{{s.duration_ms||'—'}} ms</td>
+              </tr>
+            </tbody></table>
+          </div>
+          <div class="ops-span-modal-io-main" v-if="opsSpanModal.stepSel">
+            <div class="st" style="font-size:12px;margin-bottom:8px">{{opsSpanModal.stepSel.step_name}} <code class="ta-mono" style="font-size:10px">{{opsSpanModal.stepSel.step_id}}</code></div>
+            <div class="ops-io-grid ops-io-grid--modal">
+              <div class="ops-io-block">
+                <div class="ops-io-label">输入 payload</div>
+                <pre class="ops-io-pre ops-io-pre--modal ta-mono">{{opFmtJson(opsSpanModal.stepSel.input_payload)}}</pre>
+              </div>
+              <div class="ops-io-block">
+                <div class="ops-io-label">输出 payload</div>
+                <pre class="ops-io-pre ops-io-pre--modal ta-mono">{{opFmtJson(opsSpanModal.stepSel.output_payload)}}</pre>
+              </div>
+              <div class="ops-io-block ops-io-block--full" v-if="opsSpanModal.stepSel.tool_io_brief && Object.keys(opsSpanModal.stepSel.tool_io_brief).length">
+                <div class="ops-io-label">工具调用 I/O</div>
+                <pre class="ops-io-pre ops-io-pre--modal ta-mono">{{opFmtJson(opsSpanModal.stepSel.tool_io_brief)}}</pre>
+              </div>
+              <div class="ops-io-block ops-io-block--full" v-if="opsSpanModal.stepSel.error_message">
+                <div class="ops-io-label" style="color:var(--err)">错误详情</div>
+                <pre class="ops-io-pre ops-io-pre--modal ops-io-pre--err ta-mono">{{opsSpanModal.stepSel.error_message}}</pre>
+              </div>
+            </div>
+          </div>
+          <div v-else class="ops-span-modal-empty">请选择左侧步骤查看入参/出参</div>
+        </div>
+        <div v-show="opsSpanModal.tab==='log'" class="term ops-span-log-term">
+          <div class="term-h"><span class="d3 r"></span><span class="d3 y"></span><span class="d3 g"></span><span>pipeline.task.log</span></div>
+          <div class="term-b ops-span-log-scroll">
+            <template v-if="opsSpanModal.textLogs.length">
+              <div v-for="(ln,i) in opsSpanModal.textLogs" :key="'ol'+i" class="ll" :class="logRowClass(ln.level)">
+                <span class="ts">{{ln.timestamp||''}}</span><span class="lv">{{ln.message||opFormatLogLine(ln)}}</span>
+              </div>
+            </template>
+            <div v-else class="ops-span-modal-empty">暂无运行日志</div>
+          </div>
+        </div>
+        <div v-show="opsSpanModal.tab==='err'" class="term ops-span-log-term">
+          <div class="term-h"><span class="d3 r"></span><span class="d3 y"></span><span class="d3 g"></span><span>errors</span></div>
+          <div class="term-b ops-span-log-scroll">
+            <template v-if="opsSpanModal.errors.length">
+              <div v-for="(ln,i) in opsSpanModal.errors" :key="'oe'+i" class="ll err">
+                <span class="ts">{{ln.timestamp||''}}</span><span class="lv">{{ln.message||opFormatLogLine(ln)}}</span>
+              </div>
+            </template>
+            <div v-else class="ops-span-modal-empty">暂无异常记录</div>
+          </div>
+        </div>
+        <div v-show="opsSpanModal.tab==='span'" class="ops-span-modal-span">
+          <div class="ops-waterfall" v-if="opsSpanModal.spans.length">
+            <div class="ops-waterfall-hd"><span>阶段</span><span>耗时分布</span><span>ms</span></div>
+            <div v-for="s in opsSpanModal.spans" :key="'mwf-'+s.step_id" class="ops-waterfall-row" :class="{active:opsSpanModal.stepSel&&opsSpanModal.stepSel.step_id===s.step_id}" @click="opPickSpanStepInModal(s)">
+              <span class="ops-wf-name">{{s.step_name}}</span>
+              <div class="ops-wf-bar-wrap"><div class="ops-wf-bar" :class="'ops-wf-bar--'+opSpanStatusClass(s.status)" :style="{width:opSpanBarPct(s,opSpanMaxMs(opsSpanModal.spans))+'%'}"></div></div>
+              <span class="ops-wf-ms mono">{{s.duration_ms||0}}</span>
+            </div>
+          </div>
+          <table class="dtbl hist-span-tbl" v-if="opsSpanModal.spans.length"><thead><tr><th>阶段</th><th>类型</th><th>状态</th><th>耗时</th><th>Token</th><th>置信度</th></tr></thead>
+          <tbody>
+            <tr v-for="s in opsSpanModal.spans" :key="'mt-'+s.step_id" :class="['span-row--'+(s.status||''), {active:opsSpanModal.stepSel&&opsSpanModal.stepSel.step_id===s.step_id}]" @click="opPickSpanStepInModal(s)" style="cursor:pointer">
+              <td>{{s.step_name}}</td>
+              <td>{{opSpanTypeLabel(s.step_type)}}</td>
+              <td><span class="ops-pill" :class="'ops-pill--'+opSpanStatusClass(s.status)">{{s.status}}</span></td>
+              <td class="mono">{{s.duration_ms||'—'}} ms</td>
+              <td class="mono">{{s.token_count||'—'}}</td>
+              <td>{{ s.confidence ? (Math.round(s.confidence*1000)/10)+'%' : '—' }}</td>
+            </tr>
+          </tbody></table>
+          <div v-if="!opsSpanModal.spans.length" class="ops-span-modal-empty">暂无 SPAN 步骤</div>
+        </div>
+      </template>
     </div>
   </div>
 </div>
@@ -3179,15 +4065,20 @@
           <span style="color:var(--err)">失败 <b>{{hs.failed}}</b></span>
           <button v-if="hs.completed>0" type="button" class="btn btn-xs btn-d" @click="clearCompleted()" style="margin-left:auto">清理已完成</button>
         </div>
+        <p v-if="taskQueueFilterActive()" class="task-queue-filter-meta" style="margin:0 0 8px">历史筛选：{{filteredHistTasks().length}} / {{(ht.tasks||[]).length}} 条（与队列共用筛选条件）</p>
         <div class="hist-grid-wrap">
         <div class="hist-grid">
-          <div class="hist-ghead"><span>标题 / 链接</span><span>平台</span><span>状态</span><span>进度</span><span>产物</span><span>操作</span><span>日志</span></div>
-          <template v-if="ht.tasks&&ht.tasks.length">
-            <div v-for="t in ht.tasks" :key="t.id" class="hist-grow" :class="'hist-row--'+(t.status||'pending')">
+          <div class="hist-ghead"><span>标题 / 链接</span><span>平台</span><span>状态</span><span>已读</span><span>进度</span><span>产物</span><span>操作</span><span>日志</span></div>
+          <template v-if="filteredHistTasks().length">
+            <div v-for="t in filteredHistTasks()" :key="t.id" class="hist-grow" :class="['hist-row--'+(t.status||'pending'), {'hist-row--unread':histTaskIsUnread(t)}]">
               <div class="hist-col-main">
                 <div class="hist-title-row">
                   <span class="hist-title" :title="histTaskTitle(t)">{{ histTaskTitle(t) }}</span>
                   <span class="mono hist-id" :title="t.id">{{ (t.id||'').slice(0,8) }}</span>
+                </div>
+                <div v-if="taskSourceLabel(t)||taskAuthorName(t)" class="hist-sub q-source-line">
+                  <span v-if="taskSourceLabel(t)">来源：{{ taskSourceLabel(t) }}</span>
+                  <span v-if="taskAuthorName(t)"> · 作者：{{ taskAuthorName(t) }}</span>
                 </div>
                 <div v-if="histTaskSubTitle(t)" class="hist-sub" :title="histTaskSubTitle(t)">{{ histTaskSubTitle(t) }}</div>
                 <div v-if="taskCardMetricsLine(t)" class="hist-metrics">{{ taskCardMetricsLine(t) }}</div>
@@ -3202,13 +4093,17 @@
                 <span class="hist-status-badge" :class="'is-'+(t.status||'pending')">{{ histStatusLabel(t) }}</span>
                 <span v-if="t.stage||t.current_stage" class="hist-stage">{{ t.stage||t.current_stage }}</span>
               </div>
+              <div class="hist-read-col">
+                <button v-if="histShowReadBadge(t)" type="button" class="q-read-badge hist-read-badge" :class="histTaskIsUnread(t)?'q-read-unread':'q-read-done'" :disabled="!histTaskIsUnread(t)" :title="histTaskIsUnread(t)?'点击标记为已读':'已读'" @click.stop="markHistTaskRead(t)">{{ histTaskReadLabel(t) }}</button>
+                <span v-else class="hist-read-na">—</span>
+              </div>
               <div class="hist-progress">
                 <div class="hist-progress-bar"><i :style="{width:(t.progress||0)+'%',background:t.status==='completed'?'var(--ok)':t.status==='failed'?'var(--err)':'var(--primary)'}"></i></div>
                 <span class="hist-progress-pct">{{ t.progress||0 }}%</span>
               </div>
               <div class="hist-artifacts">
                 <button type="button" class="btn btn-xs btn-artifact" :class="taskHasMd(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHasMd(t)" title="浏览器预览 Markdown（淡黄色主题渲染）" @click.stop="openHistMd(t)">MD</button>
-                <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHtmlReady(t)" title="系统默认浏览器打开 HTML" @click.stop="openHistHtml(t)">HTML</button>
+                <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :title="taskHtmlClickTitle(t)" @click.stop="onTaskHtmlClick(t)">HTML</button>
                 <button type="button" class="btn btn-xs btn-o" :disabled="!taskHasMd(t)&&!taskHasHtml(t)" title="资源管理器中显示 MD/HTML 位置" @click.stop="openTaskArtifactsLocation(t)">位置</button>
                 <span v-if="taskHtmlPending(t)" class="hist-html-hint">HTML 生成中</span>
                 <span v-else-if="t.status==='completed'&&!taskHasMd(t)&&!taskHtmlReady(t)" class="hist-html-hint">无产物</span>
@@ -3237,7 +4132,7 @@
               </div>
             </div>
           </template>
-          <div v-else class="hist-empty">暂无任务记录</div>
+          <div v-else class="hist-empty">{{ (ht.tasks||[]).length ? '无匹配历史任务，请调整筛选条件。' : '暂无任务记录' }}</div>
         </div>
         </div>
         <div v-if="histLogPanel.open" class="hist-log-panel glass">
@@ -3409,9 +4304,11 @@
     <div class="modal-b rag-slice-modal-body">
       <div v-if="ragSliceModal.slice&&ragSliceModal.slice.source_file" class="rag-slice-src">父文档路径：{{ ragSliceModal.slice.source_file }}</div>
       <div class="rag-slice-lbl">切片全文</div>
-      <pre class="rag-slice-body rag-slice-modal-pre">{{ ragSliceModal.slice&&ragSliceModal.slice.content }}</pre>
+      <div class="rag-slice-body rag-slice-modal-pre rag-rich-prose" v-html="renderRagSliceContent(ragSliceModal.slice&&ragSliceModal.slice.content)"></div>
       <div class="rag-slice-lbl">父文档全文</div>
-      <div class="rag-slice-modal-hint">完整父文档请在「RAG 知识库」页按路径打开；当前弹窗展示本切片所属段落。</div>
+      <p v-if="ragSliceModal.slice&&ragSliceModal.slice.source_file&&ragParentBodyLoading(ragSliceModal.slice.source_file)" class="rag-cite-loading">正在加载父文档正文…</p>
+      <div v-else-if="ragSliceModal.slice&&ragSliceModal.slice.source_file&&ragParentBodyText(ragSliceModal.slice.source_file)" class="rag-slice-body rag-slice-modal-pre rag-rich-prose" v-html="renderRagSliceContent(ragParentBodyText(ragSliceModal.slice.source_file))"></div>
+      <div v-else class="rag-slice-modal-hint">展开后将自动从知识库拉取父文档切片正文；也可在「RAG 知识库」页按路径打开。</div>
       <div class="btns" style="margin-top:12px;flex-wrap:wrap;gap:8px">
         <button v-if="ragSliceModal.slice&&ragSliceModal.slice.source_file" type="button" class="btn btn-o btn-xs" @click="openRagParentInKb(ragSliceModal.slice)">在知识库中打开父文档</button>
         <button type="button" class="btn btn-p btn-xs" style="margin-left:auto" @click="closeRagSliceDetail">关闭</button>
@@ -3448,6 +4345,8 @@
   if (!token) {
     if(bar){ bar.style.display='block'; msg.textContent='localStorage 中无 sba_token，请先登录'; }
     if(mask) mask.style.display = 'flex';
+    var ld=document.getElementById('sba-boot-loading');
+    if(ld)ld.classList.add('sba-boot-done');
   } else {
     /* 有 token 也不提前隐藏遮罩：若 Vue 未挂载会与 v-cloak 叠加成白屏；由 onMounted 校验后再隐藏 */
     if(!userStr){
@@ -3471,11 +4370,14 @@
 
 <script src="/vendor/vue.global.prod.js"></script>
 <script src="/vendor/mermaid.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" crossorigin="anonymous"></script>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
 <script src="/assets/js/diagram_style_presets.js?v=3"></script>
 <script src="/assets/js/orch_catalog.js?v=1"></script>
-<script src="/assets/js/app.js?v=40"></script>
+<script src="/assets/js/reader_hub.js?v=3"></script>
+<script src="/assets/js/reader.js?v=3"></script>
+<script src="/assets/js/rich_content.js?v=3"></script>
+<script src="/assets/js/app.js?v=98"></script>
 <script>
 (function(){
   setTimeout(function(){
@@ -3483,6 +4385,8 @@
     var app=document.getElementById('app');
     if(!app)return;
     app.removeAttribute('v-cloak');
+    var ld=document.getElementById('sba-boot-loading');
+    if(ld)ld.classList.add('sba-boot-done');
     var token=localStorage.getItem('sba_token');
     if(!token){
       var mask=document.getElementById('auth-required-mask');
@@ -3490,8 +4394,8 @@
       app.innerHTML='';
       return;
     }
-    app.innerHTML='<div style="padding:32px 20px;max-width:520px;margin:24px auto;font-family:system-ui,sans-serif;line-height:1.55;color:#1e293b;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0"><h2 style="font-size:18px;margin:0 0 12px">应用加载失败</h2><p style="margin:0 0 10px;font-size:14px;color:#475569">Vue 未在 5 秒内完成挂载。请 Ctrl+F5 强刷并查看控制台报错。</p></div>';
-  },5000);
+    app.innerHTML='<div style="padding:32px 20px;max-width:520px;margin:24px auto;font-family:system-ui,sans-serif;line-height:1.55;color:#1e293b;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0"><h2 style="font-size:18px;margin:0 0 12px">应用加载失败</h2><p style="margin:0 0 10px;font-size:14px;color:#475569">Vue 未在 8 秒内完成挂载。请 Ctrl+F5 强刷并查看控制台报错。</p><p style="margin:0;font-size:13px;color:#64748b"><a href="/login.html">重新登录</a></p></div>';
+  },8000);
 })();
 </script>
 </body>

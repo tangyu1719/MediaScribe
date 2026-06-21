@@ -14,6 +14,34 @@ _TRACKING_QUERY_KEYS = frozenset({
     "share_from", "share_to", "enter_from", "open_source",
 })
 
+# 需要参与「字段级宽松匹配」的标准字段。即使不进入稳定 hash，也要保留给搜索/路由。
+_STANDARD_QUERY_KEYS = frozenset({
+    "xsec_token", "xsec_source", "share_id", "share_channel", "share_from_user_hidden",
+    "app_platform", "app_version", "ignoreengage", "author_share", "xhsshare", "shareredid",
+    "apptime", "timestamp", "source", "from", "referrer", "utm_source", "utm_medium",
+    "utm_campaign", "spm", "sec_uid", "mid", "iid", "did", "vid", "callback", "_t", "t",
+    "share_from", "share_to", "enter_from", "open_source", "xhs_token", "token",
+})
+
+
+def extract_link_fields(raw: str) -> dict[str, str]:
+    """提取链接中的标准字段，供更宽松的字段级匹配与路由使用。"""
+    u = coerce_pasted_link(raw)
+    if not u:
+        return {}
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", u):
+        u = "https://" + u
+    try:
+        p = urlparse(u)
+    except ValueError:
+        return {}
+    out: dict[str, str] = {}
+    for k, v in parse_qsl(p.query, keep_blank_values=False):
+        key = (k or "").strip().lower()
+        if key and key in _STANDARD_QUERY_KEYS and v:
+            out[key] = v.strip()
+    return out
+
 
 def _canonical_path(netloc: str, path: str) -> str:
     """按平台提取内容主键路径，忽略追踪 query。"""

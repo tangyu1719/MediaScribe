@@ -35,6 +35,7 @@ _log = logging.getLogger("sba.span_audit")
 _redis_cache: Dict[str, Dict] = {}
 _cache_lock = threading.Lock()
 _db_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="span-db")
+_hot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="span-hot")
 _db_available = False
 _SPAN_REDIS_PREFIX = "sb:span"
 _SPAN_REDIS_TTL = 7 * 24 * 3600
@@ -49,23 +50,44 @@ def _span_local_path(key_suffix: str) -> Path:
     return _SPAN_LOCAL_ROOT / f"{safe}.json"
 
 
+_span_local_locks: Dict[str, threading.Lock] = {}
+_span_local_lock_guard = threading.Lock()
+
+
+def _span_local_lock(key_suffix: str) -> threading.Lock:
+    with _span_local_lock_guard:
+        lk = _span_local_locks.get(key_suffix)
+        if lk is None:
+            lk = threading.Lock()
+            _span_local_locks[key_suffix] = lk
+        return lk
+
+
 def _write_span_local(key_suffix: str, payload: Dict[str, Any]) -> bool:
-    try:
-        path = _span_local_path(key_suffix)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-        tmp.replace(path)
-        return True
-    except Exception as ex:
-        _log.warning(
-            "[AI问答-SPAN审计|span_audit._write_span_local|%s|硬编执行|失败] "
-            "error_type=%s; error_message=%s",
-            key_suffix,
-            type(ex).__name__,
-            str(ex)[:200],
-        )
-        return False
+    lk = _span_local_lock(key_suffix)
+    with lk:
+        tmp: Optional[Path] = None
+        try:
+            path = _span_local_path(key_suffix)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(f".json.{uuid.uuid4().hex[:8]}.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+            tmp.replace(path)
+            return True
+        except Exception as ex:
+            _log.warning(
+                "[AI问答-SPAN审计|span_audit._write_span_local|%s|硬编执行|失败] "
+                "error_type=%s; error_message=%s",
+                key_suffix,
+                type(ex).__name__,
+                str(ex)[:200],
+            )
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return False
 
 
 def _span_redis_client():
@@ -124,6 +146,21 @@ def _persist_span_hot(key_suffix: str, payload: Dict[str, Any]) -> HotStore:
     return "local"
 
 
+def _enqueue_span_hot(key_suffix: str, payload: Dict[str, Any]) -> None:
+    """异步热写 Redis/本地：请求热路径只更新内存，禁止同步阻塞主线程。"""
+    if not key_suffix or not isinstance(payload, dict):
+        return
+    snap = dict(payload)
+
+    def _run() -> None:
+        _persist_span_hot(key_suffix, snap)
+
+    try:
+        _hot_executor.submit(_run)
+    except Exception:
+        _persist_span_hot(key_suffix, snap)
+
+
 def _load_span_local(key_suffix: str) -> Optional[Dict[str, Any]]:
     path = _span_local_path(key_suffix)
     if not path.is_file():
@@ -139,20 +176,21 @@ def _sync_task_hot(task: Dict[str, Any]) -> HotStore:
     tid = task.get("task_id")
     if not tid:
         return "memory"
-    return _persist_span_hot(f"task:{tid}", task)
+    _enqueue_span_hot(f"task:{tid}", task)
+    return "memory"
 
 
 def _sync_step_hot(step: Dict[str, Any]) -> HotStore:
     sid = step.get("step_id")
     if not sid:
         return "memory"
-    store = _persist_span_hot(f"step:{sid}", step)
+    _enqueue_span_hot(f"step:{sid}", step)
     tid = step.get("task_id")
     if tid:
         task = _redis_cache.get(f"task:{tid}")
         if task:
-            _persist_span_hot(f"task:{tid}", task)
-    return store
+            _enqueue_span_hot(f"task:{tid}", task)
+    return "memory"
 
 
 def _init_db():
@@ -394,6 +432,13 @@ def finish_step(step_id: str, status: str = "completed", output_payload: Dict = 
         if status == "failed": task["failed_steps"] = task.get("failed_steps", 0) + 1
     _sync_step_hot(step)
     _enqueue_db_flush_step(step)
+    if status in ("failed", "timeout"):
+        try:
+            from .ops_hooks import ops_dispatch_span_failure
+
+            ops_dispatch_span_failure(step)
+        except Exception:
+            pass
     return step
 
 

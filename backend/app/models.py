@@ -16,6 +16,9 @@ class ProcessRequest(BaseModel):
     link: str = Field(..., description="视频/图文链接")
     user_prompt: str = Field(default="", description="用户自定义提示词，将发送给摘要和原文 Agent")
     comments: CommentSettings = Field(default_factory=CommentSettings, description="评论读取设置")
+    importance: int = Field(default=5, ge=1, le=10, description="执行重要度 1-10，仅排队时生效")
+    task_note: str = Field(default="", description="任务备注")
+    task_keywords: str = Field(default="", description="任务关键词，逗号或换行分隔")
 
 
 class TaskStatus(BaseModel):

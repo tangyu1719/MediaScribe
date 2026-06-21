@@ -218,10 +218,13 @@ async def run_platform_health_check(
         async def _rag_vec():
             return await asyncio.to_thread(_check_rag_vector)
 
-        rag_row = await _retry_async("rag_vector", _rag_vec, retries=3)
+        rag_row = await _retry_async("rag_vector", _rag_vec, retries=1)
         rag_row["label"] = "RAG 向量库 (Milvus)"
         rag_row["category"] = "rag"
         rag_row["settings_href"] = "/#rag"
+        if rag_row.get("status") == "error":
+            rag_row["status"] = "warn"
+            rag_row["error"] = (rag_row.get("error") or "Milvus 不可达") + "（仅 RAG 检索需要，普通问答不受影响）"
         items.append(rag_row)
 
         async def _kb():
@@ -238,7 +241,10 @@ async def run_platform_health_check(
         mcp_row["category"] = "mcp"
         mcp_row["settings_href"] = "/#orch"
         failed_mcp = int((mcp_row.get("detail") or {}).get("failed_count") or 0)
-        if mcp_row.get("status") == "ok" and failed_mcp > 0:
+        if mcp_row.get("status") == "error":
+            mcp_row["status"] = "warn"
+            mcp_row["error"] = (mcp_row.get("error") or "MCP 不可用") + "（可选扩展，内置 Tool Call 仍可问答）"
+        elif mcp_row.get("status") == "ok" and failed_mcp > 0:
             mcp_row["status"] = "warn"
         items.append(mcp_row)
 
@@ -250,6 +256,22 @@ async def run_platform_health_check(
         tools_row["category"] = "tools"
         tools_row["settings_href"] = "/#orch"
         items.append(tools_row)
+
+        async def _ollama():
+            from .pipeline_llm import probe_ollama_health
+
+            row = await asyncio.to_thread(probe_ollama_health)
+            if row.get("status") == "error":
+                raise RuntimeError(row.get("error") or "Ollama 不可用")
+            return row
+
+        ollama_row = await _retry_async("ollama", _ollama, retries=1)
+        ollama_row["label"] = ollama_row.get("label") or "Ollama 预处理"
+        ollama_row["category"] = "model"
+        ollama_row["settings_href"] = "/#ops"
+        if ollama_row.get("status") == "error":
+            ollama_row["status"] = "warn"
+        items.append(ollama_row)
 
         summary = {"ok": 0, "warn": 0, "error": 0}
         for it in items:
@@ -292,6 +314,8 @@ def get_platform_health_snapshot() -> Dict[str, Any]:
 async def schedule_startup_health_check() -> None:
     """应用启动后后台跑一轮健康检查（由 FastAPI startup 调用）。"""
     try:
+        # 等待 chat warmup 先完成 LangGraph 编译，避免与 MCP 探测并发 import langchain 死锁
+        await asyncio.sleep(4.0)
         await run_platform_health_check(force=True)
     except Exception as ex:
         _log.warning(

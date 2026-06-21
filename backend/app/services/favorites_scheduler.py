@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
+import re
 from typing import Any, Dict, Optional
 
 _log = logging.getLogger("sba.favorites_scheduler")
@@ -12,6 +12,8 @@ _scheduler = None
 _scheduler_running = False
 _config: Dict[str, Any] = {}
 _startup_scheduled = False
+# 主 uvicorn 事件循环（禁止在子线程 asyncio.run，会与 LangGraph 导入死锁）
+_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _enabled() -> bool:
@@ -37,6 +39,40 @@ def _startup_delay_sec() -> float:
         return 45.0
 
 
+def register_main_event_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    """在 FastAPI startup 注册主事件循环，供 APScheduler 线程安全投递协程。"""
+    global _MAIN_LOOP
+    try:
+        _MAIN_LOOP = loop or asyncio.get_running_loop()
+    except RuntimeError:
+        _MAIN_LOOP = None
+
+
+def _submit_to_main_loop(coro) -> None:
+    """从 APScheduler 后台线程把协程投递到主 loop（禁止 asyncio.run）。"""
+    loop = _MAIN_LOOP
+    if loop is None or not loop.is_running():
+        _log.warning(
+            "[小红书收藏夹-调度|favorites_scheduler._submit_to_main_loop|event_loop|硬编执行|跳过] "
+            "主事件循环未就绪"
+        )
+        return
+
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+
+    def _done(f) -> None:
+        try:
+            f.result()
+        except Exception as ex:
+            _log.exception(
+                "[小红书收藏夹-调度|favorites_scheduler._submit_to_main_loop|sync|Agent执行|失败] "
+                "error=%s",
+                ex,
+            )
+
+    fut.add_done_callback(_done)
+
+
 def ensure_default_favorites_subscription() -> Dict[str, Any]:
     from .creator_subscription_store import get_or_create_subscription, get_subscription_by_platform_creator
     from .xhs_owner_chrome import refresh_owner_xhs_cookies
@@ -50,8 +86,10 @@ def ensure_default_favorites_subscription() -> Dict[str, Any]:
             ck.get("error"),
         )
 
-    creator_override = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
-    if creator_override:
+    creator_override = (
+        os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f"
+    ).strip()
+    if creator_override and re.fullmatch(r"[a-f0-9]{24}", creator_override, re.I):
         profile_url = f"https://www.xiaohongshu.com/user/profile/{creator_override}?tab=fav"
         existing = get_subscription_by_platform_creator("xiaohongshu_favorites", creator_override)
         if existing:
@@ -66,10 +104,35 @@ def ensure_default_favorites_subscription() -> Dict[str, Any]:
             tags=["kind:favorites", f"red_id:{red_id}"],
         )
 
-    from .xhs_favorites_adapter import resolve_favorites_owner
+    from .xhs_owner_chrome import resolve_owner_creator_id_from_cdp
 
-    resolved = resolve_favorites_owner(red_id, display_name=_display_name())
+    try:
+        resolved = resolve_owner_creator_id_from_cdp()
+    except Exception as ex:
+        _log.warning(
+            "[小红书收藏夹-调度|favorites_scheduler.ensure|CDP|硬编执行|回退] %s",
+            ex,
+        )
+        from .xhs_favorites_adapter import resolve_favorites_owner
+
+        resolved = resolve_favorites_owner(red_id, display_name=_display_name())
     tags = ["kind:favorites", f"red_id:{red_id}"]
+    cid = resolved["creator_id"]
+
+    from .creator_subscription_store import list_subscriptions, delete_subscription
+
+    for row in (list_subscriptions(platform="xiaohongshu_favorites", page=1, page_size=10).get("items") or []):
+        old_cid = (row.get("creator_id") or "").strip()
+        if not old_cid:
+            continue
+        stale = old_cid != cid or not re.fullmatch(r"[a-f0-9]{24}", old_cid, re.I)
+        if stale:
+            delete_subscription(row["subscription_id"])
+            _log.warning(
+                "[小红书收藏夹-调度|favorites_scheduler.ensure|subscription|硬编执行|修复] 删除过期 creator_id=%s",
+                old_cid,
+            )
+
     sub = get_or_create_subscription(
         platform="xiaohongshu_favorites",
         creator_id=resolved["creator_id"],
@@ -84,7 +147,7 @@ def ensure_default_favorites_subscription() -> Dict[str, Any]:
 
 async def _run_startup_sync() -> None:
     try:
-        sub = ensure_default_favorites_subscription()
+        sub = await asyncio.to_thread(ensure_default_favorites_subscription)
         from .favorites_sync_runner import run_favorites_sync
 
         result = await run_favorites_sync(sub["subscription_id"], trigger="startup")
@@ -101,7 +164,15 @@ async def _run_startup_sync() -> None:
         )
 
 
+async def _run_scheduled_sync_all() -> None:
+    await asyncio.to_thread(ensure_default_favorites_subscription)
+    from .favorites_sync_runner import run_favorites_sync_all
+
+    await run_favorites_sync_all(trigger="scheduled")
+
+
 def schedule_favorites_on_startup() -> None:
+    """FastAPI startup：延迟后在主事件循环后台同步（禁止 threading + asyncio.run）。"""
     global _startup_scheduled
     if not _enabled():
         return
@@ -110,21 +181,25 @@ def schedule_favorites_on_startup() -> None:
     _startup_scheduled = True
     delay = _startup_delay_sec()
 
-    def _defer():
-        import time
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _log.warning(
+            "[小红书收藏夹-调度|favorites_scheduler.schedule_favorites_on_startup|startup|硬编执行|跳过] "
+            "无运行中事件循环"
+        )
+        return
 
-        time.sleep(delay)
-        try:
-            asyncio.run(_run_startup_sync())
-        except Exception as ex:
-            _log.exception(
-                "[小红书收藏夹-调度|favorites_scheduler.schedule_favorites_on_startup|sync|Agent执行|失败] %s",
-                ex,
-            )
+    register_main_event_loop(loop)
 
-    threading.Thread(target=_defer, daemon=True, name="favorites-startup-sync").start()
+    async def _delayed_startup() -> None:
+        await asyncio.sleep(delay)
+        await _run_startup_sync()
+
+    loop.create_task(_delayed_startup())
     _log.info(
-        "[小红书收藏夹-调度|favorites_scheduler.schedule_favorites_on_startup|scheduler|硬编执行|启动] delay_sec=%s",
+        "[小红书收藏夹-调度|favorites_scheduler.schedule_favorites_on_startup|scheduler|硬编执行|启动] "
+        "delay_sec=%s; mode=main_loop_task",
         delay,
     )
 
@@ -151,16 +226,7 @@ def start_scheduler() -> Dict[str, Any]:
         parts = "0 0 * * *".split()
 
     def _job():
-        try:
-            ensure_default_favorites_subscription()
-            from .favorites_sync_runner import run_favorites_sync_all
-
-            asyncio.run(run_favorites_sync_all(trigger="scheduled"))
-        except Exception as ex:
-            _log.exception(
-                "[小红书收藏夹-调度|favorites_scheduler._job|sync-all|Agent执行|失败] error=%s",
-                ex,
-            )
+        _submit_to_main_loop(_run_scheduled_sync_all())
 
     _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     _scheduler.add_job(

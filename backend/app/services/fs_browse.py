@@ -62,6 +62,26 @@ def _which_root(path: Path) -> Optional[Path]:
     return None
 
 
+def is_under_allowed_root(abs_path: Path) -> bool:
+    """路径是否在 FS 白名单根目录下。"""
+    return _which_root(abs_path.resolve()) is not None
+
+
+def resolve_allowed_directory(path: str) -> Path:
+    """解析并确保白名单内目录存在（用于另存为选文件夹）。"""
+    raw = (path or "").strip()
+    if not raw:
+        raise ValueError("缺少目录路径")
+    target = Path(raw).resolve()
+    root = _which_root(target)
+    if root is None:
+        raise PermissionError("目录不在允许的白名单内")
+    if target.exists() and not target.is_dir():
+        raise ValueError("不是目录")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def browse(path: str = "") -> Dict[str, Any]:
     """
     path 为空：返回白名单根目录列表。

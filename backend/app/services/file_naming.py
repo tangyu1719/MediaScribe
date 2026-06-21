@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .task_manager import get_output_dir
 from .document_consolidation import extract_title_from_summary, clean_title
+from .pipeline_output_quality import validate_extracted_title
 
 
 def apply_naming_template(template: str, **kwargs) -> str:
@@ -84,6 +85,9 @@ def render_output_template(
     comments_section: str = "",
     comments_analysis: str = "",
     comments_file_link: str = "",
+    meta_json: str = "",
+    task_note: str = "",
+    task_keywords: str = "",
 ) -> str:
     """按 config output_template 渲染成品 Markdown。"""
     tpl = (template or "").strip()
@@ -114,8 +118,15 @@ def render_output_template(
         "comments_section": (comments_section or "").strip(),
         "comments_analysis": (comments_analysis or "").strip(),
         "comments_file_link": (comments_file_link or "").strip(),
+        "meta_json": (meta_json or "").strip(),
+        "task_note": (task_note or "").strip(),
+        "task_keywords": (task_keywords or "").strip(),
     }
-    return apply_naming_template(tpl, **ctx)
+    rendered = apply_naming_template(tpl, **ctx)
+    # 未在模板中放置 {meta_json} 时，默认在文首展示结构化元数据
+    if meta_json and "{meta_json}" not in tpl and meta_json not in rendered:
+        rendered = meta_json.rstrip() + "\n\n" + rendered
+    return rendered
 
 
 def _detect_platform_from_link(link: str, platform: str = "") -> str:
@@ -380,13 +391,24 @@ def resolve_doc_title(
     log_cb: Optional[Callable[[str], None]] = None,
     naming_rule: str = "",  # 兼容旧调用；展示/任务字段不套用 file_naming_rule
     platform: str = "",
+    source_text_len: int = 0,
+    *,
+    quality_gate: bool = True,
 ) -> str:
     """二层标题：从摘要 Agent 输出提取（extract_title_from_summary），用于任务 doc_title 与文件名 stem。"""
     _ = naming_rule
     plat = _detect_platform_from_link(link, platform)
     name = extract_title_from_summary(ai_summary, link, log_cb=log_cb)
     if name and name not in ("内容分析", "未知标题"):
-        return sanitize_filename_part(name.replace(" ", "_"))[:50]
+        safe = sanitize_filename_part(name.replace(" ", "_"))[:50]
+        if quality_gate:
+            validate_extracted_title(
+                safe,
+                link=link,
+                link_title=link_title,
+                source_text_len=source_text_len or len((ai_summary or "").strip()),
+            )
+        return safe
     if link_title:
         lt = clean_title(link_title, platform=plat) if plat else clean_title(link_title)
         return sanitize_filename_part(lt.replace(" ", "_"))[:50]

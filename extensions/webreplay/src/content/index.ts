@@ -15,18 +15,32 @@ async function injectFetchHook(): Promise<void> {
   if ((window as Window & { __webreplay_fetch_hook_injected__?: boolean }).__webreplay_fetch_hook_injected__) {
     return;
   }
-  const src = chrome.runtime.getURL(FETCH_HOOK_PATH);
-  const s = document.createElement('script');
-  s.src = src;
-  s.onload = () => {
-    (window as Window & { __webreplay_fetch_hook_injected__?: boolean }).__webreplay_fetch_hook_injected__ = true;
-    s.remove();
-  };
-  (document.documentElement || document.head).appendChild(s);
+  // 仅在完整扩展上下文注入；避免 Cursor/其它环境 mock 了 chrome 但无 getURL 时抛错阻断页面
+  const rt = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
+  if (!rt || typeof rt.getURL !== 'function') {
+    return;
+  }
+  try {
+    const src = rt.getURL(FETCH_HOOK_PATH);
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => {
+      (window as Window & { __webreplay_fetch_hook_injected__?: boolean }).__webreplay_fetch_hook_injected__ = true;
+      s.remove();
+    };
+    (document.documentElement || document.head).appendChild(s);
+  } catch {
+    /* 扩展资源不可达时静默跳过，不影响宿主页 */
+  }
 }
 
 function refreshState(): void {
-  chrome.runtime.sendMessage({ type: 'state/query' }).then((state) => {
+  const rt = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
+  if (!rt || typeof rt.sendMessage !== 'function') {
+    stopRecordingUi();
+    return;
+  }
+  rt.sendMessage({ type: 'state/query' }).then((state) => {
     if (!state) {
       stopRecordingUi();
       return;

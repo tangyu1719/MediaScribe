@@ -12,6 +12,8 @@ from .creator_feed_adapter import (
     FeedItem,
     _build_note_url,
     _note_type_to_content,
+    extract_xhs_note_id_from_url,
+    is_valid_xhs_note_id,
     resolve_xhs_red_id,
 )
 from .link_hash import normalize_link_for_hash, url_hash as link_url_hash
@@ -25,10 +27,75 @@ _PLATFORM = "xiaohongshu_favorites"
 class FavoritesFeedItem(FeedItem):
     author_followers: int = 0
     collected_at: Optional[str] = None
+    published_date: Optional[str] = None
+    like_count: int = 0
+    comment_count: int = 0
+    hashtags: List[str] = None  # type: ignore[assignment]
+    cover_url: str = ""
+    note_url: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
+        if d.get("hashtags") is None:
+            d["hashtags"] = []
         return d
+
+
+def _flatten_dict_list(nodes: List[Any]) -> List[Dict[str, Any]]:
+    """递归展开 list[list[dict]] 等收藏页分页结构。"""
+    out: List[Dict[str, Any]] = []
+    for node in nodes:
+        if isinstance(node, dict):
+            out.append(node)
+        elif isinstance(node, list):
+            out.extend(_flatten_dict_list(node))
+    return out
+
+
+def _note_id_from_dict(n: Dict[str, Any]) -> str:
+    """从 state 节点或嵌套 url/href 解析真实 24 位 noteId；禁止伪造 fav_*。"""
+    for key in ("noteId", "id", "note_id"):
+        val = str(n.get(key) or "").strip()
+        if is_valid_xhs_note_id(val):
+            return val
+    for key in ("url", "link", "href", "noteUrl", "note_url"):
+        val = str(n.get(key) or "").strip()
+        if val:
+            nid = extract_xhs_note_id_from_url(val)
+            if is_valid_xhs_note_id(nid):
+                return nid
+    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    if card:
+        for key in ("noteId", "id", "note_id"):
+            val = str(card.get(key) or "").strip()
+            if is_valid_xhs_note_id(val):
+                return val
+        for key in ("url", "link", "href"):
+            val = str(card.get(key) or "").strip()
+            if val:
+                nid = extract_xhs_note_id_from_url(val)
+                if is_valid_xhs_note_id(nid):
+                    return nid
+    return ""
+
+
+def _normalize_favorite_note_dict(n: Dict[str, Any]) -> Dict[str, Any]:
+    """合并 noteCard 字段；无真实 noteId 时保留原结构供上层跳过（不再生成 fav_* 假 ID）。"""
+    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    merged: Dict[str, Any] = dict(n)
+    if card:
+        merged.setdefault("noteCard", card)
+        for key in ("noteId", "id", "note_id", "displayTitle", "title", "type", "xsecToken", "xsec_token"):
+            val = card.get(key)
+            if val and not merged.get(key):
+                merged[key] = val
+        card_user = card.get("user") if isinstance(card.get("user"), dict) else {}
+        if card_user and not merged.get("user"):
+            merged["user"] = card_user
+    nid = _note_id_from_dict(merged)
+    if nid:
+        merged["noteId"] = nid
+    return merged
 
 
 def _extract_favorites_from_state(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -65,21 +132,25 @@ def _extract_favorites_from_state(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     flat: List[Dict[str, Any]] = []
     for c in candidates:
         if isinstance(c, list):
-            flat.extend([x for x in c if isinstance(x, dict)])
+            flat.extend(_flatten_dict_list(c))
         elif isinstance(c, dict):
             for v in c.values():
-                if isinstance(v, dict) and (v.get("noteId") or v.get("id") or v.get("note_id")):
+                if isinstance(v, dict):
                     flat.append(v)
                 elif isinstance(v, list):
-                    flat.extend([x for x in v if isinstance(x, dict)])
+                    flat.extend(_flatten_dict_list(v))
 
     seen: set[str] = set()
     out: List[Dict[str, Any]] = []
-    for n in flat:
-        nid = str(n.get("noteId") or n.get("id") or n.get("note_id") or "").strip()
-        if not nid or nid in seen:
+    for raw in flat:
+        n = _normalize_favorite_note_dict(raw)
+        nid = _note_id_from_dict(n)
+        if not is_valid_xhs_note_id(nid):
+            continue
+        if nid in seen:
             continue
         seen.add(nid)
+        n["noteId"] = nid
         out.append(n)
 
     if out:
@@ -111,6 +182,81 @@ def _extract_favorites_from_state(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_favorites_meta_from_state(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """收藏页 SSR 元数据（允许 noteId 为空，供点击解析后按序合并 author/title）。"""
+    user = data.get("user") or {}
+    if isinstance(user, dict):
+        notes = user.get("notes")
+        if isinstance(notes, list):
+            for block in notes:
+                if not isinstance(block, list) or not block:
+                    continue
+                flat = _flatten_dict_list(block)
+                if not flat:
+                    continue
+                first = flat[0] if isinstance(flat[0], dict) else {}
+                card = first.get("noteCard") if isinstance(first.get("noteCard"), dict) else {}
+                if not (first.get("displayTitle") or card.get("displayTitle") or first.get("noteId") or card.get("noteId")):
+                    continue
+                return [_normalize_favorite_note_dict(x) for x in flat if isinstance(x, dict)]
+
+    candidates: List[Any] = []
+    if isinstance(user, dict):
+        for key in ("collects", "collectNotes", "collectedNotes", "favorites", "favoriteNotes", "notes", "noteList"):
+            if user.get(key):
+                candidates.append(user.get(key))
+    flat: List[Dict[str, Any]] = []
+    for c in candidates:
+        if isinstance(c, list):
+            flat.extend(_flatten_dict_list(c))
+    if flat:
+        return [_normalize_favorite_note_dict(x) for x in flat if isinstance(x, dict)]
+    return []
+
+
+def parse_favorites_meta_from_init_state(
+    data: Dict[str, Any],
+    *,
+    owner_creator_id: str,
+    profile_url: str,
+    fetch_source: str = "favorites_meta",
+) -> List[FavoritesFeedItem]:
+    """解析收藏元数据（可无 noteId），用于与点击采集结果按序合并。"""
+    items: List[FavoritesFeedItem] = []
+    for n in _extract_favorites_meta_from_state(data):
+        title = (
+            n.get("title")
+            or n.get("displayTitle")
+            or (n.get("noteCard") or {}).get("displayTitle")
+            or ""
+        )
+        title = str(title).strip()
+        card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+        author = n.get("user") or n.get("author") or card.get("user") or {}
+        author_id = str(author.get("userId") or author.get("id") or author.get("user_id") or "")
+        author_name = str(author.get("nickname") or author.get("name") or "")
+        token = str(n.get("xsecToken") or n.get("xsec_token") or "")
+        nid = _note_id_from_dict(n)
+        url = _build_note_url(nid, token) if nid else ""
+        items.append(
+            FavoritesFeedItem(
+                platform=_PLATFORM,
+                note_id=nid,
+                canonical_url=url,
+                url_hash=link_url_hash(url) if url else "",
+                content_type=_note_type_to_content(n),
+                title=title or (f"笔记 {nid[:8]}" if nid else "收藏笔记"),
+                published_at=None,
+                author_id=author_id,
+                author_name=author_name,
+                fetch_source=fetch_source,
+                author_followers=_author_followers(n),
+                collected_at=None,
+            )
+        )
+    return items
+
+
 def _author_followers(n: Dict[str, Any]) -> int:
     author = n.get("user") or n.get("author") or {}
     if not isinstance(author, dict):
@@ -132,8 +278,8 @@ def parse_favorites_from_init_state(
     raw_notes = _extract_favorites_from_state(data)
     items: List[FavoritesFeedItem] = []
     for n in raw_notes:
-        nid = str(n.get("noteId") or n.get("id") or n.get("note_id") or "").strip()
-        if not nid:
+        nid = _note_id_from_dict(n)
+        if not is_valid_xhs_note_id(nid):
             continue
         title = (
             n.get("title")
@@ -144,9 +290,12 @@ def parse_favorites_from_init_state(
         title = str(title).strip() or f"笔记 {nid[:8]}"
         token = str(n.get("xsecToken") or n.get("xsec_token") or "")
         url = _build_note_url(nid, token)
+        if not url:
+            continue
         uh = link_url_hash(url)
         pub = n.get("time") or n.get("createTime") or n.get("publishTime") or n.get("collectTime")
         pub_str = None
+        pub_date = None
         if pub:
             try:
                 if isinstance(pub, (int, float)):
@@ -155,11 +304,45 @@ def parse_favorites_from_init_state(
                     ).isoformat()
                 else:
                     pub_str = str(pub)
+                pub_date = (pub_str or "")[:10]
             except Exception:
                 pub_str = str(pub)
-        author = n.get("user") or n.get("author") or {}
+                pub_date = str(pub)[:10]
+        card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+        author = n.get("user") or n.get("author") or card.get("user") or {}
         author_id = str(author.get("userId") or author.get("id") or author.get("user_id") or "")
         author_name = str(author.get("nickname") or author.get("name") or "")
+        stats = n.get("interactInfo") if isinstance(n.get("interactInfo"), dict) else {}
+        like_count = 0
+        comment_count = 0
+        for key in ("likedCount", "likeCount", "likes", "liked"):
+            val = stats.get(key) if stats else None
+            if isinstance(val, (int, float)):
+                like_count = int(val)
+                break
+        for key in ("commentCount", "commentsCount", "comments", "commented"):
+            val = stats.get(key) if stats else None
+            if isinstance(val, (int, float)):
+                comment_count = int(val)
+                break
+        hashtags: List[str] = []
+        for key in ("hashtags", "tagList", "topics", "keywords"):
+            vals = n.get(key) or card.get(key)
+            if isinstance(vals, list):
+                for v in vals:
+                    if isinstance(v, dict):
+                        txt = str(v.get("name") or v.get("tagName") or v.get("keyword") or "").strip()
+                    else:
+                        txt = str(v).strip()
+                    if txt and txt not in hashtags:
+                        hashtags.append(txt)
+        if not hashtags:
+            text_blob = " ".join([title, str(n.get("desc") or ""), str(n.get("noteCard", {}).get("desc") if isinstance(n.get("noteCard"), dict) else "")])
+            hashtags = re.findall(r"#([\w\u4e00-\u9fff\-]+)", text_blob)
+        cover_url = str(
+            card.get("cover")
+            or card.get("imageList", [{}])[0].get("url") if isinstance(card.get("imageList"), list) and card.get("imageList") else ""
+        )
         items.append(
             FavoritesFeedItem(
                 platform=_PLATFORM,
@@ -174,6 +357,12 @@ def parse_favorites_from_init_state(
                 fetch_source=fetch_source,
                 author_followers=_author_followers(n),
                 collected_at=pub_str,
+                published_date=pub_date,
+                like_count=like_count,
+                comment_count=comment_count,
+                hashtags=hashtags,
+                cover_url=cover_url,
+                note_url=url,
             )
         )
     return items
@@ -184,17 +373,23 @@ def fetch_favorites_catalog(
     *,
     profile_url: str = "",
     limit: int = 80,
+    scroll_rounds: int = 6,
+    prefer_cookies: bool = False,
 ) -> Tuple[List[FavoritesFeedItem], bool]:
     """
     拉取收藏夹笔记列表（最新在前）。
     返回 (items, ok)；失败时 items 可能为空。
     """
-    from .xhs_local_browser import scrape_favorites_note_links_via_cdp
+    from .xhs_local_browser import scrape_favorites_feed_items
 
     url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
-    link_map: Dict[str, str] = {}
     try:
-        link_map = scrape_favorites_note_links_via_cdp(url, creator_id=creator_id)
+        items = scrape_favorites_feed_items(
+            url,
+            creator_id=creator_id,
+            scroll_rounds=scroll_rounds,
+            prefer_cookies=prefer_cookies,
+        )
     except Exception as ex:
         _log.error(
             "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|CDP] 失败; error=%s",
@@ -202,31 +397,28 @@ def fetch_favorites_catalog(
             creator_id,
             ex,
         )
-        raise RuntimeError("SUB_FAVORITES_FETCH_FAILED") from ex
+        return [], False
 
-    if not link_map:
-        raise RuntimeError("SUB_FAVORITES_EMPTY")
-
-    items: List[FavoritesFeedItem] = []
-    for idx, (nid, note_url) in enumerate(link_map.items()):
-        if idx >= limit:
-            break
-        items.append(
-            FavoritesFeedItem(
-                platform=_PLATFORM,
-                note_id=nid,
-                canonical_url=note_url,
-                url_hash=link_url_hash(note_url),
-                content_type="unknown",
-                title=f"笔记 {nid[:8]}",
-                published_at=None,
-                author_id="",
-                author_name="",
-                fetch_source="cdp_favorites",
-                author_followers=0,
-                collected_at=None,
-            )
+    if not items:
+        _log.error(
+            "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|空列表] 所有采集策略均失败或返回空",
+            _CHAIN,
+            creator_id,
         )
+        return [], False
+
+    valid_items = [
+        it
+        for it in items
+        if is_valid_xhs_note_id(getattr(it, "note_id", "") or "")
+        and extract_xhs_note_id_from_url(getattr(it, "canonical_url", "") or "") == it.note_id
+    ]
+    if not valid_items:
+        raise RuntimeError(
+            "SUB_FAVORITES_INVALID_LINKS: 收藏页采集到的链接均非真实笔记 ID（疑似 fav_* 伪造或 DOM 未加载）。"
+            "请确认 Chrome 收藏 Tab 已打开且页面已滚动加载。"
+        )
+    items = valid_items[:limit]
 
     _log.info(
         "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|拉取] 完成; count=%s; with_token=%s",
@@ -236,6 +428,86 @@ def fetch_favorites_catalog(
         sum(1 for it in items if "xsec_token" in it.canonical_url),
     )
     return items[:limit], True
+
+
+def aggregate_favorite_up_authors(
+    items: List[FavoritesFeedItem],
+    *,
+    owner_creator_id: str = "",
+    limit: int = 40,
+) -> List[Dict[str, Any]]:
+    """从收藏笔记列表去重聚合博主（收藏 UP）。"""
+    owner = (owner_creator_id or "").strip().lower()
+    by_author: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        aid = str(it.author_id or "").strip()
+        if not aid or not re.fullmatch(r"[a-f0-9]{24}", aid, re.I):
+            continue
+        if owner and aid.lower() == owner:
+            continue
+        name = str(it.author_name or "").strip() or aid[:8]
+        row = by_author.get(aid)
+        if not row:
+            row = {
+                "creator_id": aid,
+                "display_name": name,
+                "profile_url": f"https://www.xiaohongshu.com/user/profile/{aid}",
+                "note_count": 0,
+                "sample_titles": [],
+            }
+            by_author[aid] = row
+        row["note_count"] = int(row.get("note_count") or 0) + 1
+        if name and (not row.get("display_name") or row["display_name"] == aid[:8]):
+            row["display_name"] = name
+        titles = row.get("sample_titles") or []
+        title = str(it.title or "").strip()
+        if title and title not in titles and len(titles) < 3:
+            titles.append(title)
+        row["sample_titles"] = titles
+
+    ranked = sorted(by_author.values(), key=lambda x: int(x.get("note_count") or 0), reverse=True)
+    return ranked[: max(1, limit)]
+
+
+def fetch_favorite_up_authors(
+    creator_id: str,
+    *,
+    profile_url: str = "",
+    limit: int = 40,
+    scroll_rounds: int = 6,
+    prefer_cookies: bool = False,
+) -> Dict[str, Any]:
+    """拉取收藏夹中的博主列表（收藏 UP）。"""
+    from .xhs_local_browser import scrape_favorites_feed_items, should_prefer_cookie_favorites_fetch
+
+    url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+    prefer = bool(prefer_cookies or should_prefer_cookie_favorites_fetch())
+    items = scrape_favorites_feed_items(
+        url,
+        creator_id=creator_id,
+        scroll_rounds=scroll_rounds,
+        prefer_cookies=prefer,
+    )
+    authors = aggregate_favorite_up_authors(
+        items,
+        owner_creator_id=creator_id,
+        limit=limit,
+    )
+    _log.info(
+        "[%s|xhs_favorites_adapter.fetch_favorite_up_authors|%s|Agent执行|完成] "
+        "notes=%s; authors=%s",
+        _CHAIN,
+        creator_id,
+        len(items),
+        len(authors),
+    )
+    return {
+        "ok": True,
+        "creator_id": creator_id,
+        "notes_scanned": len(items),
+        "authors": authors,
+        "author_count": len(authors),
+    }
 
 
 def resolve_favorites_owner(red_id: str, *, display_name: str = "") -> Dict[str, Any]:

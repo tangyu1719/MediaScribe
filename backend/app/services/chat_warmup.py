@@ -27,6 +27,8 @@ _tools_cache: Dict[bool, Tuple[List[Any], Dict[str, Any]]] = {}
 _session_mem_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
 _SESSION_MEM_TTL_SEC = 180.0
 _RAG_EMBED_WARMUP_TIMEOUT_SEC = 45.0
+# LangGraph/MCP 共用 LangChain 模块；并行 import 会触发 CPython 模块锁死锁
+_RUNTIME_INIT_LOCK = threading.Lock()
 
 
 def get_warmup_status() -> Dict[str, Any]:
@@ -196,9 +198,13 @@ def _set_phase(name: str, *, ok: bool, elapsed_ms: int, detail: str = "", error:
 async def _warm_langgraph() -> None:
     t0 = time.perf_counter()
     try:
-        from .chat_graph import get_compiled_chat_graph
+        def _compile() -> None:
+            with _RUNTIME_INIT_LOCK:
+                from .chat_graph import get_compiled_chat_graph
 
-        get_compiled_chat_graph()
+                get_compiled_chat_graph()
+
+        await asyncio.to_thread(_compile)
         ms = int((time.perf_counter() - t0) * 1000)
         _set_phase("langgraph", ok=True, elapsed_ms=ms, detail="graph_compiled")
     except Exception as ex:
@@ -304,18 +310,13 @@ async def run_chat_warmup(
     t_all = time.perf_counter()
     err_msg = ""
     try:
-        tasks: List[Any] = [
-            _warm_langgraph(),
-            _warm_tools(read_comments=False),
-        ]
+        # 必须串行：LangGraph 与 MCP 工具加载都会 import langchain_core
+        await _warm_langgraph()
+        await _warm_tools(read_comments=False)
         if read_comments:
-            tasks.append(_warm_tools(read_comments=True))
+            await _warm_tools(read_comments=True)
         if include_rag:
-            tasks.append(_warm_rag_optional())
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                raise r
+            await _warm_rag_optional()
     except Exception as ex:
         err_msg = str(ex)[:500]
         _LOG.warning(
@@ -377,11 +378,15 @@ async def wait_for_chat_warmup(
 
 
 def schedule_chat_warmup_on_startup() -> None:
-    """FastAPI startup：后台预热 MCP + LangGraph（不阻塞 HTTP 监听）。"""
+    """已废弃：请使用 await_chat_warmup_on_startup（启动时阻塞完成 LangGraph+工具预热）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
 
-    def _run() -> None:
+    async def _bg() -> None:
         try:
-            asyncio.run(run_chat_warmup(read_comments=False, include_rag=True))
+            await run_chat_warmup(read_comments=False, include_rag=False)
         except Exception as ex:
             _LOG.warning(
                 "[AI问答-预热|chat_warmup.schedule_chat_warmup_on_startup|startup|硬编执行|失败] "
@@ -389,4 +394,42 @@ def schedule_chat_warmup_on_startup() -> None:
                 str(ex)[:300],
             )
 
-    threading.Thread(target=_run, name="chat-warmup", daemon=True).start()
+    loop.create_task(_bg())
+
+
+async def await_chat_warmup_on_startup(*, timeout_sec: float = 120.0) -> Dict[str, Any]:
+    """FastAPI startup：阻塞完成 LangGraph 编译 + MCP/工具加载，首条问答不再付 ~1s 冷启动。"""
+    t0 = time.perf_counter()
+    try:
+        st = await asyncio.wait_for(
+            run_chat_warmup(read_comments=False, include_rag=False),
+            timeout=max(15.0, float(timeout_sec or 120.0)),
+        )
+    except asyncio.TimeoutError:
+        ms = int((time.perf_counter() - t0) * 1000)
+        _LOG.warning(
+            "[AI问答-预热|chat_warmup.await_chat_warmup_on_startup|startup|硬编执行|超时] "
+            "timeout_sec=%s; elapsed_ms=%s",
+            timeout_sec,
+            ms,
+        )
+        return get_warmup_status()
+    except Exception as ex:
+        ms = int((time.perf_counter() - t0) * 1000)
+        _LOG.warning(
+            "[AI问答-预热|chat_warmup.await_chat_warmup_on_startup|startup|硬编执行|失败] "
+            "elapsed_ms=%s; error_message=%s",
+            ms,
+            str(ex)[:300],
+        )
+        return get_warmup_status()
+    ms = int((time.perf_counter() - t0) * 1000)
+    _LOG.info(
+        "[AI问答-预热|chat_warmup.await_chat_warmup_on_startup|startup|硬编执行|完成] "
+        "ready=%s; elapsed_ms=%s; tools=%s; mcp=%s",
+        st.get("ready"),
+        ms,
+        st.get("tools_total"),
+        st.get("mcp_count"),
+    )
+    return st

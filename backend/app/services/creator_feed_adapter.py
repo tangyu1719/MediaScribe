@@ -117,8 +117,27 @@ def _find_user_by_red_id_in_obj(obj: Any, red_id: str) -> Optional[Dict[str, Any
     return None
 
 
+# 仅拦截已知的搜索页误匹配占位 id（三点、水 真实 uid 为 60dc2e340000000001008a1f）
+_KNOWN_BAD_XHS_CREATOR_IDS = frozenset({"60dc2e340000000000000000"})
+
+
+def _is_suspicious_xhs_creator_id(creator_id: str) -> bool:
+    """过滤搜索页 SSR 误匹配的占位 user_id。"""
+    cid = (creator_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{24}", cid):
+        return True
+    if cid in _KNOWN_BAD_XHS_CREATOR_IDS:
+        return True
+    return False
+
+
 def _user_dict_to_resolved(u: Dict[str, Any], red_id: str, source: str) -> Dict[str, Any]:
     uid = str(u.get("id") or u.get("userId") or u.get("user_id") or "")
+    if _is_suspicious_xhs_creator_id(uid):
+        raise RuntimeError(f"SUB_RED_ID_NOT_FOUND: 解析到可疑 user_id {uid}")
+    rid = str(u.get("redId") or u.get("red_id") or "").strip()
+    if rid and rid != red_id:
+        raise RuntimeError(f"SUB_RED_ID_NOT_FOUND: redId 不匹配 {rid} != {red_id}")
     display_name = str(u.get("nickname") or u.get("name") or red_id)
     return {
         "creator_id": uid,
@@ -303,13 +322,22 @@ def resolve_xhs_red_id(red_id: str, *, display_name: str = "") -> Dict[str, Any]
             )
         if m:
             uid = m.group(1)
-            return {
-                "creator_id": uid,
-                "display_name": red_id,
-                "profile_url": f"https://www.xiaohongshu.com/user/profile/{uid}",
-                "red_id": red_id,
-                "source": "search_init_state_regex",
-            }
+            if _is_suspicious_xhs_creator_id(uid):
+                _log.warning(
+                    "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|硬编执行|拒绝] "
+                    "搜索页正则命中可疑 user_id; uid=%s",
+                    _CHAIN_RESOLVE,
+                    red_id,
+                    uid,
+                )
+            else:
+                return {
+                    "creator_id": uid,
+                    "display_name": red_id,
+                    "profile_url": f"https://www.xiaohongshu.com/user/profile/{uid}",
+                    "red_id": red_id,
+                    "source": "search_init_state_regex",
+                }
 
     try:
         from .xhs_local_browser import resolve_red_id_via_local_chrome
@@ -351,11 +379,156 @@ def _note_type_to_content(note: Dict[str, Any]) -> str:
     return "graphic"
 
 
+XHS_NOTE_ID_RE = re.compile(r"^[a-f0-9]{24}$", re.I)
+_XHS_NOTE_URL_RE = re.compile(
+    r"/(?:explore|discovery/item)/([a-f0-9]{24})",
+    re.I,
+)
+
+
+def is_valid_xhs_note_id(note_id: str) -> bool:
+    """小红书笔记 ID 须为 24 位十六进制；禁止 fav_* 等伪造 ID。"""
+    return bool(XHS_NOTE_ID_RE.fullmatch((note_id or "").strip()))
+
+
+def extract_xhs_note_id_from_url(url: str) -> str:
+    m = _XHS_NOTE_URL_RE.search(url or "")
+    return m.group(1) if m else ""
+
+
+def extract_xhs_note_url_from_location(location_href: str, html: str = "") -> str:
+    """从当前页 URL 或 login/404 的 redirectPath 解析带 token 的真实 explore 链接。"""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    candidates: List[str] = []
+    href = (location_href or "").strip()
+    if href:
+        candidates.append(href)
+        parsed = urlparse(href)
+        for key in ("redirectPath", "redirect_path", "source"):
+            raw = (parse_qs(parsed.query).get(key) or [""])[0]
+            if raw:
+                candidates.append(unquote(raw))
+    blob = (html or "")[:120000]
+    for m in re.finditer(
+        r'(?:redirectPath|redirect_path)=([^&"\']+)',
+        blob,
+        re.I,
+    ):
+        candidates.append(unquote(m.group(1)))
+
+    seen: set[str] = set()
+    for cand in candidates:
+        cand = (cand or "").strip()
+        if not cand:
+            continue
+        if cand.startswith("/"):
+            cand = f"https://www.xiaohongshu.com{cand}"
+        nid = extract_xhs_note_id_from_url(cand)
+        if not is_valid_xhs_note_id(nid) or nid in seen:
+            continue
+        seen.add(nid)
+        if cand.startswith("http") and "/explore/" in cand:
+            return cand.split("#")[0]
+        token_m = re.search(r"xsec_token=([^&\s\"']+)", cand, re.I)
+        token = token_m.group(1) if token_m else ""
+        built = _build_note_url(nid, token)
+        if built:
+            return built
+    return ""
+
+
 def _build_note_url(note_id: str, xsec_token: str = "") -> str:
+    if not is_valid_xhs_note_id(note_id):
+        return ""
     base = f"https://www.xiaohongshu.com/explore/{note_id}"
     if xsec_token:
         return f"{base}?xsec_token={xsec_token}&xsec_source=pc_user"
     return base
+
+
+def _flatten_dict_list(nodes: List[Any]) -> List[Dict[str, Any]]:
+    """递归展开 list[list[dict]] 等主页/收藏分页嵌套结构。"""
+    out: List[Dict[str, Any]] = []
+    for node in nodes:
+        if isinstance(node, dict):
+            out.append(node)
+        elif isinstance(node, list):
+            out.extend(_flatten_dict_list(node))
+    return out
+
+
+def _note_id_from_profile_dict(n: Dict[str, Any]) -> str:
+    """从 state/DOM 节点解析真实 24 位 noteId。"""
+    for key in ("noteId", "id", "note_id"):
+        val = str(n.get(key) or "").strip()
+        if is_valid_xhs_note_id(val):
+            return val
+    for key in ("url", "link", "href", "noteUrl", "note_url"):
+        val = str(n.get(key) or "").strip()
+        if val:
+            nid = extract_xhs_note_id_from_url(val)
+            if is_valid_xhs_note_id(nid):
+                return nid
+    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    if card:
+        for key in ("noteId", "id", "note_id"):
+            val = str(card.get(key) or "").strip()
+            if is_valid_xhs_note_id(val):
+                return val
+        for key in ("url", "link", "href"):
+            val = str(card.get(key) or "").strip()
+            if val:
+                nid = extract_xhs_note_id_from_url(val)
+                if is_valid_xhs_note_id(nid):
+                    return nid
+    return ""
+
+
+def _normalize_profile_note_dict(n: Dict[str, Any]) -> Dict[str, Any]:
+    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    merged: Dict[str, Any] = dict(n)
+    if card:
+        merged.setdefault("noteCard", card)
+        for key in ("noteId", "id", "note_id", "displayTitle", "title", "type", "xsecToken", "xsec_token"):
+            val = card.get(key)
+            if val and not merged.get(key):
+                merged[key] = val
+    nid = _note_id_from_profile_dict(merged)
+    if nid:
+        merged["noteId"] = nid
+    return merged
+
+
+def extract_profile_notes_from_html(html: str, *, creator_id: str = "") -> List[Dict[str, Any]]:
+    """从页面 HTML/JSON blob 兜底提取 noteId（SSR 无 explore href 时）。"""
+    if not html:
+        return []
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for m in re.finditer(
+        r'"noteId"\s*:\s*"([a-f0-9]{24})"',
+        html,
+        re.I,
+    ):
+        nid = m.group(1)
+        if not is_valid_xhs_note_id(nid) or nid in seen:
+            continue
+        seen.add(nid)
+        chunk = html[max(0, m.start() - 200) : m.end() + 1200]
+        title_m = re.search(r'"title"\s*:\s*"([^"\\]{1,200})"', chunk, re.I)
+        display_m = re.search(r'"displayTitle"\s*:\s*"([^"\\]{1,200})"', chunk, re.I)
+        token_m = re.search(r'"xsecToken"\s*:\s*"([^"\\]+)"', chunk, re.I)
+        title = (title_m.group(1) if title_m else "") or (display_m.group(1) if display_m else "")
+        out.append(
+            {
+                "noteId": nid,
+                "title": title or f"笔记 {nid[:8]}",
+                "xsecToken": token_m.group(1) if token_m else "",
+                "fetch_source": "html_blob",
+            }
+        )
+    return out
 
 
 def _extract_notes_from_state(
@@ -366,47 +539,48 @@ def _extract_notes_from_state(
 
     user = data.get("user") or {}
     if isinstance(user, dict):
-        for key in ("notes", "noteList", "posted", "postedNotes"):
+        for key in ("notes", "noteList", "posted", "postedNotes", "feeds", "items"):
             if user.get(key):
                 candidates.append(user.get(key))
         user_page = user.get("userPage") or user.get("userPageData") or {}
         if isinstance(user_page, dict):
-            for key in ("notes", "noteList", "feeds", "items"):
+            for key in ("notes", "noteList", "feeds", "items", "posted", "postedNotes"):
                 if user_page.get(key):
                     candidates.append(user_page.get(key))
 
     profile = data.get("profile") or data.get("userProfile") or {}
     if isinstance(profile, dict):
-        for key in ("notes", "noteList", "feeds"):
+        for key in ("notes", "noteList", "feeds", "items"):
             if profile.get(key):
                 candidates.append(profile.get(key))
 
     notes_map = data.get("notes") or {}
     if isinstance(notes_map, dict):
-        for key in ("notes", "noteList", "feeds", creator_id):
+        for key in ("notes", "noteList", "feeds", "items", creator_id):
             if notes_map.get(key):
                 candidates.append(notes_map.get(key))
 
     flat: List[Dict[str, Any]] = []
     for c in candidates:
         if isinstance(c, list):
-            flat.extend([x for x in c if isinstance(x, dict)])
+            flat.extend(_flatten_dict_list(c))
         elif isinstance(c, dict):
             for v in c.values():
                 if isinstance(v, dict) and (v.get("noteId") or v.get("id") or v.get("note_id")):
                     flat.append(v)
                 elif isinstance(v, list):
-                    flat.extend([x for x in v if isinstance(x, dict)])
+                    flat.extend(_flatten_dict_list(v))
 
     # 去重 note_id
     seen: set[str] = set()
     out: List[Dict[str, Any]] = []
     for n in flat:
-        nid = str(n.get("noteId") or n.get("id") or n.get("note_id") or "").strip()
+        norm = _normalize_profile_note_dict(n)
+        nid = str(norm.get("noteId") or norm.get("id") or norm.get("note_id") or "").strip()
         if not nid or nid in seen:
             continue
         seen.add(nid)
-        out.append(n)
+        out.append(norm)
     if out:
         return out
     # 浏览器 SSR 结构变更时，从 JSON blob 兜底提取 noteId
@@ -588,28 +762,47 @@ class XiaohongshuFeedAdapter:
         creator_id: str,
         *,
         profile_url: str = "",
+        min_count: int = 0,
     ) -> List[FeedItem]:
-        """拉取主页可见的全部笔记（用于 UP 画像目录）。"""
+        """拉取主页可见的全部笔记（用于 UP 画像目录 / 博客摘录）。"""
         url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
-        meta = self.fetch_profile_meta(url)
-        items = parse_feed_from_init_state(
-            meta["init_state"],
-            creator_id=creator_id,
-            profile_url=url,
-            xsec_token=meta.get("xsec_token") or "",
-            fetch_source="catalog",
-        )
-        if items:
+        items: List[FeedItem] = []
+        try:
+            meta = self.fetch_profile_meta(url)
+            items = parse_feed_from_init_state(
+                meta["init_state"],
+                creator_id=creator_id,
+                profile_url=url,
+                xsec_token=meta.get("xsec_token") or "",
+                fetch_source="catalog",
+            )
+        except Exception as ex:
+            _log.warning(
+                "[社媒订阅-博主Feed|creator_feed_adapter.fetch_catalog|%s|Agent执行|requests失败] error=%s",
+                creator_id,
+                ex,
+            )
+        need = max(0, int(min_count or 0))
+        if items and (need <= 0 or len(items) >= need):
             return items
         _log.warning(
             "[社媒订阅-博主Feed|creator_feed_adapter.fetch_catalog|%s|Agent执行|回退] "
-            "requests 未解析到笔记，尝试浏览器兜底; creator_id=%s",
+            "requests=%s; need=%s; 尝试浏览器兜底; creator_id=%s",
             creator_id,
+            len(items),
+            need,
             creator_id,
         )
         from .xhs_local_browser import fetch_catalog_via_browser
 
-        return fetch_catalog_via_browser(creator_id, profile_url=url)
+        browser_items = fetch_catalog_via_browser(
+            creator_id,
+            profile_url=url,
+            min_count=need,
+        )
+        if browser_items and len(browser_items) >= len(items):
+            return browser_items
+        return items or browser_items
 
 
 def get_feed_adapter(platform: str) -> CreatorFeedAdapter:
@@ -652,7 +845,11 @@ def resolve_note_links_for_selection(
         try:
             from .xhs_local_browser import scrape_profile_note_links_via_cdp
 
-            scraped = scrape_profile_note_links_via_cdp(profile_url, creator_id=creator_id)
+            scraped = scrape_profile_note_links_via_cdp(
+                profile_url,
+                creator_id=creator_id,
+                min_count=max(len(missing), len(selected_notes), 60),
+            )
             for nid, href in scraped.items():
                 _put(nid, href)
             _log.info(
@@ -686,6 +883,33 @@ def resolve_note_links_for_selection(
         except Exception as ex:
             _log.warning(
                 "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|meta刷新失败] error=%s",
+                ex,
+            )
+
+    still_missing = [
+        nid for nid in missing if "xsec_token" not in (url_map.get(nid) or "")
+    ]
+    if still_missing:
+        try:
+            from .xhs_local_browser import resolve_bare_note_links_via_profile_click
+
+            clicked = resolve_bare_note_links_via_profile_click(
+                profile_url,
+                still_missing,
+                creator_id=creator_id,
+            )
+            for nid, href in clicked.items():
+                _put(nid, href)
+            _log.info(
+                "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|点击补token] "
+                "requested=%s; resolved=%s; still_missing=%s",
+                len(still_missing),
+                len(clicked),
+                sum(1 for nid in still_missing if "xsec_token" not in (url_map.get(nid) or "")),
+            )
+        except Exception as ex:
+            _log.warning(
+                "[社媒订阅-博主Feed|resolve_note_links_for_selection|profile|Agent执行|点击补token失败] error=%s",
                 ex,
             )
 

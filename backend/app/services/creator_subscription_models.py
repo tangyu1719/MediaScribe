@@ -40,6 +40,8 @@ class Subscription(CreatorSubBase):
     cursor_published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     initial_backfill_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    follow_pull_note_offset: Mapped[int] = mapped_column(Integer, default=0)
+    follow_pull_done: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -63,7 +65,7 @@ class SubscriptionSeenNote(CreatorSubBase):
     title: Mapped[str] = mapped_column(String(512), default="")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     analysis_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    analysis_status: Mapped[str] = mapped_column(String(16), default="pending")
+    analysis_status: Mapped[str] = mapped_column(String(32), default="pending")
 
     __table_args__ = (
         UniqueConstraint("platform", "note_id", name="uk_seen_platform_note"),
@@ -81,6 +83,11 @@ class SyncRun(CreatorSubBase):
     new_count: Mapped[int] = mapped_column(Integer, default=0)
     analyzed_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    latest_limit: Mapped[int] = mapped_column(Integer, default=0)
+    catalog_count: Mapped[int] = mapped_column(Integer, default=0)
+    digest_status: Mapped[str] = mapped_column(String(16), default="")
+    digest_json: Mapped[str] = mapped_column(Text, default="{}")
+    digest_md: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_code: Mapped[str] = mapped_column(String(64), default="")
@@ -97,8 +104,17 @@ class SyncRunItem(CreatorSubBase):
     canonical_url: Mapped[str] = mapped_column(String(1024))
     content_type: Mapped[str] = mapped_column(String(32), default="unknown")
     title: Mapped[str] = mapped_column(String(512), default="")
+    published_at: Mapped[str] = mapped_column(String(64), default="")
+    published_date: Mapped[str] = mapped_column(String(16), default="")
+    like_count: Mapped[int] = mapped_column(Integer, default=0)
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
+    hashtags_json: Mapped[str] = mapped_column(Text, default="[]")
+    cover_url: Mapped[str] = mapped_column(String(1024), default="")
+    author_id: Mapped[str] = mapped_column(String(128), default="")
+    author_name: Mapped[str] = mapped_column(String(256), default="")
+    author_followers: Mapped[int] = mapped_column(Integer, default=0)
     analysis_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    analysis_status: Mapped[str] = mapped_column(String(16), default="pending")
+    analysis_status: Mapped[str] = mapped_column(String(32), default="pending")
     error_message: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -171,6 +187,27 @@ class CreatorProfileDoc(CreatorSubBase):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_profile_doc_sub_latest", "subscription_id", "is_latest"),)
+
+
+class XhsFollowUp(CreatorSubBase):
+    """小红书关注 UP 候选列表（拉取基本信息，不自动订阅）。"""
+
+    __tablename__ = "xhs_follow_ups"
+
+    follow_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    creator_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(256), default="")
+    profile_url: Mapped[str] = mapped_column(String(1024), default="")
+    source: Mapped[str] = mapped_column(String(32), default="favorite_note", index=True)
+    note_count: Mapped[int] = mapped_column(Integer, default=0)
+    sample_titles_json: Mapped[str] = mapped_column(Text, default="[]")
+    search_blob: Mapped[str] = mapped_column(Text, default="")
+    owner_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    last_pulled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class FavoritesHabit(CreatorSubBase):

@@ -209,8 +209,27 @@ async def _prepare_runtime(
     chat_distinct_tool_fail_limit: Optional[int],
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
     tools_cache_only: bool = False,
+    _precomputed: Optional[Dict[str, Any]] = None,
 ) -> ChatGraphRuntime:
-    cfg = ai_chat.load_chat_llm_config()
+    pre = _precomputed if isinstance(_precomputed, dict) else {}
+    if pre:
+        # 复用 chat_stream_v2 已计算的凭证/配置/系统提示词，避免重复读文件+查DB
+        cfg = pre.get("cfg") or ai_chat.load_chat_llm_config()
+        provider = pre.get("provider") or ""
+        api_key = pre.get("api_key") or ""
+        base_url = pre.get("base_url") or ""
+        model_resolved = (model or "").strip() or pre.get("model_resolved") or ""
+        system_prompt = pre.get("system_prompt") or ""
+    else:
+        cfg = ai_chat.load_chat_llm_config()
+        creds = ai_chat.resolve_chat_api_credentials(cfg)
+        provider = creds["provider"]
+        api_key = creds["api_key"]
+        base_url = creds["base_url"]
+        model_resolved = (model or "").strip() or creds["model"]
+        system_prompt = ai_chat.assemble_chat_system_prompt(
+            cfg, agent_id, agent_profile=agent_profile, user_id=user_id
+        )
     from .orch_pipeline_config import merge_orch_pipeline_nodes
 
     merged_orch = merge_orch_pipeline_nodes(orch_pipeline_nodes, cfg)
@@ -253,14 +272,15 @@ async def _prepare_runtime(
     except Exception as ex:
         chat_lc_tools, tools_meta = [], {"total": 0, "tools": [], "mcp_error": str(ex), "mcp_pending": True}
 
-    creds = ai_chat.resolve_chat_api_credentials(cfg)
-    provider = creds["provider"]
-    api_key = creds["api_key"]
-    base_url = creds["base_url"]
-    model_resolved = (model or "").strip() or creds["model"]
-    system_prompt = ai_chat.assemble_chat_system_prompt(
-        cfg, agent_id, agent_profile=agent_profile, user_id=user_id
-    )
+    if not pre:
+        creds = ai_chat.resolve_chat_api_credentials(cfg)
+        provider = creds["provider"]
+        api_key = creds["api_key"]
+        base_url = creds["base_url"]
+        model_resolved = (model or "").strip() or creds["model"]
+        system_prompt = ai_chat.assemble_chat_system_prompt(
+            cfg, agent_id, agent_profile=agent_profile, user_id=user_id
+        )
 
     return ChatGraphRuntime(
         session_id=session_id,
@@ -627,6 +647,7 @@ async def stream_langgraph_chat(
     client_cur_task: Optional[Dict[str, Any]] = None,
     client_main_task_history: Optional[List] = None,
     memory_prepared: Optional[Dict[str, Any]] = None,
+    _precomputed: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[str]:
     """完整对话：LangGraph 编排 + 执行段 handoff。"""
     if session_id not in ai_chat._sessions:
@@ -637,11 +658,14 @@ async def stream_langgraph_chat(
 
         ai_chat._sessions[session_id]["updated_at"] = _dt.now().isoformat(timespec="seconds")
 
+    # 即刻发送首个 SSE 事件，避免前端长时间空白等待编排启动
+    yield f"event: pipeline_progress\ndata: {json.dumps({'stage': '正在启动编排引擎', 'progress': 0, 'detail': '正在准备运行时…'}, ensure_ascii=False)}\n\n"
+
     trace_id = _new_trace()
     mem = memory_prepared or {}
     from .chat_context_memory import (
         hydrate_client_task_context,
-        peek_continue_main_intent,
+        peek_fast_continue_eligible,
         resolve_task_group_seq,
         _resolve_continue_task_id,
     )
@@ -656,24 +680,11 @@ async def stream_langgraph_chat(
         ),
     )
     _tid_early = str((_cur_early or {}).get("task_id") or "").strip()
-    _continue_early = peek_continue_main_intent(
+    _continue_early = peek_fast_continue_eligible(
         message, cur_task=_cur_early, main_task_history=_hist_early
     )
     if _continue_early and not _tid_early:
         _tid_early = str(_resolve_continue_task_id(_cur_early, _hist_early) or "").strip()
-    if _continue_early and _tid_early:
-        yield (
-            "event: task_created\n"
-            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'session_id': session_id, 'user_query': str((client_cur_task or mem.get('cur_task') or {}).get('user_query') or message or '')[:200], 'query_summary': str((client_cur_task or mem.get('cur_task') or {}).get('query_summary') or message or '')[:120], 'status': 'executing', 'task_kind': 'main', 'persist_main_task': True, 'stage': '延续主任务', 'progress': 4, 'task_action': 'continue', 'preserve_task_identity': True}, ensure_ascii=False)}\n\n"
-        )
-        yield (
-            "event: pipeline_progress\n"
-            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'stage': '延续主任务', 'progress': 4, 'detail': '检测到主任务续接，展开编排面板'}, ensure_ascii=False)}\n\n"
-        )
-        yield (
-            "event: orchestration_node_start\n"
-            + f"data: {json.dumps({'trace_id': trace_id, 'task_id': _tid_early, 'step_id': 'step_early', 'step_name': '延续主任务', 'phase': 'execute_prep', 'progress_hint': '正在执行：延续主任务', 'sub_index': int(mem.get('task_group_seq') or 0)}, ensure_ascii=False)}\n\n"
-        )
 
     ctx_appendix = ""
     try:
@@ -705,6 +716,7 @@ async def stream_langgraph_chat(
         chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
         orch_pipeline_nodes=orch_pipeline_nodes,
         tools_cache_only=bool(_continue_early and _tid_early),
+        _precomputed=_precomputed,
     )
     if ctx_appendix:
         runtime.system_prompt = (runtime.system_prompt or "").rstrip() + "\n\n---\n\n" + ctx_appendix
@@ -747,7 +759,7 @@ async def stream_langgraph_chat(
     initial = _initial_state(message=message, session_id=session_id, trace_id=trace_id, runtime=runtime)
     from .chat_context_memory import (
         hydrate_client_task_context,
-        peek_continue_main_intent,
+        peek_fast_continue_eligible,
         resolve_task_affiliation,
         resolve_task_group_seq,
     )
@@ -762,7 +774,7 @@ async def stream_langgraph_chat(
         ),
     )
     _tid = str((_cur or {}).get("task_id") or "").strip()
-    _continue = peek_continue_main_intent(message, cur_task=_cur, main_task_history=_hist)
+    _continue = peek_fast_continue_eligible(message, cur_task=_cur, main_task_history=_hist)
     if _continue and not _tid:
         from .chat_context_memory import _resolve_continue_task_id
 
@@ -825,6 +837,7 @@ async def stream_langgraph_chat(
                         task_id=_tid,
                         cur_task=_cur if isinstance(_cur, dict) else None,
                         main_hist=_hist if isinstance(_hist, list) else None,
+                        graph_state=initial,
                     )
                 )
             except BaseException as ex:
@@ -974,7 +987,7 @@ async def stream_langgraph_chat(
 
     route = str(final_state.get("graph_route") or "")
     _aff_guard = resolve_task_affiliation(message, cur_task=_cur, main_task_history=_hist)
-    _must_continue = bool(_aff_guard) or peek_continue_main_intent(
+    _must_continue = bool(_aff_guard) or peek_fast_continue_eligible(
         message, cur_task=_cur, main_task_history=_hist
     )
     if _must_continue and route in ("handoff_simple", "simple"):
@@ -1114,6 +1127,7 @@ def _hitl_default_message(kind: str) -> str:
         "rag_filter_confirm": "请确认知识库元数据筛选条件（空=不筛）后继续检索。",
         "tool_exception": "工具执行需人工选择后继续。",
         "paused": "编排已暂停，确认后可恢复。",
+        "task_switch_confirm": "当前主任务尚未结案，请选择继续当前任务或创建新任务。",
     }.get(kind or "", "编排等待人工确认，请选择操作后继续。")
 
 

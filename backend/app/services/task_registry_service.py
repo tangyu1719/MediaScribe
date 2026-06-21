@@ -522,6 +522,164 @@ def _aggregate_open_from_steps(steps: List[Dict[str, Any]]) -> Dict[str, Any]:
     return open_layer
 
 
+def _infer_invoke_from_step(step: Dict[str, Any]) -> Dict[str, str]:
+    """步骤缺省语时按 lane/phase 推断调用定语（固定节点 / ReAct / 重试）。"""
+    if step.get("invoke_mode") and step.get("what"):
+        return {
+            "invoke_mode": str(step.get("invoke_mode") or ""),
+            "invoke_purpose": str(step.get("invoke_purpose") or "")[:10],
+            "what": str(step.get("what") or ""),
+        }
+    try:
+        from .tool_invoke_qualifier import (
+            INVOKE_FIXED,
+            INVOKE_REACT,
+            build_invoke_labels,
+            is_rag_tool_name,
+        )
+    except Exception:
+        return {
+            "invoke_mode": str(step.get("invoke_mode") or ""),
+            "invoke_purpose": str(step.get("invoke_purpose") or "")[:10],
+            "what": str(step.get("what") or step.get("step_name") or ""),
+        }
+
+    phase = str(step.get("phase") or "").lower()
+    lane = str(step.get("step_lane") or "").lower()
+    step_type = str(step.get("step_type") or "").lower()
+    out = step.get("output_payload") if isinstance(step.get("output_payload"), dict) else {}
+    tool_name = str(
+        step.get("tool_name")
+        or out.get("tool_name")
+        or (step.get("input_payload") or {}).get("tool")
+        or ""
+    ).strip()
+    if not tool_name and step.get("step_name"):
+        sn = str(step.get("step_name"))
+        if ":" in sn:
+            tool_name = sn.split(":", 1)[-1].strip()
+        elif sn in ("RAG 检索", "知识库检索"):
+            tool_name = "rag_retrieve"
+    query = ""
+    inp = step.get("input_payload") if isinstance(step.get("input_payload"), dict) else {}
+    args = out.get("tool_args") if isinstance(out.get("tool_args"), dict) else inp.get("args") or inp
+    if isinstance(args, dict):
+        query = str(args.get("query") or args.get("q") or out.get("rag_query") or "")[:80]
+    mode = INVOKE_FIXED
+    purpose = ""
+    if lane in ("prefetch", "orchestration") or phase in ("rag_decision", "rag", "web"):
+        mode = INVOKE_FIXED
+        purpose = "编排节点预取" if phase == "rag_decision" else "执行段预取"
+    elif step_type == "tool_call" or tool_name:
+        mode = INVOKE_REACT
+        if is_rag_tool_name(tool_name):
+            purpose = "模型按需检索"
+        else:
+            purpose = "模型工具调用"
+    labels = build_invoke_labels(
+        mode=mode,
+        tool_name=tool_name,
+        action_label=str(step.get("step_name") or "")[:20],
+        purpose=purpose,
+        query=query,
+        phase=phase,
+    )
+    return labels
+
+
+def _enrich_detail_step(step: Dict[str, Any]) -> Dict[str, Any]:
+    """任务详情单步：补全分组元数据与调用定语。"""
+    if not isinstance(step, dict):
+        return {}
+    s = dict(step)
+    labels = _infer_invoke_from_step(s)
+    for k in ("invoke_mode", "invoke_purpose", "what"):
+        if not s.get(k) and labels.get(k):
+            s[k] = labels[k]
+    if not s.get("phase"):
+        out = s.get("output_payload") if isinstance(s.get("output_payload"), dict) else {}
+        s["phase"] = str(out.get("phase") or s.get("step_type") or "")
+    if not s.get("step_lane"):
+        ph = str(s.get("phase") or "").lower()
+        if ph in ("rag", "web", "rag_decision"):
+            s["step_lane"] = "prefetch"
+        elif ph in ("intent", "rewrite", "slot", "decompose", "enhance", "execute_prep"):
+            s["step_lane"] = "orchestration"
+        elif str(s.get("step_type") or "").lower() == "tool_call":
+            s["step_lane"] = "execution"
+    if not s.get("node_kind"):
+        st = str(s.get("step_type") or "").lower()
+        s["node_kind"] = "tool_call" if st == "tool_call" else "sub_task"
+    if not s.get("result"):
+        brief = str(s.get("result_brief") or s.get("description") or s.get("objective") or "")
+        if brief:
+            s["result"] = brief[:500]
+    inp = s.get("input_payload")
+    out = s.get("output_payload")
+    if isinstance(out, dict) and out.get("tool_call") and not s.get("tool_name"):
+        s["tool_name"] = str(out.get("tool_name") or "")
+    if not s.get("react_round") and isinstance(inp, dict) and inp.get("react_round") is not None:
+        s["react_round"] = inp.get("react_round")
+    if not s.get("sub_plan_id") and isinstance(inp, dict) and inp.get("sub_plan_id"):
+        s["sub_plan_id"] = str(inp.get("sub_plan_id") or "")
+    return s
+
+
+def _build_sub_plan_groups(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按 sub_plan_id + sub_index 聚合步骤组（子任务粒度）。"""
+    enriched = [_enrich_detail_step(s) for s in (steps or []) if isinstance(s, dict)]
+    buckets: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for s in enriched:
+        pid = str(s.get("sub_plan_id") or "").strip()
+        idx = int(s.get("sub_index") or 0)
+        key = f"{pid}:{idx}" if pid and idx > 0 else f"step:{s.get('step_id') or len(order)}"
+        if key not in buckets:
+            buckets[key] = {
+                "sub_plan_id": pid,
+                "sub_index": idx,
+                "step_lane": str(s.get("step_lane") or ""),
+                "steps": [],
+                "tool_count": 0,
+                "invoke_modes": [],
+            }
+            order.append(key)
+        g = buckets[key]
+        g["steps"].append(s)
+        if not g.get("step_lane") and s.get("step_lane"):
+            g["step_lane"] = s.get("step_lane")
+        if int(s.get("sub_index") or 0) > int(g.get("sub_index") or 0):
+            g["sub_index"] = int(s.get("sub_index") or 0)
+        st = str(s.get("step_type") or "").lower()
+        if st == "tool_call" or s.get("tool_name") or (
+            isinstance(s.get("output_payload"), dict) and s["output_payload"].get("tool_call")
+        ):
+            g["tool_count"] = int(g.get("tool_count") or 0) + 1
+        mode = str(s.get("invoke_mode") or "").strip()
+        if mode and mode not in g["invoke_modes"]:
+            g["invoke_modes"].append(mode)
+    groups = [buckets[k] for k in order]
+    groups.sort(
+        key=lambda g: (
+            int(g.get("sub_index") or 0),
+            str(g.get("sub_plan_id") or ""),
+        )
+    )
+    for i, g in enumerate(groups):
+        steps_in = g.get("steps") or []
+        statuses = [str(s.get("status") or "").lower() for s in steps_in]
+        if any(x in ("failed", "abnormal", "error") for x in statuses):
+            g["status"] = "failed"
+        elif any(x in ("running", "executing", "started") for x in statuses):
+            g["status"] = "running"
+        else:
+            g["status"] = "completed"
+        g["step_count"] = len(steps_in)
+        if not g.get("sub_index"):
+            g["sub_index"] = i + 1
+    return groups
+
+
 def _tool_outputs_from_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     from .span_audit import _tool_output_record_from_payload
 
@@ -543,10 +701,18 @@ def _tool_outputs_from_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]
             timestamp=str(s.get("ended_at") or s.get("updated_at") or s.get("created_at") or ""),
         )
         if rec:
+            labels = _infer_invoke_from_step(s)
             if s.get("sub_plan_id"):
                 rec["sub_plan_id"] = s.get("sub_plan_id")
+            if s.get("sub_index") is not None:
+                rec["sub_index"] = s.get("sub_index")
             if s.get("react_round") is not None:
                 rec["react_round"] = s.get("react_round")
+            for k in ("invoke_mode", "invoke_purpose", "what"):
+                if s.get(k):
+                    rec[k] = s.get(k)
+                elif labels.get(k):
+                    rec[k] = labels[k]
             records.append(rec)
     return records
 
@@ -612,6 +778,15 @@ def _thinking_to_step(th: Dict[str, Any], *, task_id: str) -> Dict[str, Any]:
         "ended_at": th.get("ended_at") or th.get("at") or "",
         "react_round": th.get("react_round"),
         "sub_plan_id": th.get("sub_plan_id") or "",
+        "sub_index": th.get("sub_index"),
+        "step_lane": th.get("step_lane") or "",
+        "phase": th.get("phase") or phase,
+        "node_kind": th.get("node_kind") or node_kind,
+        "invoke_mode": th.get("invoke_mode") or "",
+        "invoke_purpose": th.get("invoke_purpose") or "",
+        "what": th.get("what") or "",
+        "result": th.get("result") or "",
+        "tool_name": th.get("tool_name") or "",
     }
 
 
@@ -816,6 +991,10 @@ def _public_tool_output(rec: Dict[str, Any]) -> Dict[str, Any]:
         "status": str(rec.get("status") or ""),
         "react_round": rec.get("react_round"),
         "sub_plan_id": str(rec.get("sub_plan_id") or ""),
+        "sub_index": rec.get("sub_index"),
+        "invoke_mode": str(rec.get("invoke_mode") or ""),
+        "invoke_purpose": str(rec.get("invoke_purpose") or ""),
+        "what": str(rec.get("what") or ""),
         "brief": brief,
         "input_preview": inp_s,
         "output_preview": out_s,
@@ -848,6 +1027,8 @@ def get_task_registry_detail(task_id: str, *, task_kind: str = "") -> Dict[str, 
             tool_outputs_raw = []
         steps_raw = task.get("steps") or []
         sub_plans = task.get("sub_plans") or []
+        enriched_steps_pre = [_enrich_detail_step(s) for s in steps_raw if isinstance(s, dict)]
+        sub_plan_groups_pre = _build_sub_plan_groups(enriched_steps_pre)
         meta = {
             "task_id": tid,
             "task_kind": "main",
@@ -863,7 +1044,7 @@ def get_task_registry_detail(task_id: str, *, task_kind: str = "") -> Dict[str, 
             "total_steps": task.get("total_steps") or len(steps_raw),
             "completed_steps": task.get("completed_steps"),
             "failed_steps": task.get("failed_steps"),
-            "sub_plans_count": len(sub_plans) if isinstance(sub_plans, list) else 0,
+            "sub_plans_count": len(sub_plan_groups_pre) or (len(sub_plans) if isinstance(sub_plans, list) else 0),
             "tool_outputs_count": len(tool_outputs_raw),
             "snapshot_fixed_count": len(_kv_rows(fixed)),
             "snapshot_open_count": len(_kv_rows(open_layer)),
@@ -872,6 +1053,12 @@ def get_task_registry_detail(task_id: str, *, task_kind: str = "") -> Dict[str, 
             "created_at": task.get("created_at"),
             "updated_at": task.get("updated_at"),
         }
+        enriched_steps = enriched_steps_pre
+        sub_plan_groups = sub_plan_groups_pre
+        if not sub_plan_groups and sub_plans:
+            sub_plan_groups = [
+                g for g in sub_plans if isinstance(g, dict) and isinstance(g.get("steps"), list)
+            ]
         return {
             "ok": bool(task.get("task_id")),
             "task_id": tid,
@@ -881,7 +1068,8 @@ def get_task_registry_detail(task_id: str, *, task_kind: str = "") -> Dict[str, 
             "snapshot_fixed_rows": _kv_rows(fixed),
             "snapshot_open_rows": _kv_rows(open_layer),
             "tool_outputs": [_public_tool_output(r) for r in tool_outputs_raw if isinstance(r, dict)],
-            "steps": [_public_span_step(s) for s in steps_raw if isinstance(s, dict)],
+            "steps": enriched_steps,
+            "sub_plan_groups": sub_plan_groups,
             "sub_plans": sub_plans if isinstance(sub_plans, list) else [],
         }
 

@@ -11,18 +11,22 @@ from .creator_subscription_store import (
     add_sync_run_item,
     create_sync_run,
     get_subscription,
+    get_subscription_sync_anchor,
     insert_seen_note,
-    is_note_seen,
     list_sync_run_items,
     save_digest,
     update_subscription_cursor,
     update_sync_run,
     update_sync_run_item,
 )
+from .subscription_import_guard import check_already_imported, record_skipped_import
+from .subscription_link_order import select_items_for_subscription_sync
+from .subscription_link_card_store import sync_link_card_from_task, upsert_link_card
 from .favorites_digest import generate_favorites_digest
 from .favorites_habit import get_habit, update_habit_from_batch
-from .pipeline_scheduler import run_pipeline_with_slot
+from .pipeline_scheduler import request_video_pipeline_async
 from .task_manager import create_task, get_task
+from .task_source_meta import SOURCE_SUB_FAVORITES, source_meta_kwargs
 from .video_pipeline import process_video_pipeline
 from .xhs_favorites_adapter import FavoritesFeedItem, fetch_favorites_catalog
 
@@ -32,6 +36,7 @@ _PLATFORM = "xiaohongshu_favorites"
 
 _SUB_LOCKS: Dict[str, asyncio.Lock] = {}
 _FETCH_LIMIT = int(os.environ.get("FAVORITES_FETCH_LIMIT", "80"))
+_SYNC_BATCH_LIMIT = int(os.environ.get("FAVORITES_SYNC_BATCH", "20"))
 _DIGEST_WAIT_SEC = int(os.environ.get("FAVORITES_DIGEST_WAIT_SEC", "2400"))
 
 
@@ -101,6 +106,7 @@ async def run_favorites_sync(
     *,
     trigger: str = "manual",
     force_analyze_latest: int = 0,
+    sync_batch_size: int = 0,
 ) -> Dict[str, Any]:
     sub = get_subscription(subscription_id)
     if not sub:
@@ -115,27 +121,119 @@ async def run_favorites_sync(
         return {"ok": False, "error_code": "SUB_SYNC_BUSY", "error": "收藏夹 sync 进行中"}
 
     async with lock:
-        sync_run = create_sync_run(subscription_id, trigger=trigger)
+        sync_run = create_sync_run(
+            subscription_id,
+            trigger=trigger,
+            latest_limit=sync_batch_size or force_analyze_latest,
+        )
         sync_run_id = sync_run["sync_run_id"]
         update_sync_run(sync_run_id, status="fetching")
 
         _log.info(
-            "[%s|favorites_sync_runner.run_favorites_sync|%s|Agent执行|开始] subscription_id=%s; trigger=%s; force=%s",
+            "[%s|favorites_sync_runner.run_favorites_sync|%s|Agent执行|开始] subscription_id=%s; trigger=%s; force=%s; batch=%s",
             _CHAIN,
             sync_run_id,
             subscription_id,
             trigger,
             force_analyze_latest,
+            sync_batch_size,
         )
 
         try:
+            from .chrome_profile_prep import dismiss_chrome_restore_prompt
+            from .cookie_manager import find_cdp_port
+            from .xhs_local_browser import (
+                favorites_playwright_fallback_enabled,
+                probe_xhs_cookies_logged_in,
+                _resolve_xhs_cookies_for_scrape,
+            )
+            from .xhs_owner_chrome import refresh_owner_xhs_cookies
+
+            from .xhs_local_browser import xhs_cdp_attach_only
             from .xhs_owner_chrome import ensure_owner_chrome_cdp
 
-            session = ensure_owner_chrome_cdp()
+            session: Dict[str, Any] = {"nickname": "", "cdp_port": None, "mode": "unknown"}
+            _p = find_cdp_port()
+            if _p:
+                dismiss_chrome_restore_prompt(_p)
+
+            pre_ck = _resolve_xhs_cookies_for_scrape()
+            pre_probe = probe_xhs_cookies_logged_in(pre_ck) if pre_ck else {"logged_in": False}
+            if not pre_ck or not pre_probe.get("logged_in"):
+                from .cookie_manager import diagnose_xhs_cookies
+                from .xhs_local_browser import refresh_xhs_cookies_cdp_only
+
+                diag0 = diagnose_xhs_cookies()
+                if diag0.get("guest") or not pre_probe.get("logged_in"):
+                    if diag0.get("cdp_port") or diag0.get("chrome_running"):
+                        ref = refresh_xhs_cookies_cdp_only()
+                        if ref.get("ok"):
+                            pre_ck = _resolve_xhs_cookies_for_scrape()
+                            pre_probe = (
+                                probe_xhs_cookies_logged_in(pre_ck)
+                                if pre_ck
+                                else {"logged_in": False}
+                            )
+                            _log.info(
+                                "[%s|favorites_sync_runner|%s|硬编执行|CDP刷新Cookie] ok=%s; nick=%s",
+                                _CHAIN,
+                                sync_run_id,
+                                ref.get("ok"),
+                                ref.get("nickname") or "",
+                            )
+            if not pre_ck or not pre_probe.get("logged_in"):
+                from .cookie_manager import diagnose_xhs_cookies
+
+                diag = diagnose_xhs_cookies()
+                code = "SUB_XHS_GUEST_SESSION" if diag.get("guest") else "SUB_OWNER_XHS_LOGIN_REQUIRED"
+                msg = diag.get("hint") or "小红书未登录，无法同步收藏夹"
+                update_sync_run(sync_run_id, status="failed", error_message=msg[:500])
+                return {"ok": False, "error_code": code, "error": msg, "cookie_diagnosis": diag}
+            if pre_probe.get("logged_in") and favorites_playwright_fallback_enabled():
+                session = {
+                    "nickname": pre_probe.get("nickname") or "",
+                    "cdp_port": None,
+                    "mode": "cookie_playwright",
+                    "cookie_count": len(pre_ck),
+                }
+                _log.info(
+                    "[%s|favorites_sync_runner|%s|硬编执行|Cookie会话] 已登录 Cookie=%s，跳过 CDP 前置",
+                    _CHAIN,
+                    sync_run_id,
+                    len(pre_ck),
+                )
+            else:
+                try:
+                    session = {**ensure_owner_chrome_cdp(), "mode": "cdp"}
+                except Exception as ex:
+                    if not favorites_playwright_fallback_enabled():
+                        raise RuntimeError(
+                            f"SUB_OWNER_CDP_REQUIRED: 收藏夹同步需要 CDP 或 Playwright 兜底。"
+                            f"请设置 SBA_XHS_FAVORITES_PLAYWRIGHT_FALLBACK=1。原因: {ex}"
+                        ) from ex
+                    _log.warning(
+                        "[%s|favorites_sync_runner|%s|硬编执行|CDP会话失败] "
+                        "将走 Playwright 兜底; error=%s",
+                        _CHAIN,
+                        sync_run_id,
+                        ex,
+                    )
+                    ck = refresh_owner_xhs_cookies()
+                    session = {
+                        "nickname": ck.get("nickname") or "",
+                        "cdp_port": None,
+                        "mode": "playwright_fallback",
+                        "cookie_source": ck.get("source") or "",
+                    }
+            if session.get("mode") not in ("cdp", "cookie_playwright") and not favorites_playwright_fallback_enabled():
+                raise RuntimeError(
+                    "SUB_OWNER_CDP_REQUIRED: CDP 未就绪且方案 A 禁止 Playwright 兜底"
+                )
             _log.info(
-                "[%s|favorites_sync_runner|%s|硬编执行|Chrome会话] nickname=%s; cdp=%s",
+                "[%s|favorites_sync_runner|%s|硬编执行|Chrome会话] mode=%s; nickname=%s; cdp=%s",
                 _CHAIN,
                 sync_run_id,
+                session.get("mode"),
                 session.get("nickname"),
                 session.get("cdp_port"),
             )
@@ -143,10 +241,21 @@ async def run_favorites_sync(
             creator_id = sub.get("creator_id") or ""
             profile_url = sub.get("profile_url") or ""
             loop = asyncio.get_event_loop()
-            items, _ok = await loop.run_in_executor(
+            prefer_ck = session.get("mode") in ("cookie_playwright", "playwright_fallback")
+            items, ok = await loop.run_in_executor(
                 None,
-                lambda: fetch_favorites_catalog(creator_id, profile_url=profile_url, limit=_FETCH_LIMIT),
+                lambda: fetch_favorites_catalog(
+                    creator_id,
+                    profile_url=profile_url,
+                    limit=_FETCH_LIMIT,
+                    prefer_cookies=prefer_ck,
+                ),
             )
+            if not ok:
+                msg = "SUB_FAVORITES_FETCH_FAILED: 收藏夹采集失败，CDP/Playwright/Cookie 全部重试后仍不可用"
+                update_sync_run(sync_run_id, status="failed", error_code="SUB_FAVORITES_FETCH_FAILED", error_message=msg)
+                return {"ok": False, "error_code": "SUB_FAVORITES_FETCH_FAILED", "error": msg}
+            catalog_count = len(items)
 
             backfill_done = bool(sub.get("initial_backfill_done"))
             red_id = ""
@@ -155,64 +264,75 @@ async def run_favorites_sync(
                     red_id = tag.split(":", 1)[1]
                     break
 
-            # 回归模式：强制分析最新 N 篇
-            if force_analyze_latest > 0:
-                new_items = items[:force_analyze_latest]
+            skipped_imported: List[Dict[str, Any]] = []
+            # sync_batch_size=0（默认）→ 全量：offset 剩余全部 / 增量全部新项；>0 才限制每批条数
+            limit = max(0, int(sync_batch_size or 0))
+            legacy_n = max(0, int(force_analyze_latest or 0))
+
+            if legacy_n > 0 and limit <= 0:
+                effective_limit = legacy_n
+                candidate_items = items[:effective_limit]
+                next_cursor = min(effective_limit, len(items))
+                has_more = next_cursor < len(items)
+                mark_backfill = not has_more
             elif not backfill_done:
-                baseline = 0
-                for it in items:
-                    if not is_note_seen(_PLATFORM, it.note_id):
-                        insert_seen_note(
-                            subscription_id=subscription_id,
-                            platform=_PLATFORM,
-                            note_id=it.note_id,
-                            canonical_url=it.canonical_url,
-                            url_hash=it.url_hash,
-                            content_type=it.content_type,
-                            title=it.title,
-                            analysis_task_id=None,
-                            analysis_status="baseline",
-                        )
-                        baseline += 1
-                update_subscription_cursor(
-                    subscription_id,
-                    cursor_offset=0,
-                    last_note_id=items[0].note_id if items else sub.get("last_note_id"),
-                    cursor_published_at=None,
-                    mark_backfill_done=True,
-                    reset_failures=True,
-                )
-                save_digest(
-                    sync_run_id=sync_run_id,
-                    subscription_id=subscription_id,
-                    digest_md=f"首次基线：已记录 {baseline} 篇历史收藏，后续仅分析新增项。",
-                    digest_json={
-                        "summary_one_liner": f"基线完成，记录 {baseline} 篇",
-                        "topic_buckets": [],
-                        "items": [],
-                        "baseline": True,
-                        "baseline_count": baseline,
-                    },
-                    llm_model="",
-                    rag_degraded=False,
-                )
-                update_sync_run(
-                    sync_run_id,
-                    status="completed",
-                    new_count=0,
-                    analyzed_count=0,
-                    failed_count=0,
-                )
-                return {
-                    "ok": True,
-                    "sync_run_id": sync_run_id,
-                    "status": "completed",
-                    "baseline": True,
-                    "baseline_count": baseline,
-                    "new_count": 0,
-                }
+                cursor = int(sub.get("cursor_offset") or 0)
+                if limit > 0:
+                    candidate_items = items[cursor : cursor + limit]
+                else:
+                    candidate_items = items[cursor:]
+                next_cursor = cursor + len(candidate_items)
+                has_more = next_cursor < len(items)
+                mark_backfill = not has_more
             else:
-                new_items = [it for it in items if not is_note_seen(_PLATFORM, it.note_id)]
+                candidate_items = items[:_FETCH_LIMIT]
+                next_cursor = 0
+                has_more = False
+                mark_backfill = False
+
+            batch_label = limit if limit > 0 else len(candidate_items)
+
+            new_items: List[FavoritesFeedItem] = []
+            anchor = get_subscription_sync_anchor(subscription_id)
+            sel_limit = limit if limit > 0 else max(len(candidate_items), 1)
+            picked, order_skipped, stop_reason = select_items_for_subscription_sync(
+                candidate_items,
+                platform=_PLATFORM,
+                seen_url_hashes=set(anchor.get("url_hashes") or []),
+                seen_note_ids=set(anchor.get("note_ids") or []),
+                anchor_published_at=anchor.get("published_at"),
+                limit=sel_limit,
+            )
+            for sk in order_skipped:
+                skipped_imported.append(
+                    {
+                        "note_id": sk.get("note_id"),
+                        "title": "",
+                        "url_hash": sk.get("url_hash"),
+                        "reason": sk.get("reason") or "seen",
+                    }
+                )
+            new_items = picked
+            if stop_reason:
+                _log.warning(
+                    "[%s|favorites_sync_runner|%s|Agent执行|连续性阻断] reason=%s",
+                    _CHAIN,
+                    sync_run_id,
+                    stop_reason,
+                )
+
+            _log.info(
+                "[%s|favorites_sync_runner|%s|Agent执行|批次] backfill_done=%s; cursor=%s; batch=%s; "
+                "candidates=%s; new=%s; skipped=%s",
+                _CHAIN,
+                sync_run_id,
+                backfill_done,
+                int(sub.get("cursor_offset") or 0),
+                batch_label,
+                len(candidate_items),
+                len(new_items),
+                len(skipped_imported),
+            )
 
             update_sync_run(sync_run_id, status="analyzing", new_count=len(new_items))
             _log.info(
@@ -233,6 +353,7 @@ async def run_favorites_sync(
                         "summary_one_liner": "无新增收藏",
                         "topic_buckets": [],
                         "items": [],
+                        "task_snapshot": {"new_count": 0, "analyzed_count": 0, "failed_count": 0},
                     },
                     llm_model="",
                     rag_degraded=False,
@@ -240,10 +361,10 @@ async def run_favorites_sync(
                 update_sync_run(sync_run_id, status="completed", new_count=0)
                 update_subscription_cursor(
                     subscription_id,
-                    cursor_offset=0,
+                    cursor_offset=next_cursor if not backfill_done else 0,
                     last_note_id=items[0].note_id if items else sub.get("last_note_id"),
                     cursor_published_at=None,
-                    mark_backfill_done=False,
+                    mark_backfill_done=mark_backfill if not backfill_done else False,
                     reset_failures=True,
                 )
                 return {
@@ -251,7 +372,10 @@ async def run_favorites_sync(
                     "sync_run_id": sync_run_id,
                     "status": "completed",
                     "new_count": 0,
-                    "habit": habit_row,
+                    "skipped_imported_count": len(skipped_imported),
+                    "cursor_offset": next_cursor if not backfill_done else 0,
+                    "batch_size": limit,
+                    "full_sync": limit <= 0,
                 }
 
             analyzed = 0
@@ -268,8 +392,67 @@ async def run_favorites_sync(
                     canonical_url=it.canonical_url,
                     content_type=it.content_type,
                     title=it.title,
+                    published_at=str(it.published_at or ""),
+                    published_date=str(getattr(it, "published_date", "") or ""),
+                    like_count=int(getattr(it, "like_count", 0) or 0),
+                    comment_count=int(getattr(it, "comment_count", 0) or 0),
+                    hashtags=list(getattr(it, "hashtags", []) or []),
+                    cover_url=str(getattr(it, "cover_url", "") or ""),
+                    author_id=str(getattr(it, "author_id", "") or ""),
+                    author_name=str(getattr(it, "author_name", "") or ""),
+                    author_followers=int(getattr(it, "author_followers", 0) or 0),
                     analysis_status="pending",
                 )
+                upsert_link_card(
+                    subscription_id=subscription_id,
+                    platform=_PLATFORM,
+                    note_id=it.note_id,
+                    canonical_url=it.canonical_url,
+                    url_hash=it.url_hash,
+                    title=it.title,
+                    content_type=it.content_type,
+                    published_at=str(it.published_at or ""),
+                    analysis_status="pending",
+                    author_name=str(getattr(it, "author_name", "") or ""),
+                    import_source=SOURCE_SUB_FAVORITES,
+                    source_label=source_meta_kwargs(
+                        SOURCE_SUB_FAVORITES,
+                        display_name=str(sub.get("display_name") or ""),
+                        platform=_PLATFORM,
+                    )["source_label"],
+                )
+
+                imported, imp_reason = check_already_imported(
+                    _PLATFORM,
+                    it.note_id,
+                    it.url_hash,
+                    canonical_url=it.canonical_url,
+                )
+                if imported:
+                    record_skipped_import(
+                        subscription_id=subscription_id,
+                        platform=_PLATFORM,
+                        note_id=it.note_id,
+                        canonical_url=it.canonical_url,
+                        url_hash=it.url_hash,
+                        content_type=it.content_type,
+                        title=it.title,
+                        reason=imp_reason,
+                    )
+                    update_sync_run_item(
+                        sync_run_id,
+                        it.note_id,
+                        analysis_status="already_imported",
+                        error_message=f"已在历史库/seen 中（{imp_reason}），跳过分析",
+                    )
+                    digest_items.append(
+                        _item_to_digest_row(
+                            it,
+                            analysis_status="already_imported",
+                            summary=f"已导入，跳过（{imp_reason}）",
+                        )
+                    )
+                    continue
 
                 if not sub.get("auto_analyze", True):
                     insert_seen_note(
@@ -289,15 +472,41 @@ async def run_favorites_sync(
                     )
                     continue
 
-                task_id = create_task("小红书", it.canonical_url, "", comments_dict)
+                src_meta = source_meta_kwargs(
+                    SOURCE_SUB_FAVORITES,
+                    display_name=str(sub.get("display_name") or ""),
+                    platform=_PLATFORM,
+                    author_name=str(getattr(it, "author_name", "") or ""),
+                    author_id=str(getattr(it, "author_id", "") or ""),
+                    subscription_id=subscription_id,
+                )
+                task_id = create_task(
+                    "小红书",
+                    it.canonical_url,
+                    "",
+                    comments_dict,
+                    **src_meta,
+                )
                 update_sync_run_item(
                     sync_run_id, it.note_id, analysis_task_id=task_id, analysis_status="running"
                 )
+                upsert_link_card(
+                    subscription_id=subscription_id,
+                    platform=_PLATFORM,
+                    note_id=it.note_id,
+                    canonical_url=it.canonical_url,
+                    url_hash=it.url_hash,
+                    title=it.title,
+                    content_type=it.content_type,
+                    published_at=str(it.published_at or ""),
+                    task_id=task_id,
+                    analysis_status="running",
+                    author_name=src_meta.get("author_name") or "",
+                    import_source=SOURCE_SUB_FAVORITES,
+                    source_label=src_meta.get("source_label") or "",
+                )
 
-                async def _run_pipeline(tid: str = task_id):
-                    await run_pipeline_with_slot(tid, lambda: process_video_pipeline(tid))
-
-                asyncio.create_task(_run_pipeline())
+                asyncio.create_task(request_video_pipeline_async(task_id))
                 wait = await _wait_task(task_id, per_item_timeout)
                 task = wait.get("task") or {}
                 st = wait.get("status")
@@ -317,6 +526,7 @@ async def run_favorites_sync(
                         analysis_status="completed",
                     )
                     update_sync_run_item(sync_run_id, it.note_id, analysis_status="completed")
+                    sync_link_card_from_task(subscription_id, task)
                 else:
                     failed += 1
                     err = task.get("error") or f"analysis_{st}"
@@ -328,6 +538,7 @@ async def run_favorites_sync(
                         analysis_status="failed",
                         error_message=str(err),
                     )
+                    sync_link_card_from_task(subscription_id, task)
 
                 digest_items.append(
                     _item_to_digest_row(
@@ -375,10 +586,10 @@ async def run_favorites_sync(
 
             update_subscription_cursor(
                 subscription_id,
-                cursor_offset=0,
+                cursor_offset=next_cursor if not backfill_done else 0,
                 last_note_id=items[0].note_id if items else sub.get("last_note_id"),
                 cursor_published_at=None,
-                mark_backfill_done=False,
+                mark_backfill_done=mark_backfill if not backfill_done else False,
                 reset_failures=True,
             )
 
@@ -398,15 +609,39 @@ async def run_favorites_sync(
                 error_message=digest_err,
             )
 
+            from .favorites_subscription_api import (
+                _attach_catalog_seq,
+                _enrich_sync_items_with_tasks,
+            )
+
+            run_items = _enrich_sync_items_with_tasks(list_sync_run_items(sync_run_id))
+            cat_cards: List[Dict[str, Any]] = []
+            for i, it in enumerate(items[: max(len(new_items), batch_label if limit > 0 else len(items), 20)], start=1):
+                d = it.to_dict()
+                d["seq"] = i
+                cat_cards.append(d)
+            run_items = _attach_catalog_seq(run_items, cat_cards)
+
             return {
                 "ok": True,
                 "sync_run_id": sync_run_id,
                 "status": final_status,
                 "new_count": len(new_items),
+                "skipped_imported_count": len(skipped_imported),
+                "skipped_imported": skipped_imported,
                 "analyzed_count": analyzed,
                 "failed_count": failed,
+                "cursor_offset": next_cursor if not backfill_done else 0,
+                "batch_size": limit,
+                "full_sync": limit <= 0,
                 "digest_id": (digest_record or {}).get("digest_id"),
-                "items": list_sync_run_items(sync_run_id),
+                "items": run_items,
+                "summary": {
+                    "one_liner": (digest_record or {}).get("digest_json", {}).get("summary_one_liner")
+                    if digest_record
+                    else "",
+                },
+                "digest_md": (digest_record or {}).get("digest_md") or "",
                 "habit": get_habit(subscription_id),
             }
 

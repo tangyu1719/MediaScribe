@@ -288,6 +288,13 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         comments_file_path=comments_file_path,
     )
     output_tpl = (cfg.get("output_template") or "").strip()
+    from .link_meta_extract import format_meta_json_block, get_meta_extract_config
+
+    meta_cfg = get_meta_extract_config(cfg)
+    meta_block = format_meta_json_block(
+        result_data.get("extracted_metadata") or {},
+        fields=meta_cfg.get("fields") or [],
+    )
     md = render_output_template(
         output_tpl,
         platform=platform,
@@ -301,6 +308,9 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         comments_section=comments_section,
         comments_analysis=comments_viewpoint,
         comments_file_link=format_comments_file_link(comments_file_path),
+        meta_json=meta_block,
+        task_note=str(result_data.get("task_note") or "").strip(),
+        task_keywords=str(result_data.get("task_keywords") or "").strip(),
     )
     if not md.strip():
         from .file_naming import resolve_effective_doc_title
@@ -512,7 +522,13 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                 _llm_executor(),
                 lambda: run_document_consolidation(
                     text=source_text,
-                    llm_cfg=cfg,
+                    llm_cfg={
+                        **cfg,
+                        "_task_id": task_id,
+                        "_log_chain": "链接沉淀文档-小红书图文",
+                        "_task_note": str(task_snap.get("task_note") or ""),
+                        "_task_keywords": str(task_snap.get("task_keywords") or ""),
+                    },
                     user_prompt=user_prompt,
                     stage_label="小红书图文沉淀",
                     comments_text=comments_text,
@@ -524,6 +540,9 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             ai_summary = (consolidation.get("ai_summary") or "").strip()
             article_text = (consolidation.get("article") or "").strip()
             comments_viewpoint = (consolidation.get("comments_viewpoint") or "").strip()
+            extracted_metadata = consolidation.get("extracted_metadata") or {}
+            if extracted_metadata:
+                _tm.update_task(task_id, extracted_metadata=extracted_metadata)
             ok_sum = bool(ai_summary) or _article_only
             _end_span(consolidate_span, status="completed" if ok_sum else "failed", task_id=task_id, error_code="" if ok_sum else "XHS_SUMMARY_FAILED")
             if not ok_sum:
@@ -533,10 +552,50 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             if _article_only:
                 title = link_title or (result.get("title") or "小红书内容")
             else:
-                title = await loop.run_in_executor(
-                    _io_executor(),
-                    lambda: resolve_doc_title(ai_summary, link, link_title=link_title, fallback=(result.get("title") or "小红书内容"), log_cb=lambda msg: _log(task_id, msg), platform="小红书"),
-                )
+                try:
+                    title = await loop.run_in_executor(
+                        _io_executor(),
+                        lambda: resolve_doc_title(
+                            ai_summary,
+                            link,
+                            link_title=link_title,
+                            fallback=(result.get("title") or "小红书内容"),
+                            log_cb=lambda msg: _log(task_id, msg),
+                            platform="小红书",
+                            source_text_len=len(source_text or ""),
+                        ),
+                    )
+                except Exception as title_ex:
+                    from .pipeline_output_quality import PipelineOutputQualityError
+
+                    if isinstance(title_ex, PipelineOutputQualityError):
+                        err_msg = f"[{title_ex.error_code}] {title_ex.message}"
+                        _end_span(
+                            title_span,
+                            status="failed",
+                            task_id=task_id,
+                            error_code=title_ex.error_code,
+                            error_message=title_ex.message,
+                        )
+                        _tm.update_task(
+                            task_id,
+                            error_code=title_ex.error_code,
+                            error=err_msg,
+                            span_stage_hint=title_ex.span_stage,
+                        )
+                        try:
+                            ops_monitor_task(
+                                link=link,
+                                task_id=task_id,
+                                status="failed",
+                                logs=[],
+                                error_info=err_msg,
+                            )
+                        except Exception:
+                            pass
+                        tracker.fail("ai_analysis", err_msg)
+                        return
+                    raise
             _tm.update_task(task_id, doc_title=title)
             _end_span(title_span, status="completed", task_id=task_id, output_payload={"doc_title": title})
             tracker.complete(
@@ -567,6 +626,7 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             md_span = _begin_span(task_id, session_id, "llm_call", "Markdown生成", {"doc_title": title})
             tracker.start("generate_md")
             _tm.update_task(task_id, status="generating", stage="生成Markdown", progress=90)
+            task_snap_md = _tm.get_task(task_id) or {}
             doc_path = await loop.run_in_executor(
                 _io_executor(),
                 lambda: _generate_md(
@@ -578,6 +638,9 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                         "content_type": (task.get("content_type") or "图文"),
                         "comments_viewpoint": comments_viewpoint,
                         "comments_file_path": (task.get("comments") or {}).get("comments_file_path") or "",
+                        "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
+                        "task_note": task_snap_md.get("task_note") or "",
+                        "task_keywords": task_snap_md.get("task_keywords") or "",
                     },
                     link,
                     "小红书",

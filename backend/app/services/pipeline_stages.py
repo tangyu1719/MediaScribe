@@ -7,7 +7,16 @@ from typing import Any, Dict, List, Optional
 
 from .history_manager import add_or_update_task_in_history
 from . import task_manager as _tm
-from .pipeline_checkpoint import save_stage_payload, load_stage_payload, has_stage_payload, clear_pipeline_cache
+from .pipeline_checkpoint import (
+    save_stage_payload,
+    load_stage_payload,
+    has_stage_payload,
+    clear_pipeline_cache,
+    list_cached_stage_ids,
+)
+
+# 流水线终态（非终态任务启动时需全量扫描对齐断点）
+PIPELINE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 # 各路由固定阶段顺序（与 node_registry / video_gui 对齐）
 PIPELINE_ROUTES: Dict[str, List[Dict[str, Any]]] = {
@@ -239,12 +248,7 @@ class PipelineStageTracker:
         except ValueError:
             return True
         if cur_idx < fail_idx:
-            st = self.stages.get(stage_id, {}).get("status")
-            if st == "completed":
-                return False
-            if stage_id in self.ctx or has_stage_payload(self.task_id, stage_id):
-                return False
-            return True
+            return False
         return True
 
     def log_skip(self, stage_id: str) -> None:
@@ -354,6 +358,99 @@ class PipelineStageTracker:
         except Exception:
             pass
         self._touch(sync_history=True)
+
+
+def is_pipeline_terminal_status(status: str) -> bool:
+    return (status or "").strip() in PIPELINE_TERMINAL_STATUSES
+
+
+def hydrate_resume_context_from_cache(
+    task_id: str,
+    url_hash: str,
+    route: str,
+    ctx: Optional[Dict[str, Any]] = None,
+    stages: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """从磁盘步骤缓存回填 resume_context，并同步 pipeline_stages 已完成标记。"""
+    merged_ctx = dict(ctx or {})
+    merged_stages = copy.deepcopy(stages or {})
+    if not url_hash:
+        return merged_ctx, merged_stages
+    for sid in list_cached_stage_ids(url_hash):
+        if sid not in merged_ctx:
+            loaded = load_stage_payload(task_id, sid, url_hash=url_hash)
+            if loaded is not None:
+                merged_ctx[sid] = loaded if isinstance(loaded, dict) else {"value": loaded}
+        row = merged_stages.setdefault(sid, {"label": stage_label(route, sid)})
+        if row.get("status") not in ("completed", "failed"):
+            row["status"] = "completed"
+            ck = merged_ctx.get(sid)
+            if ck:
+                row["result"] = ck if isinstance(ck, dict) else {"value": ck}
+    return merged_ctx, merged_stages
+
+
+def reconcile_resume_from_stages(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    根据阶段状态机 + 磁盘缓存推断断点恢复位点。
+    返回应写入 task 的 patch（pipeline_stages / resume_context / resume_from / failed_stage）。
+    """
+    route = (task.get("pipeline_route") or task.get("route_type") or "video").strip()
+    if route not in PIPELINE_ROUTES:
+        route = "video"
+    task_id = str(task.get("task_id") or task.get("id") or "")
+    url_hash = str(task.get("url_hash") or "").strip()
+    stages = copy.deepcopy(task.get("pipeline_stages") or {})
+    if not stages:
+        stages = init_pipeline_stages(route)
+    for sid, row in init_pipeline_stages(route).items():
+        stages.setdefault(sid, row)
+        stages[sid].setdefault("label", row["label"])
+
+    ctx, stages = hydrate_resume_context_from_cache(
+        task_id, url_hash, route, task.get("resume_context"), stages
+    )
+    order = [s["id"] for s in route_stage_defs(route)]
+
+    resume_from = (task.get("resume_from") or task.get("failed_stage") or "").strip()
+    failed_in_order = [sid for sid in order if stages.get(sid, {}).get("status") == "failed"]
+    in_progress = [sid for sid in order if stages.get(sid, {}).get("status") == "in_progress"]
+
+    if failed_in_order:
+        resume_from = failed_in_order[0]
+    elif in_progress:
+        resume_from = in_progress[0]
+    elif not resume_from:
+        inferred = infer_stage_from_status(
+            route, str(task.get("status") or ""), str(task.get("stage") or "")
+        )
+        if inferred:
+            resume_from = inferred
+        else:
+            last_done = -1
+            for i, sid in enumerate(order):
+                if stages.get(sid, {}).get("status") == "completed":
+                    last_done = i
+            if last_done + 1 < len(order):
+                resume_from = order[last_done + 1]
+            elif last_done >= 0:
+                resume_from = order[last_done]
+
+    if resume_from:
+        row = stages.setdefault(resume_from, {"label": stage_label(route, resume_from)})
+        if row.get("status") in ("failed", "in_progress"):
+            row["status"] = "pending"
+            row["error"] = ""
+
+    label = stage_label(route, resume_from) if resume_from else ""
+    return {
+        "pipeline_route": route,
+        "pipeline_stages": stages,
+        "resume_context": ctx,
+        "resume_from": resume_from,
+        "failed_stage": resume_from,
+        "failed_stage_label": label,
+    }
 
 
 def infer_stage_from_status(route: str, status: str, stage_text: str = "") -> Optional[str]:

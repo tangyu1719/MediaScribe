@@ -72,13 +72,9 @@ else
   fi
 fi
 
-echo "[2/4] 释放 ${BACKEND_PORT} 端口（结束占用中的旧 uvicorn）..."
+echo "[2/4] 清理旧后端（uvicorn 主进程 + --reload 遗留 worker）..."
 if [[ "${_is_windows}" -eq 1 ]]; then
-  while read -r _line; do
-    _pid="${_line##* }"
-    [[ -z "${_pid}" || "${_pid}" == "0" ]] && continue
-    taskkill //F //PID "${_pid}" >/dev/null 2>&1 || true
-  done < <(netstat -ano 2>/dev/null | grep ":${BACKEND_PORT} " | grep LISTENING || true)
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${ROOT}/scripts/backend/stop_backend.ps1" || true
 else
   if command -v lsof >/dev/null 2>&1; then
     lsof -ti ":${BACKEND_PORT}" | xargs -r kill -9 2>/dev/null || true
@@ -86,7 +82,7 @@ else
     fuser -k "${BACKEND_PORT}/tcp" >/dev/null 2>&1 || true
   fi
 fi
-sleep 2
+sleep 1
 
 echo "[3/4] 选择 Python 环境..."
 if [[ -f "../.venv/Scripts/python.exe" ]]; then

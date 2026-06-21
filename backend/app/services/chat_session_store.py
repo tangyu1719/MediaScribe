@@ -223,9 +223,16 @@ def persist_session(
     meta["updated_at"] = now
     if not meta.get("created_at"):
         meta["created_at"] = now
-    # 估算上下文 token（字符/2 粗估）
-    ctx_chars = sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict))
-    meta["context_chars"] = ctx_chars
+    # 估算上下文 token（与 chat_context_memory 一致，含 thinking/span）
+    try:
+        from .chat_context_memory import estimate_messages_tokens
+
+        ctx_tok = estimate_messages_tokens(
+            [m for m in messages if isinstance(m, dict)]
+        )
+    except Exception:
+        ctx_tok = max(1, sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)) // 2)
+    meta["context_chars"] = ctx_tok * 2
     summary_tok = 0
     if isinstance(memory_meta, dict):
         summary_tok = int(memory_meta.get("summary_tokens_est") or 0)
@@ -233,7 +240,7 @@ def persist_session(
         sm_prev = (prev or {}).get("memory_meta") or {}
         if isinstance(sm_prev, dict):
             summary_tok = int(sm_prev.get("summary_tokens_est") or 0)
-    meta["context_tokens_est"] = max(1, ctx_chars // 2 + summary_tok)
+    meta["context_tokens_est"] = ctx_tok + summary_tok
 
     if isinstance(main_task_history, list):
         hist = main_task_history
@@ -299,6 +306,26 @@ def delete_local(sid: str) -> None:
 
 
 def get_session_document(sid: str) -> Optional[Dict[str, Any]]:
+    """读会话文档：优先 Redis 热快照，回退本地 JSON（避免大文件读盘拖慢 prepare_session_memory）。"""
+    sid = str(sid or "").strip()
+    if not sid:
+        return None
+    _init_redis()
+    if _redis_client is not None:
+        try:
+            raw = _redis_client.get(f"{_REDIS_PREFIX}:{sid}")
+            if raw:
+                doc = json.loads(raw)
+                if isinstance(doc, dict):
+                    return doc
+        except Exception as ex:
+            _LOG.debug(
+                "[AI问答-会话读|chat_session_store.get_session_document|session:%s|硬编执行|Redis回退磁盘] "
+                "error_type=%s; error_message=%s",
+                sid,
+                type(ex).__name__,
+                str(ex)[:120],
+            )
     p = _session_path(sid)
     if not p.exists():
         return None

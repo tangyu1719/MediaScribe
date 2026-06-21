@@ -113,6 +113,73 @@ def get_gateway_nodes() -> List[Dict]:
     return cfg.get("api_gateway_nodes", [])
 
 
+def list_chat_model_options() -> Dict[str, Any]:
+    """AI 问答页模型下拉：来自 api_gateway_nodes 活跃节点，不含密钥。"""
+    cfg = load_config()
+    nodes = cfg.get("api_gateway_nodes") or []
+    route_map = cfg.get("gateway_task_type_route") if isinstance(cfg.get("gateway_task_type_route"), dict) else {}
+    default_ep = str(
+        route_map.get("qa") or route_map.get("chat") or cfg.get("ai_chat_model") or ""
+    ).strip()
+
+    auto_resolved = ""
+    auto_label = "auto（节点池）"
+    try:
+        from .pipeline_logging import resolve_gateway_models
+
+        routes = resolve_gateway_models(cfg, agent_name="ai_chat", task_type="chat")
+        auto_resolved = str(
+            routes.get("primary_endpoint") or routes.get("gateway_chosen") or ""
+        ).strip()
+        if auto_resolved:
+            auto_label = f"auto（节点池 → {auto_resolved}）"
+    except Exception:
+        pass
+
+    options: List[Dict[str, Any]] = [{"id": "", "label": auto_label, "auto": True}]
+    seen: set = set()
+
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        status = str(n.get("status") or "active").strip().lower()
+        if status not in ("active", ""):
+            continue
+        ep = str(n.get("endpoint_id") or n.get("model") or "").strip()
+        if not ep or ep in seen:
+            continue
+        seen.add(ep)
+        name = str(n.get("name") or n.get("id") or ep).strip()
+        model_name = str(n.get("model") or "").strip()
+        provider = str(n.get("provider") or cfg.get("gateway_provider") or "ark").strip()
+        label_parts = [name]
+        if model_name and model_name.lower() != name.lower():
+            label_parts.append(model_name)
+        label = " · ".join(label_parts) + f"（{provider}）"
+        if ep == default_ep:
+            label += " · 默认"
+        options.append(
+            {
+                "id": ep,
+                "label": label,
+                "endpoint_id": ep,
+                "node_id": str(n.get("id") or "").strip(),
+                "provider": provider,
+                "name": name,
+                "model": model_name,
+                "default": ep == default_ep,
+            }
+        )
+
+    return {
+        "ok": True,
+        "models": options,
+        "default_id": default_ep,
+        "auto_resolved": auto_resolved,
+        "count": max(0, len(options) - 1),
+    }
+
+
 def upsert_gateway_node(node: Dict) -> Dict:
     cfg = load_config()
     nodes = list(cfg.get("api_gateway_nodes", []))
@@ -185,6 +252,9 @@ _AGENT_PROMPT_FIELDS: Dict[str, List[str]] = {
         "rules",
         "output_template",
         "file_naming_rule",
+        "meta_extract_enabled",
+        "meta_extract_fields",
+        "meta_extract_prompt",
     ],
     "qa_orchestrator_agent": [
         "ai_chat_system_prompt",
@@ -222,6 +292,14 @@ _AGENT_PROMPT_FIELDS: Dict[str, List[str]] = {
         "diagram_style_er_json",
         "diagram_style_tool_flow_pill_json",
     ],
+    "reader_agent": [
+        "reader_system_prompt",
+        "reader_role_task",
+        "reader_action_framework",
+        "reader_standards_must",
+        "reader_output_template",
+        "reader_no_doing",
+    ],
 }
 
 
@@ -234,6 +312,15 @@ def get_agent_prompt(agent_key: str) -> Dict:
             result[fk] = ""
             continue
         result[fk] = cfg.get(fk)
+    # reader_agent：config 空段从 AGENT.md 章节补齐（模块化向量源）
+    if agent_key == "reader_agent":
+        try:
+            from .agent_md_sections import merge_reader_fields_from_md
+
+            md_row = get_agent_md(agent_key)
+            result = merge_reader_fields_from_md(result, md_row.get("content") or "")
+        except Exception:
+            pass
     return {"agent_key": agent_key, "fields": result}
 
 
@@ -244,6 +331,16 @@ def save_agent_prompt(agent_key: str, fields: Dict) -> Dict:
         if k in allowed:
             cfg[k] = v
     save_config(cfg)
+    # reader_agent：保存字段后回写 AGENT.md 对应章节
+    if agent_key == "reader_agent":
+        try:
+            from .agent_md_sections import sync_reader_agent_md_from_fields
+
+            md_row = get_agent_md(agent_key)
+            new_md = sync_reader_agent_md_from_fields(md_row.get("content") or "", fields or {})
+            save_agent_md(agent_key, new_md)
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -258,27 +355,39 @@ _AGENT_MD_FILES: Dict[str, tuple[str, str]] = {
     "longpage_html_assembler_agent": ("summary", "AGENT_LONGPAGE_HTML_ASSEMBLER_V1.md"),
     "longpage_diagram_legend_agent": ("summary", "AGENT_DIAGRAM_ORCHESTRATION.md"),
     "skill_usage_flow_agent": ("summary", "AGENT_SKILL_USAGE_FLOW.md"),
+    "reader_agent": ("reader", "AGENT.md"),
 }
 
 
+def _reader_agent_md_path() -> Path:
+    """web_rebuild_v2 本地 reader Agent 规范文档。"""
+    return (_HERE.parents[2] / "agents" / "reader" / "AGENT.md").resolve()
+
+
 def get_agent_md(agent_key: str) -> Dict:
-    spec = _AGENT_MD_FILES.get(agent_key)
-    if not spec:
-        md_path = _AGENT_DIR / "agents" / agent_key / "AGENT.md"
+    if agent_key == "reader_agent":
+        md_path = _reader_agent_md_path()
     else:
-        sub, name = spec
-        md_path = _AGENT_DIR / "agents" / sub / name
+        spec = _AGENT_MD_FILES.get(agent_key)
+        if not spec:
+            md_path = _AGENT_DIR / "agents" / agent_key / "AGENT.md"
+        else:
+            sub, name = spec
+            md_path = _AGENT_DIR / "agents" / sub / name
     content = md_path.read_text(encoding="utf-8", errors="ignore") if md_path.exists() else ""
     return {"agent_key": agent_key, "content": content, "path": str(md_path)}
 
 
 def save_agent_md(agent_key: str, content: str) -> Dict:
-    spec = _AGENT_MD_FILES.get(agent_key)
-    if not spec:
-        md_path = _AGENT_DIR / "agents" / agent_key / "AGENT.md"
+    if agent_key == "reader_agent":
+        md_path = _reader_agent_md_path()
     else:
-        sub, name = spec
-        md_path = _AGENT_DIR / "agents" / sub / name
+        spec = _AGENT_MD_FILES.get(agent_key)
+        if not spec:
+            md_path = _AGENT_DIR / "agents" / agent_key / "AGENT.md"
+        else:
+            sub, name = spec
+            md_path = _AGENT_DIR / "agents" / sub / name
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(content or "", encoding="utf-8")
     return {"ok": True, "path": str(md_path)}

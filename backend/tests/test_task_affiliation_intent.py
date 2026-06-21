@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.services.chat_context_memory import (
     extract_task_id_from_message,
+    peek_fast_continue_eligible,
     resolve_intent_mode,
     resolve_task_affiliation,
 )
@@ -78,6 +79,27 @@ def test_short_reply_with_history_not_simple():
     )
     assert dec["mode"] == "continue_main"
     assert dec["task_id"] == "task_554272e197cc"
+
+
+def test_self_intro_not_affiliated_to_active_main_task():
+    """元问答不得因未结案主任务被强行续接（trace_42 二次问「你是谁」类）。"""
+    cur = {
+        "task_id": "task_554272e197cc",
+        "user_query": "搜素知识库中关于MCP技术相关的文档进行总结反馈。",
+        "status": "executing",
+        "task_kind": "main",
+    }
+    msg = "你是谁，你有什么能力"
+    aff = resolve_task_affiliation(msg, cur_task=cur, main_task_history=[cur])
+    assert aff is None
+    dec = resolve_intent_mode(
+        msg,
+        cur_task=cur,
+        is_simple_heuristic=True,
+        main_task_history=[cur],
+    )
+    assert dec["mode"] == "simple"
+    assert not peek_fast_continue_eligible(msg, cur_task=cur, main_task_history=[cur])
 
 
 def test_explicit_new_task_skips_affiliation():

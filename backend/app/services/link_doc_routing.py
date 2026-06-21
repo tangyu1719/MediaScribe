@@ -86,10 +86,8 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
     guidance = ""
     if only_xhs_id:
         guidance = (
-            f"检测到小红书号 {xhs_id}，但本产品是「链接文档化」：需要可解析的笔记/作品链接"
-            "（形如 https://www.xiaohongshu.com/explore/...?xsec_token=...）。"
-            "请在「链接文档化」页粘贴该链接并勾选「读取评论」，或由 MCP 工具 scrape_comments 传入完整 URL。"
-            "仅凭数字号无法直接爬用户主页。"
+            f"检测到小红书号 {xhs_id}。请调用 xhs_user_search 工具（red_id={xhs_id}），"
+            "通过浏览器自动化解析用户主页并启动画像分析流水线。"
         )
     elif link_doc_relevant and not urls and (wants_comments or wants_crawl):
         guidance = (
@@ -129,7 +127,7 @@ async def enqueue_link_pipeline_from_chat(
     try:
         from .pipeline_comments import normalize_comments_count
         from .task_manager import reuse_or_enqueue_task, add_log
-        from .pipeline_scheduler import run_pipeline_with_slot
+        from .task_source_meta import SOURCE_CHAT, source_meta_kwargs
         from .video_pipeline import process_video_pipeline
         import asyncio
 
@@ -146,6 +144,7 @@ async def enqueue_link_pipeline_from_chat(
             user_prompt=(user_prompt or "")[:500],
             comments=comments_cfg,
             action="start",
+            **source_meta_kwargs(SOURCE_CHAT, platform=plat),
         )
         add_log(
             tid,
@@ -153,10 +152,9 @@ async def enqueue_link_pipeline_from_chat(
             f"read_comments={read_comments}; count={comments_cfg['count']}; reused={reused}",
         )
 
-        async def _run_one():
-            await run_pipeline_with_slot(tid, lambda: process_video_pipeline(tid))
+        from .pipeline_scheduler import request_video_pipeline_async
 
-        asyncio.create_task(_run_one())
+        asyncio.create_task(request_video_pipeline_async(tid))
         return {
             "ok": True,
             "async": True,

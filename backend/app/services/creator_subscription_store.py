@@ -41,12 +41,172 @@ def require_mariadb_url() -> str:
     return url
 
 
+def _migrate_sync_run_columns(engine) -> None:
+    """补齐 creator_sync_runs 新增列（create_all 不 ALTER 已有表）。"""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if "creator_sync_runs" not in insp.get_table_names():
+            return
+        cols = {c["name"] for c in insp.get_columns("creator_sync_runs")}
+        stmts = []
+        add_int = [
+            ("latest_limit", "INT DEFAULT 0"),
+            ("catalog_count", "INT DEFAULT 0"),
+        ]
+        add_str = [
+            ("digest_status", "VARCHAR(16) DEFAULT ''"),
+            ("error_code", "VARCHAR(64) DEFAULT ''"),
+        ]
+        add_text = [
+            ("digest_json", "TEXT"),
+            ("digest_md", "TEXT"),
+            ("error_message", "TEXT"),
+        ]
+        add_dt = ["started_at", "finished_at"]
+        for name, ddl in add_int:
+            if name not in cols:
+                stmts.append(f"ALTER TABLE creator_sync_runs ADD COLUMN {name} {ddl}")
+        for name, ddl in add_str:
+            if name not in cols:
+                stmts.append(f"ALTER TABLE creator_sync_runs ADD COLUMN {name} {ddl}")
+        for name, ddl in add_text:
+            if name not in cols:
+                stmts.append(f"ALTER TABLE creator_sync_runs ADD COLUMN {name} {ddl}")
+        for name in add_dt:
+            if name not in cols:
+                stmts.append(f"ALTER TABLE creator_sync_runs ADD COLUMN {name} DATETIME NULL")
+        if not stmts:
+            return
+        with engine.begin() as conn:
+            for sql in stmts:
+                conn.execute(text(sql))
+        _log.info(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_sync_run_columns|creator_sync_runs|硬编执行|迁移] count=%s",
+            len(stmts),
+        )
+    except Exception as ex:
+        _log.warning(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_sync_run_columns|creator_sync_runs|硬编执行|跳过] error=%s",
+            ex,
+        )
+
+
+def _migrate_sync_run_item_columns(engine) -> None:
+    """补齐 creator_sync_run_items 元数据列。"""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if "creator_sync_run_items" not in insp.get_table_names():
+            return
+        cols = {c["name"] for c in insp.get_columns("creator_sync_run_items")}
+        stmts = []
+        additions = [
+            ("published_at", "VARCHAR(64) DEFAULT ''"),
+            ("published_date", "VARCHAR(16) DEFAULT ''"),
+            ("like_count", "INT DEFAULT 0"),
+            ("comment_count", "INT DEFAULT 0"),
+            ("hashtags_json", "TEXT"),
+            ("cover_url", "VARCHAR(1024) DEFAULT ''"),
+            ("author_id", "VARCHAR(128) DEFAULT ''"),
+            ("author_name", "VARCHAR(256) DEFAULT ''"),
+            ("author_followers", "INT DEFAULT 0"),
+        ]
+        for name, ddl in additions:
+            if name not in cols:
+                stmts.append(f"ALTER TABLE creator_sync_run_items ADD COLUMN {name} {ddl}")
+        if not stmts:
+            return
+        with engine.begin() as conn:
+            for sql in stmts:
+                conn.execute(text(sql))
+        _log.info(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_sync_run_item_columns|creator_sync_run_items|硬编执行|迁移] count=%s",
+            len(stmts),
+        )
+    except Exception as ex:
+        _log.warning(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_sync_run_item_columns|creator_sync_run_items|硬编执行|跳过] error=%s",
+            ex,
+        )
+
+
+def _migrate_seen_analysis_status(engine) -> None:
+    """seen / sync_run_items 的 analysis_status 扩至 32（兼容 already_imported 等）。"""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        for table in ("creator_subscription_seen_notes", "creator_sync_run_items"):
+            if table not in insp.get_table_names():
+                continue
+            cols = {c["name"]: c for c in insp.get_columns(table)}
+            col = cols.get("analysis_status")
+            if not col:
+                continue
+            type_str = str(col.get("type") or "").lower()
+            if "32" in type_str or "64" in type_str or "varchar(32" in type_str:
+                continue
+            with engine.begin() as conn:
+                conn.execute(
+                    text(f"ALTER TABLE {table} MODIFY COLUMN analysis_status VARCHAR(32) DEFAULT 'pending'")
+                )
+            _log.info(
+                "[社媒订阅-持久化|creator_subscription_store._migrate_seen_analysis_status|%s|硬编执行|迁移] analysis_status→VARCHAR(32)",
+                table,
+            )
+    except Exception as ex:
+        _log.warning(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_seen_analysis_status|analysis_status|硬编执行|跳过] error=%s",
+            ex,
+        )
+
+
+def _migrate_follow_pull_columns(engine) -> None:
+    """creator_subscriptions 增加收藏博主拉取 cursor。"""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if "creator_subscriptions" not in insp.get_table_names():
+            return
+        cols = {c["name"] for c in insp.get_columns("creator_subscriptions")}
+        stmts: List[str] = []
+        if "follow_pull_note_offset" not in cols:
+            stmts.append(
+                "ALTER TABLE creator_subscriptions ADD COLUMN follow_pull_note_offset INT DEFAULT 0"
+            )
+        if "follow_pull_done" not in cols:
+            stmts.append(
+                "ALTER TABLE creator_subscriptions ADD COLUMN follow_pull_done TINYINT(1) DEFAULT 0"
+            )
+        with engine.begin() as conn:
+            for sql in stmts:
+                conn.execute(text(sql))
+        if stmts:
+            _log.info(
+                "[社媒订阅-持久化|creator_subscription_store._migrate_follow_pull_columns|creator_subscriptions|硬编执行|迁移] count=%s",
+                len(stmts),
+            )
+    except Exception as ex:
+        _log.warning(
+            "[社媒订阅-持久化|creator_subscription_store._migrate_follow_pull_columns|creator_subscriptions|硬编执行|跳过] error=%s",
+            ex,
+        )
+
+
 def get_engine():
     global _engine, _SessionLocal
     if _engine is None:
         url = require_mariadb_url()
         _engine = create_engine(url, pool_pre_ping=True, future=True)
         CreatorSubBase.metadata.create_all(_engine)
+        _migrate_sync_run_columns(_engine)
+        _migrate_sync_run_item_columns(_engine)
+        _migrate_seen_analysis_status(_engine)
+        _migrate_follow_pull_columns(_engine)
         _SessionLocal = sessionmaker(_engine, expire_on_commit=False, class_=Session)
         _log.info(
             "[社媒订阅-持久化|creator_subscription_store.get_engine|MariaDB|硬编执行|初始化] 完成; ok=true"
@@ -111,6 +271,8 @@ def _sub_to_dict(row: Subscription) -> Dict[str, Any]:
         "cursor_published_at": row.cursor_published_at.isoformat() if row.cursor_published_at else None,
         "consecutive_failures": row.consecutive_failures,
         "initial_backfill_done": row.initial_backfill_done,
+        "follow_pull_note_offset": int(getattr(row, "follow_pull_note_offset", 0) or 0),
+        "follow_pull_done": bool(getattr(row, "follow_pull_done", False)),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -230,6 +392,146 @@ def is_note_seen(platform: str, note_id: str) -> bool:
         return row is not None
 
 
+def is_url_hash_seen(platform: str, url_hash: str) -> bool:
+    """按稳定 url_hash 判重（与历史库、队列卡片对齐）。"""
+    uh = (url_hash or "").strip()
+    if not uh:
+        return False
+    with session_scope() as db:
+        row = db.execute(
+            select(SubscriptionSeenNote).where(
+                SubscriptionSeenNote.platform == platform,
+                SubscriptionSeenNote.url_hash == uh,
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
+
+def is_url_hash_seen_any(url_hash: str) -> bool:
+    """跨 platform 按 url_hash 判重（收藏/UP 订阅等同链接不重复导入）。"""
+    uh = (url_hash or "").strip()
+    if not uh:
+        return False
+    with session_scope() as db:
+        row = db.execute(
+            select(SubscriptionSeenNote).where(SubscriptionSeenNote.url_hash == uh)
+        ).scalar_one_or_none()
+        return row is not None
+
+
+def is_note_seen_any(note_id: str) -> bool:
+    """跨 platform 按 note_id 判重。"""
+    nid = (note_id or "").strip()
+    if not nid:
+        return False
+    with session_scope() as db:
+        row = db.execute(
+            select(SubscriptionSeenNote).where(SubscriptionSeenNote.note_id == nid)
+        ).scalar_one_or_none()
+        return row is not None
+
+
+def delete_seen_notes_by_prefix(platform: str, note_id_prefix: str = "fav_") -> int:
+    """删除 note_id 前缀匹配的 seen 记录（用于 fav_* 假 ID 清理后重跑）。"""
+    prefix = (note_id_prefix or "").strip()
+    if not prefix:
+        return 0
+    with session_scope() as db:
+        rows = list(
+            db.execute(
+                select(SubscriptionSeenNote).where(
+                    SubscriptionSeenNote.platform == platform,
+                    SubscriptionSeenNote.note_id.like(f"{prefix}%"),
+                )
+            ).scalars().all()
+        )
+        for row in rows:
+            db.delete(row)
+        if rows:
+            _log.info(
+                "[社媒订阅-持久化|delete_seen_notes_by_prefix|%s|硬编执行|删除] count=%s; prefix=%s",
+                platform,
+                len(rows),
+                prefix,
+            )
+        return len(rows)
+
+
+def delete_seen_notes_invalid(platform: str) -> int:
+    """删除假 noteId（非 24 位 hex）或 explore/fav_ 无效链接的 seen 记录。"""
+    import re
+
+    valid_re = re.compile(r"^[a-f0-9]{24}$", re.I)
+    with session_scope() as db:
+        rows = list(
+            db.execute(
+                select(SubscriptionSeenNote).where(
+                    SubscriptionSeenNote.platform == platform,
+                )
+            ).scalars().all()
+        )
+        doomed = []
+        for row in rows:
+            nid = (row.note_id or "").strip()
+            url = (row.canonical_url or "").strip().lower()
+            if not valid_re.fullmatch(nid):
+                doomed.append(row)
+                continue
+            if "explore/fav_" in url or "/fav_" in url:
+                doomed.append(row)
+        for row in doomed:
+            db.delete(row)
+        if doomed:
+            _log.info(
+                "[社媒订阅-持久化|delete_seen_notes_invalid|%s|硬编执行|删除] count=%s",
+                platform,
+                len(domed),
+            )
+        return len(doomed)
+
+
+def update_seen_note_identity(
+    platform: str,
+    old_note_id: str,
+    *,
+    new_note_id: str,
+    canonical_url: str,
+    url_hash: str,
+    title: str = "",
+    analysis_task_id: Optional[str] = None,
+    analysis_status: str = "",
+) -> bool:
+    """将 fav_* 假 note_id 更新为真实 note_id（重跑成功后调用）。"""
+    with session_scope() as db:
+        row = db.execute(
+            select(SubscriptionSeenNote).where(
+                SubscriptionSeenNote.platform == platform,
+                SubscriptionSeenNote.note_id == old_note_id,
+            )
+        ).scalar_one_or_none()
+        if not row:
+            return False
+        conflict = db.execute(
+            select(SubscriptionSeenNote).where(
+                SubscriptionSeenNote.platform == platform,
+                SubscriptionSeenNote.note_id == new_note_id,
+            )
+        ).scalar_one_or_none()
+        if conflict and conflict.id != row.id:
+            db.delete(row)
+            return False
+        row.note_id = new_note_id
+        row.canonical_url = canonical_url
+        row.url_hash = url_hash
+        if title:
+            row.title = title
+        if analysis_task_id:
+            row.analysis_task_id = analysis_task_id
+        if analysis_status:
+            row.analysis_status = analysis_status
+        return True
+
+
 def insert_seen_note(
     *,
     subscription_id: str,
@@ -281,7 +583,279 @@ def update_seen_analysis(platform: str, note_id: str, task_id: str, status: str)
             row.analysis_status = status
 
 
-def create_sync_run(subscription_id: str, trigger: str = "manual") -> Dict[str, Any]:
+def upsert_seen_note_url(
+    *,
+    subscription_id: str,
+    platform: str,
+    note_id: str,
+    canonical_url: str,
+    url_hash: str,
+    title: str = "",
+    content_type: str = "",
+) -> bool:
+    """更新已摘录笔记的真实链接（优先补全 xsec_token）。"""
+    with session_scope() as db:
+        row = db.execute(
+            select(SubscriptionSeenNote).where(
+                SubscriptionSeenNote.platform == platform,
+                SubscriptionSeenNote.note_id == note_id,
+            )
+        ).scalar_one_or_none()
+        if not row:
+            return False
+        cur = (row.canonical_url or "").strip()
+        new_u = (canonical_url or "").strip()
+        if not new_u:
+            return False
+        changed = False
+        if not cur or ("xsec_token" in new_u and "xsec_token" not in cur) or (
+            new_u != cur and "xsec_token" in new_u
+        ):
+            row.canonical_url = new_u
+            row.url_hash = url_hash
+            changed = True
+        if title and ((row.title or "").startswith("笔记 ") or not (row.title or "").strip()):
+            row.title = title
+            changed = True
+        if content_type and (row.content_type or "") in ("", "unknown"):
+            row.content_type = content_type
+            changed = True
+        return changed
+
+
+def list_seen_notes_by_subscription(
+    subscription_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 100,
+    analysis_status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """列出订阅下已摘录的博客链接（seen 表）。"""
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+    with session_scope() as db:
+        q = select(SubscriptionSeenNote).where(
+            SubscriptionSeenNote.subscription_id == subscription_id
+        )
+        if analysis_status:
+            q = q.where(SubscriptionSeenNote.analysis_status == analysis_status)
+        rows = db.execute(
+            q.order_by(desc(SubscriptionSeenNote.first_seen_at))
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).scalars().all()
+        return [
+            {
+                "note_id": r.note_id,
+                "canonical_url": r.canonical_url,
+                "url_hash": r.url_hash,
+                "content_type": r.content_type,
+                "title": r.title,
+                "analysis_task_id": r.analysis_task_id,
+                "analysis_status": r.analysis_status,
+                "has_xsec_token": "xsec_token" in (r.canonical_url or ""),
+                "first_seen_at": r.first_seen_at.isoformat() if r.first_seen_at else None,
+            }
+            for r in rows
+        ]
+
+
+def count_seen_notes_by_subscription(subscription_id: str) -> int:
+    with session_scope() as db:
+        return (
+            db.scalar(
+                select(func.count()).select_from(SubscriptionSeenNote).where(
+                    SubscriptionSeenNote.subscription_id == subscription_id
+                )
+            )
+            or 0
+        )
+
+
+def _artifact_status_from_history(row: Any) -> Dict[str, str]:
+    """从 pipeline_task_history 行推导 MD/HTML 产物状态。"""
+    stages: Dict[str, Any] = {}
+    try:
+        stages = json.loads(getattr(row, "pipeline_stages_json", None) or "{}")
+    except Exception:
+        stages = {}
+
+    def _st(stage_id: str, path_val: Any) -> str:
+        if path_val:
+            return "ready"
+        st = str((stages.get(stage_id) or {}).get("status") or "")
+        if st == "completed":
+            return "ready"
+        if st == "failed":
+            return "failed"
+        if st == "in_progress":
+            return "running"
+        return "off"
+
+    html_st = str(getattr(row, "html_status", "") or "")
+    if html_st == "ready" or getattr(row, "html_path", None):
+        html_status = "ready"
+    elif html_st in ("failed", "error"):
+        html_status = "failed"
+    elif html_st in ("running", "generating"):
+        html_status = "running"
+    else:
+        html_status = _st("html", getattr(row, "html_path", None))
+
+    return {
+        "md_status": _st("generate_md", getattr(row, "doc_path", None)),
+        "html_status": html_status,
+        "feishu_status": _st("feishu_upload", None),
+    }
+
+
+def _link_card_from_seen_and_history(
+    sn: SubscriptionSeenNote,
+    hist: Any,
+) -> Dict[str, Any]:
+    """合并 seen 表与链接库 pipeline_task_history 为前端卡片结构。"""
+    first_seen = sn.first_seen_at.isoformat() if sn.first_seen_at else ""
+    card: Dict[str, Any] = {
+        "subscription_id": sn.subscription_id,
+        "platform": sn.platform or "",
+        "note_id": sn.note_id or "",
+        "canonical_url": sn.canonical_url or "",
+        "url_hash": sn.url_hash or "",
+        "title": (sn.title or "").strip() or sn.note_id or "",
+        "content_type": sn.content_type or "",
+        "published_at": first_seen,
+        "task_id": (sn.analysis_task_id or "").strip(),
+        "analysis_status": sn.analysis_status or "pending",
+        "task_note": "",
+        "error_message": "",
+        "created_at": first_seen,
+        "updated_at": first_seen,
+        "md_status": "off",
+        "html_status": "off",
+        "feishu_status": "off",
+        "doc_path": "",
+        "html_path": "",
+        "feishu_doc_url": "",
+        "author_name": "",
+        "author_id": "",
+        "import_source": "",
+        "source_label": "",
+    }
+    if hist is None:
+        return card
+    card["task_id"] = (getattr(hist, "task_id", None) or card["task_id"] or "").strip()
+    card["title"] = (
+        (getattr(hist, "link_title", None) or getattr(hist, "doc_title", None) or getattr(hist, "title", None) or "")
+        .strip()
+        or card["title"]
+    )
+    card["analysis_status"] = str(getattr(hist, "status", None) or card["analysis_status"] or "")
+    card["error_message"] = str(getattr(hist, "error", None) or "")
+    card["doc_path"] = getattr(hist, "doc_path", None) or ""
+    card["html_path"] = getattr(hist, "html_path", None) or ""
+    card["content_type"] = str(getattr(hist, "content_type", None) or card["content_type"] or "")
+    card["updated_at"] = (
+        hist.updated_at.isoformat() if getattr(hist, "updated_at", None) else card["updated_at"]
+    )
+    card.update(_artifact_status_from_history(hist))
+    return card
+
+
+def list_subscription_link_cards(
+    subscription_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 20,
+) -> Dict[str, Any]:
+    """订阅链接卡片：seen 表一次 LEFT JOIN pipeline_task_history（链接库）。"""
+    from .pipeline_history_models import PipelineTaskHistory
+
+    sid = (subscription_id or "").strip()
+    if not sid:
+        return {"ok": True, "items": [], "total": 0, "page": 1, "page_size": page_size, "storage": "mysql"}
+
+    page = max(1, int(page or 1))
+    page_size = min(max(1, int(page_size or 20)), 100)
+
+    with session_scope() as db:
+        total = (
+            db.scalar(
+                select(func.count())
+                .select_from(SubscriptionSeenNote)
+                .where(SubscriptionSeenNote.subscription_id == sid)
+            )
+            or 0
+        )
+        rows = db.execute(
+            select(SubscriptionSeenNote, PipelineTaskHistory)
+            .outerjoin(
+                PipelineTaskHistory,
+                PipelineTaskHistory.url_hash == SubscriptionSeenNote.url_hash,
+            )
+            .where(SubscriptionSeenNote.subscription_id == sid)
+            .order_by(desc(SubscriptionSeenNote.first_seen_at))
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        items = [_link_card_from_seen_and_history(sn, hist) for sn, hist in rows]
+
+    return {
+        "ok": True,
+        "items": items,
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "storage": "mysql",
+    }
+
+
+def get_subscription_sync_anchor(subscription_id: str) -> Dict[str, Any]:
+    """
+    同步锚点：已见 HASH/note_id + 系统内最新发布时间锚点。
+    有已订阅链接时增量从锚点向更新方向连续取；无锚点则从最新开始。
+    """
+    from .subscription_link_order import parse_published_at
+
+    seen_hashes: set = set()
+    seen_note_ids: set = set()
+    max_pub: Optional[datetime] = None
+    with session_scope() as db:
+        rows = db.execute(
+            select(SubscriptionSeenNote).where(
+                SubscriptionSeenNote.subscription_id == subscription_id
+            )
+        ).scalars().all()
+        for r in rows:
+            uh = (r.url_hash or "").strip()
+            nid = (r.note_id or "").strip()
+            if uh:
+                seen_hashes.add(uh)
+            if nid:
+                seen_note_ids.add(nid)
+        sub = db.execute(
+            select(Subscription).where(Subscription.subscription_id == subscription_id)
+        ).scalar_one_or_none()
+        if sub and sub.cursor_published_at:
+            max_pub = sub.cursor_published_at
+        item_rows = db.execute(
+            select(SyncRunItem.published_at)
+            .join(SyncRun, SyncRun.sync_run_id == SyncRunItem.sync_run_id)
+            .where(SyncRun.subscription_id == subscription_id)
+            .where(SyncRunItem.published_at != "")
+        ).scalars().all()
+        for pub_s in item_rows:
+            dt = parse_published_at(pub_s)
+            if dt and (max_pub is None or dt > max_pub):
+                max_pub = dt
+    return {
+        "published_at": max_pub,
+        "url_hashes": seen_hashes,
+        "note_ids": seen_note_ids,
+        "seen_count": len(seen_note_ids),
+    }
+
+
+def create_sync_run(subscription_id: str, trigger: str = "manual", *, latest_limit: int = 0, catalog_count: int = 0) -> Dict[str, Any]:
     rid = _new_id("sync")
     with session_scope() as db:
         row = SyncRun(
@@ -289,6 +863,8 @@ def create_sync_run(subscription_id: str, trigger: str = "manual") -> Dict[str, 
             subscription_id=subscription_id,
             trigger=trigger,
             status="pending",
+            latest_limit=latest_limit,
+            catalog_count=catalog_count,
             started_at=datetime.utcnow(),
         )
         db.add(row)
@@ -317,6 +893,11 @@ def _sync_to_dict(row: SyncRun) -> Dict[str, Any]:
         "new_count": row.new_count,
         "analyzed_count": row.analyzed_count,
         "failed_count": row.failed_count,
+        "latest_limit": getattr(row, "latest_limit", 0),
+        "catalog_count": getattr(row, "catalog_count", 0),
+        "digest_status": getattr(row, "digest_status", ""),
+        "digest_json": json.loads(row.digest_json or "{}") if getattr(row, "digest_json", None) else {},
+        "digest_md": getattr(row, "digest_md", ""),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "error_code": row.error_code,
@@ -356,6 +937,15 @@ def add_sync_run_item(
     canonical_url: str,
     content_type: str,
     title: str,
+    published_at: str = "",
+    published_date: str = "",
+    like_count: int = 0,
+    comment_count: int = 0,
+    hashtags: Optional[List[str]] = None,
+    cover_url: str = "",
+    author_id: str = "",
+    author_name: str = "",
+    author_followers: int = 0,
     analysis_task_id: Optional[str] = None,
     analysis_status: str = "pending",
     error_message: str = "",
@@ -368,6 +958,15 @@ def add_sync_run_item(
                 canonical_url=canonical_url,
                 content_type=content_type,
                 title=title,
+                published_at=published_at,
+                published_date=published_date,
+                like_count=like_count,
+                comment_count=comment_count,
+                hashtags_json=json.dumps(hashtags or [], ensure_ascii=False),
+                cover_url=cover_url,
+                author_id=author_id,
+                author_name=author_name,
+                author_followers=author_followers,
                 analysis_task_id=analysis_task_id,
                 analysis_status=analysis_status,
                 error_message=error_message,
@@ -405,18 +1004,33 @@ def list_sync_run_items(sync_run_id: str) -> List[Dict[str, Any]]:
         rows = db.execute(
             select(SyncRunItem).where(SyncRunItem.sync_run_id == sync_run_id)
         ).scalars().all()
-        return [
-            {
-                "note_id": r.note_id,
-                "canonical_url": r.canonical_url,
-                "content_type": r.content_type,
-                "title": r.title,
-                "analysis_task_id": r.analysis_task_id,
-                "analysis_status": r.analysis_status,
-                "error_message": r.error_message,
-            }
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            try:
+                hashtags = json.loads(r.hashtags_json or "[]")
+            except Exception:
+                hashtags = []
+            out.append(
+                {
+                    "note_id": r.note_id,
+                    "canonical_url": r.canonical_url,
+                    "content_type": r.content_type,
+                    "title": r.title,
+                    "published_at": r.published_at,
+                    "published_date": r.published_date,
+                    "like_count": r.like_count,
+                    "comment_count": r.comment_count,
+                    "hashtags": hashtags,
+                    "cover_url": r.cover_url,
+                    "author_id": r.author_id,
+                    "author_name": r.author_name,
+                    "author_followers": r.author_followers,
+                    "analysis_task_id": r.analysis_task_id,
+                    "analysis_status": r.analysis_status,
+                    "error_message": r.error_message,
+                }
+            )
+        return out
 
 
 def update_subscription_cursor(
@@ -445,6 +1059,27 @@ def update_subscription_cursor(
             row.consecutive_failures = (row.consecutive_failures or 0) + 1
             if row.consecutive_failures >= 3:
                 row.status = "error"
+        row.updated_at = datetime.utcnow()
+
+
+def update_follow_pull_cursor(
+    subscription_id: str,
+    *,
+    note_offset: int,
+    pull_done: bool = False,
+    reset: bool = False,
+) -> None:
+    """更新收藏夹→关注候选的笔记扫描 cursor。"""
+    with session_scope() as db:
+        row = db.get(Subscription, subscription_id)
+        if not row:
+            return
+        if reset:
+            row.follow_pull_note_offset = 0
+            row.follow_pull_done = False
+        else:
+            row.follow_pull_note_offset = max(0, int(note_offset or 0))
+            row.follow_pull_done = bool(pull_done)
         row.updated_at = datetime.utcnow()
 
 
@@ -501,6 +1136,16 @@ def _digest_to_dict(row: CreatorDigest) -> Dict[str, Any]:
 def get_digest(digest_id: str) -> Optional[Dict[str, Any]]:
     with session_scope() as db:
         row = db.get(CreatorDigest, digest_id)
+        if not row:
+            return None
+        return _digest_to_dict(row)
+
+
+def get_digest_by_sync_run_id(sync_run_id: str) -> Optional[Dict[str, Any]]:
+    with session_scope() as db:
+        row = db.execute(
+            select(CreatorDigest).where(CreatorDigest.sync_run_id == sync_run_id)
+        ).scalar_one_or_none()
         if not row:
             return None
         return _digest_to_dict(row)
