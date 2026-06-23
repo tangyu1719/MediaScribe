@@ -84,7 +84,12 @@ backend/append_spa.py
 # ── 设计 / 规划文档（不入库，仅本地） ──
 /SPEC.md
 /PLAN.md
+/DESIGN.md
+/METHOD_MAPPING.md
 /docs/
+/memory_mechanism_resume*.md
+/面经*.md
+/reports/
 
 # ── 开发/探测脚本（非运行时依赖） ──
 backend/scripts/
