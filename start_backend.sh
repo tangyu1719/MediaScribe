@@ -9,9 +9,14 @@ REDIS_CONF="${REDIS_DIR}/redis.windows.conf"
 REDIS_PORT="${SBA_REDIS_PORT:-6379}"
 BACKEND_PORT="${SBA_BACKEND_PORT:-8000}"
 
-export PYTHONPATH="${ROOT}/backend:${ROOT}/../src/agent:${PYTHONPATH:-}"
-export SBA_KB_DIR="${ROOT}/../src/agent/knowledge_base"
-export SBA_AGENT_CONFIG="${ROOT}/../src/agent/config.json"
+if [[ -f "${ROOT}/src/agent/kb_manager_fast.py" ]]; then
+  AGENT_ROOT="${ROOT}/src/agent"
+else
+  AGENT_ROOT="${ROOT}/../src/agent"
+fi
+export PYTHONPATH="${ROOT}/backend:${AGENT_ROOT}:${PYTHONPATH:-}"
+export SBA_KB_DIR="${AGENT_ROOT}/knowledge_base"
+export SBA_AGENT_CONFIG="${AGENT_ROOT}/config.json"
 export CHAT_USE_LANGGRAPH=1
 
 echo "============================================"

@@ -8,11 +8,19 @@ echo   后端服务启动
 echo ============================================
 echo.
 
-set "PYTHONPATH=%~dp0backend;%~dp0..\src\agent;%PYTHONPATH%"
-rem 固定知识库登记目录，避免误读 web_rebuild_v2\src\agent 空桩
-set "SBA_KB_DIR=%~dp0..\src\agent\knowledge_base"
-rem 问答/编排 LLM 配置：固定指向原项目 src/agent/config.json（勿删此文件）
-set "SBA_AGENT_CONFIG=%~dp0..\src\agent\config.json"
+rem 优先本仓库 src/agent（MediaScribe 独立克隆）；否则回退上级 monorepo
+if exist "%~dp0src\agent\kb_manager_fast.py" (
+    set "AGENT_ROOT=%~dp0src\agent"
+) else (
+    set "AGENT_ROOT=%~dp0..\src\agent"
+)
+set "PYTHONPATH=%~dp0backend;%AGENT_ROOT%;%PYTHONPATH%"
+set "SBA_KB_DIR=%AGENT_ROOT%\knowledge_base"
+if exist "%AGENT_ROOT%\config.json" (
+    set "SBA_AGENT_CONFIG=%AGENT_ROOT%\config.json"
+) else (
+    set "SBA_AGENT_CONFIG=%AGENT_ROOT%\config.json"
+)
 rem 必须开启 LangGraph 编排（Query改写/粒度对齐/ReAct handoff）；勿在系统环境里设 CHAT_USE_LANGGRAPH=0
 set "CHAT_USE_LANGGRAPH=1"
 

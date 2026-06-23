@@ -8,9 +8,9 @@
 services:
   web:
     build:
-      context: ..
-      dockerfile: web_rebuild_v2/Dockerfile
-    image: superbizagent-web:latest
+      context: .
+      dockerfile: Dockerfile
+    image: mediscribe-web:latest
     ports:
       - "8000:8000"
     extra_hosts:

@@ -1,6 +1,14 @@
-# Web Rebuild V2 — 多模态文档化助手平台
+# MediaScribe Web — 多模态文档化与 RAG 问答平台
 
-FastAPI 后端 + 原生 HTML/Vue SPA 前端，覆盖链接文档化、任务编排、AI 问答、文档处理、Redis 缓存、Agent 配置、OPS 运维七大功能模块。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-0.100+-green.svg" alt="FastAPI">
+  <img src="https://img.shields.io/badge/RAG-Milvus%2BBGE-orange.svg" alt="RAG">
+</p>
+
+FastAPI 后端 + 原生 HTML/Vue SPA 前端，覆盖链接文档化、任务编排、AI 问答（LangGraph）、知识库 RAG、订阅同步与 OPS 运维。
+
+> **完整部署、模型下载与密钥配置**请参阅 **[DEPLOYMENT.md](./DEPLOYMENT.md)**（含 BGE 向量模型、Milvus、Docker、密钥脱敏说明）。
 
 ## 目录
 
@@ -11,36 +19,60 @@ FastAPI 后端 + 原生 HTML/Vue SPA 前端，覆盖链接文档化、任务编�
 - [Milvus 向量库](#milvus-向量库)
 - [Docker 部署](#docker-部署)
 - [数据库](#数据库)
+- [安全与密钥](#安全与密钥)
 - [分支策略](#分支策略)
 
 ## 快速开始
 
+```bash
+git clone https://github.com/tangyu1719/MediaScribe.git
+cd MediaScribe
+```
+
 ### 1. 安装依赖
 
 ```bash
-cd web_rebuild_v2/backend
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
+pip install sentence-transformers torch   # RAG 向量模型所需
 ```
 
-### 2. 启动后端
+### 2. 配置 LLM（勿提交真实 Key）
 
-**Windows：**
 ```bash
-start_backend.bat
+copy src\agent\config.json.example src\agent\config.json   # Windows
+# cp src/agent/config.json.example src/agent/config.json   # Linux/macOS
 ```
 
-**Linux/macOS：**
+编辑 `src/agent/config.json` 填入火山方舟 API Key 与 endpoint id，或使用 `.env`（见 [DEPLOYMENT.md](./DEPLOYMENT.md)）。
+
+### 3. 启动 Milvus（RAG 需要）
+
 ```bash
-bash start_backend.sh
+docker compose -f docker-compose.milvus.yml up -d
 ```
+
+### 4. 下载 BGE 模型（首次 RAG）
+
+```bash
+set HF_ENDPOINT=https://hf-mirror.com
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-large-zh-v1.5', cache_folder='src/agent/knowledge_base/models')"
+```
+
+详见 [DEPLOYMENT.md §6](./DEPLOYMENT.md#6-bge-向量模型下载)。
+
+### 5. 启动后端
+
+**Windows：** `start_backend.bat`  
+**Linux/macOS：** `bash start_backend.sh`
 
 **手动启动：**
+
 ```bash
-cd web_rebuild_v2/backend
+cd backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3. 访问前端
+### 6. 访问前端
 
 浏览器打开 `http://127.0.0.1:8000/`
 
@@ -102,56 +134,39 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `LLM_MODEL_REASON` | — | 摘要/推理 endpoint id（写入 `gateway_task_type_route.summary`） |
 | `SBA_AGENT_CONFIG` | 自动 | LLM 配置 JSON 路径；容器内由 entrypoint 生成 `/app/runtime/agent/config.json` |
 
-本地开发仍可直接编辑上级 `src/agent/config.json`（`start_backend.bat` 已通过 `SBA_AGENT_CONFIG` 指向该文件）。
+本地开发仍可直接编辑 `src/agent/config.json`（`start_backend.bat` 会优先使用本仓库 `src/agent/config.json`）。
 
 ## Docker 部署
 
+完整步骤见 [DEPLOYMENT.md §10](./DEPLOYMENT.md#10-docker-部署)。
+
 ### 环境变量存在哪？
 
-`docker-compose.yml` 里的 `${VOLC_API_KEY}` **不是写死在镜像里**，而是在**服务器运行时**注入，常见三种来源（优先级：compose `environment` > 宿主机 export > `.env` 文件）：
+`docker-compose.yml` 里的 `${VOLC_API_KEY}` **不是写死在镜像里**，而是在**服务器运行时**注入：
 
-1. **服务器上的 `.env` 文件**（与 `docker-compose.yml` 同目录，已 gitignore，仅运维持有）
-2. **宿主机系统环境变量**（如 systemd `Environment=`、K8s Secret 挂载为 env）
-3. **CI/CD Secret**（构建时不传入，部署阶段注入）
+1. **服务器上的 `.env` 文件**（与 `docker-compose.yml` 同目录，已 gitignore）
+2. **宿主机系统环境变量**
+3. **CI/CD Secret**
 
-镜像内只有 `docker/config.template.json`（**无密钥**）；容器启动时 `docker/entrypoint.sh` 把 `VOLC_API_KEY` 等写入卷 `sba_runtime_config` 下的 `config.json`，再设置 `SBA_AGENT_CONFIG`。
+镜像内只有 `docker/config.template.json`（**无密钥**）；`docker/entrypoint.sh` 把环境变量写入运行时 `config.json`。
 
 ### 快速启动
 
 ```bash
-# 1. Milvus（可选，RAG 需要）
-cd web_rebuild_v2
 docker compose -f docker-compose.milvus.yml up -d
-
-# 2. 配置密钥（仅服务器，勿提交 git）
 cp .env.example .env
-# 编辑 .env：VOLC_API_KEY=...
-
-# 3. 构建并启动 Web（构建上下文为仓库根目录）
+# 编辑 .env：VOLC_API_KEY=你的密钥（勿提交 git）
 docker compose up -d --build
 ```
 
 访问：`http://<服务器IP>:8000/`
 
-### Dockerfile 写什么？（`web_rebuild_v2/Dockerfile`）
+### 构建镜像
 
-| 区块 | 内容 | 是否含密钥 |
-|------|------|------------|
-| **基础镜像** | `python:3.11-slim` | 否 |
-| **ENV** | `PYTHONUNBUFFERED`、`SBA_AGENT_CONFIG` 路径、`CHAT_USE_LANGGRAPH` | 否 |
-| **apt** | `curl`（健康检查）、`ffmpeg`（视频链路，可按需删） | 否 |
-| **pip** | `backend/requirements.txt` + `volcengine-python-sdk[ark]` | 否 |
-| **COPY** | `backend/app`、`frontend`、`src/agent`、**config 模板** | 否（不含真实 `config.json`） |
-| **禁止** | `ARG/ENV VOLC_API_KEY`、`COPY config.json`、把 `.env` 打进镜像 | — |
-| **ENTRYPOINT** | `docker/entrypoint.sh` — 启动时用 env 生成 runtime config | 运行时注入 |
-| **CMD** | `uvicorn app.main:app --app-dir /app/backend` | 否 |
-| **HEALTHCHECK** | `GET /api/vector/health` | 否 |
-| **USER** | 非 root `appuser` | 否 |
-
-构建命令（**必须在仓库根 `SuperBizAgent-AgentFramework/`** 执行，否则 COPY 不到 `src/agent`）：
+在**仓库根目录**执行：
 
 ```bash
-docker build -f web_rebuild_v2/Dockerfile -t superbizagent-web:latest .
+docker build -t mediscribe-web:latest .
 ```
 
 ### compose 环境变量与 config.json 映射
@@ -163,12 +178,12 @@ docker build -f web_rebuild_v2/Dockerfile -t superbizagent-web:latest .
 | `LLM_MODEL_QA` | `ai_chat_model`、`gateway_task_type_route.qa` |
 | `LLM_MODEL_REASON` | `gateway_task_type_route.summary` |
 
-示例（`.env`）：
+示例（`.env`，**请替换为自己的值**）：
 
 ```env
-VOLC_API_KEY=sk-xxxxxxxx
-LLM_MODEL_QA=ep-20260418230009-b9grz
-LLM_MODEL_REASON=ep-20260413220727-84n92
+VOLC_API_KEY=你的方舟-API-Key
+LLM_MODEL_QA=ep-你的问答接入点ID
+LLM_MODEL_REASON=ep-你的摘要接入点ID
 MILVUS_HOST=host.docker.internal
 SBA_DATABASE_URL=mysql+pymysql://user:pass@db:3306/superbizagent?charset=utf8mb4
 ```
@@ -185,52 +200,30 @@ volumes:
 ## 项目结构
 
 ```
-web_rebuild_v2/
+MediaScribe/                   # 仓库根（clone 后即此目录）
 ├── backend/
-│   ├── app/
-│   │   ├── auth/              # RBAC 认证模块
-│   │   │   ├── casbin_model.conf
-│   │   │   ├── enforcer.py
-│   │   │   ├── auth_models.py
-│   │   │   ├── user_service.py
-│   │   │   ├── verify_code_service.py
-│   │   │   ├── dependencies.py
-│   │   │   ├── middleware.py
-│   │   │   ├── auth_router.py
-│   │   │   └── init_admin.py
-│   │   ├── services/          # 业务服务
-│   │   │   ├── ai_chat.py
-│   │   │   ├── video_pipeline.py
-│   │   │   ├── cache.py
-│   │   │   ├── workflow.py
-│   │   │   └── ...
-│   │   ├── main.py            # FastAPI 应用入口
-│   │   ├── models.py
-│   │   └── platforms.py
+│   ├── app/                   # FastAPI 应用
 │   └── requirements.txt
-├── frontend/
-│   ├── login.html             # 独立登录页
-│   ├── index.html             # SPA 主页面
-│   └── assets/
-│       ├── css/app.css
-│       └── js/app.js
-├── docker-compose.yml         # Web 应用栈（密钥走 .env）
-├── docker-compose.milvus.yml
-├── Dockerfile                 # 生产镜像（无密钥）
+├── frontend/                  # SPA 静态资源
+├── src/agent/                 # Agent 核心 + 运行时（config.json 不入库）
+│   ├── config.json.example    # LLM 配置模板（无密钥）
+│   └── knowledge_base/        # 知识库与 BGE 模型缓存
 ├── docker/
-│   ├── entrypoint.sh          # 启动时用 env 生成 config.json
-│   └── config.template.json   # 无密钥模板
+│   ├── entrypoint.sh
+│   └── config.template.json
+├── docker-compose.yml
+├── docker-compose.milvus.yml
+├── Dockerfile
 ├── start_backend.bat
 ├── start_backend.sh
-├── .gitignore
 ├── .env.example
+├── DEPLOYMENT.md              # 部署与模型下载详细说明
 └── README.md
 ```
 
 ## Milvus 向量库
 
 ```bash
-cd web_rebuild_v2
 docker compose -f docker-compose.milvus.yml up -d
 ```
 
@@ -244,6 +237,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_milvus_watch.ps1 -Reset
 ```
 
 脚本会清空三卷、重建栈、等待健康检查，并持续监测 60 秒日志。重建后需在 RAG 页重新入库/同步切片。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_milvus_watch.ps1 -Reset
+```
+
+## 安全与密钥
+
+| 文件 | 是否入库 | 说明 |
+|------|----------|------|
+| `.env` | 否（gitignore） | Docker/生产环境注入 `VOLC_API_KEY` 等 |
+| `src/agent/config.json` | 否（gitignore） | 本地开发 LLM 配置 |
+| `src/agent/config.json.example` | 是 | 仅含空字段模板 |
+| `docker/config.template.json` | 是 | 无密钥的运行时模板 |
+| `ai_chat_config.json` | 否 | 私有机密配置 |
+
+**禁止**将真实 API Key、飞书 Secret、Cookie、JWT 密钥提交到 Git。若误提交，请立即在控制台轮换密钥并清理 Git 历史。
 
 ## 数据库
 

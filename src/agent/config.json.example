@@ -1,0 +1,19 @@
+{
+  "volcengine_api_key": "",
+  "volcengine_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "gateway_provider": "ark",
+  "gateway_route_mode": "priority",
+  "ai_chat_model": "",
+  "ai_chat_model_backup": "",
+  "gateway_task_type_route": {
+    "summary": "",
+    "qa": "",
+    "ops": "",
+    "code": ""
+  },
+  "api_gateway_nodes": [],
+  "feishu_app_id": "",
+  "feishu_app_secret": "",
+  "feishu_sync_enabled": false,
+  "langchain_standard_enabled": true
+}

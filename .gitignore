@@ -2,6 +2,7 @@
 .env
 *.env
 !.env.example
+!src/agent/config.json.example
 
 # ── 音频上传缓存 ──
 audio_uploads/
@@ -9,9 +10,17 @@ audio_uploads/
 # ── 运行时产物 ──
 output/
 logs/
+dump.rdb
 *.sqlite3
 *.sqlite3-journal
 *.sqlite3-wal
+src/agent/history.json
+src/agent/task_state.db
+src/agent/pipeline_logs/
+src/agent/config.json
+src/agent/knowledge_base/file_cache_fast.json
+src/agent/knowledge_base/file_records.json
+src/agent/knowledge_base/models/
 
 # ── AI 模型缓存 ──
 *.pkl
