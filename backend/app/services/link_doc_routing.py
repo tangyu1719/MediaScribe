@@ -138,7 +138,7 @@ async def enqueue_link_pipeline_from_chat(
             "count": count if read_comments else 10,
             "sort": sort,
         }
-        tid, reused = reuse_or_enqueue_task(
+        tid, reused, _ = reuse_or_enqueue_task(
             plat,
             url,
             user_prompt=(user_prompt or "")[:500],

@@ -120,6 +120,28 @@ def assert_thought_step_json_schema(events: List[Tuple[str, dict]], min_steps: i
     return json_steps
 
 
+def assert_step_think_multi_delta(events: List[Tuple[str, dict]], min_deltas: int = 2) -> None:
+    """编排/LLM 步骤须有多条 step_think_delta，禁止整段一次性填充。"""
+    deltas = [d for ev, d in events if ev == "step_think_delta" and str(d.get("content") or "")]
+    assert len(deltas) >= min_deltas, (
+        f"step_think_delta 仅 {len(deltas)} 条，期望 >= {min_deltas}（须流式分片）"
+    )
+    max_len = max(len(str(d.get("content") or "")) for d in deltas)
+    assert max_len <= 48, f"单条 step_think_delta 过长({max_len})，疑似未分片流式推送"
+
+
+def assert_answer_streaming(events: List[Tuple[str, dict]]) -> None:
+    """最终回答须有 answer_delta，且不得全部为 replay 大块。"""
+    deltas = [(ev, d) for ev, d in events if ev == "answer_delta"]
+    assert deltas, "缺少 answer_delta"
+    tokenish = [
+        d for ev, d in deltas
+        if str(d.get("stream_mode") or "token") != "replay"
+        or len(str(d.get("content") or "")) <= 64
+    ]
+    assert tokenish, "answer_delta 全部为 replay 大块，缺少 token 流式"
+
+
 def assert_task_completed(events: List[Tuple[str, dict]]) -> dict:
     completed = next((d for ev, d in events if ev == "task_completed"), None)
     assert completed is not None, "缺少 task_completed"

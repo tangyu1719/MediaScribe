@@ -1,0 +1,55 @@
+{
+  "name": "TOBE-RAG-RUBRIC-v1",
+  "version": "1.0.0",
+  "scale": "0-1",
+  "description": "LLM Judge 五维 RUBRIC；离线由 qwen-plus 裁判，人工每月校准 40 条",
+  "dimensions": [
+    {
+      "id": "faithfulness",
+      "name": "忠实度",
+      "weight": 0.28,
+      "min_score": 0.82,
+      "prompt_hint": "答案每条结论是否可在检索片段中找到依据"
+    },
+    {
+      "id": "correctness",
+      "name": "正确性",
+      "weight": 0.24,
+      "min_score": 0.80,
+      "prompt_hint": "与金标 ground_truth 事实一致，无编造配置项"
+    },
+    {
+      "id": "completeness",
+      "name": "完整性",
+      "weight": 0.20,
+      "min_score": 0.75,
+      "prompt_hint": "覆盖用户问题核心步骤/菜单路径"
+    },
+    {
+      "id": "attribution",
+      "name": "引用充分性",
+      "weight": 0.16,
+      "min_score": 0.78,
+      "prompt_hint": "关键结论均带 [DocX] 且与片段对应"
+    },
+    {
+      "id": "fluency",
+      "name": "可读性",
+      "weight": 0.12,
+      "min_score": 0.70,
+      "prompt_hint": "运维人员可快速执行，无冗长套话"
+    }
+  ],
+  "pass_thresholds": {
+    "faithfulness": 0.82,
+    "correctness": 0.80,
+    "completeness": 0.75,
+    "attribution": 0.78,
+    "fluency": 0.70
+  },
+  "aggregate_pass_min": 0.80,
+  "judge_model": "qwen-plus",
+  "multi_judge_vote": 2,
+  "human_calibration_monthly": 20,
+  "gold_set_size": 108
+}

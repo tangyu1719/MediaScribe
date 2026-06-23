@@ -166,6 +166,12 @@ _CHAT_BASE_FALLBACK = (
     "角色、语气、工具范围与禁止项以 agent.md 为准；用户领域与偏好以 user.md 为准。"
     "未发生真实工具调用时不得编造工具名、参数或执行结果。"
 )
+_CHAT_RUNTIME_FACTS = (
+    "【产品运行事实，须如实告知，禁止编造相反结论】"
+    "Web 问答为 POST /api/chat/stream 的 SSE（text/event-stream）；"
+    "前端用 fetch + ReadableStream 解析 answer_delta 等事件并打字机渲染。"
+    "不得向用户声称本系统是一次性 POST 非流式、未启用 SSE 或未实现前端流式。"
+)
 
 
 def resolve_chat_base_system(cfg: Dict[str, Any]) -> str:
@@ -244,9 +250,10 @@ def assemble_chat_system_prompt(
         doc_chunks.append(f"## 文件：user.md（用户画像）\n\n{user_md}")
     if (agent_md or "").strip():
         doc_chunks.append(f"## 文件：agent.md（Agent 个性化）\n\n{agent_md.strip()}")
-    if not doc_chunks:
-        return base_system
-    return base_system + "\n\n---\n\n" + "\n\n---\n\n".join(doc_chunks)
+    parts = [base_system, _CHAT_RUNTIME_FACTS]
+    if doc_chunks:
+        parts.append("\n\n---\n\n".join(doc_chunks))
+    return "\n\n---\n\n".join(parts)
 
 
 from .chat_session_store import (
@@ -648,6 +655,33 @@ async def _async_iter_llm_token_stream(
                 yield piece
 
 
+async def _yield_step_output_delta_chunks(
+    trace_id: str,
+    task_id: Optional[str],
+    step_id: str,
+    output_text: str,
+    *,
+    phase: str = "tool",
+    chunk_size: int = 24,
+):
+    """任务步骤 output_text 分片 SSE，供前端逐步填充结果区。"""
+    text = output_text or ""
+    if not text:
+        return
+    for i in range(0, len(text), max(1, chunk_size)):
+        yield _sse(
+            "step_output_delta",
+            {
+                "trace_id": trace_id,
+                "task_id": task_id or "",
+                "step_id": step_id,
+                "content": text[i : i + chunk_size],
+                "phase": phase,
+                "step_lane": "execution",
+            },
+        )
+
+
 async def _yield_answer_replay_delta(
     trace_id: str,
     task_id: Optional[str],
@@ -732,6 +766,8 @@ _REACT_STEP_SYSTEM: Dict[str, str] = {
         "用户追问或恢复先前 task_id → 必须 continue_main，禁止 simple；"
         "用户明确要求查知识库/Milvus/内部文档 → needs_rag=true，needs_web_search=false；"
         "查工具清单/SKILL/MCP 说明 → needs_rag=false，needs_web_search=false（走工具目录，非联网）。"
+        "询问 SSE/流式输出/为何不是逐字显示等产品架构 → mode 可为 simple，但须基于真实 SSE 架构回答，"
+        "禁止声称系统为一次性 POST 非流式或未实现前端流式。"
         "needs_web_search 仅当用户已开启联网开关且任务确实需要公开网页资料时为 true。"
         "禁止在正文输出 <|FunctionCallBegin|> 或编造工具调用；本步不做内部术语映射。"
         "仅输出一行 JSON："
@@ -1001,7 +1037,14 @@ def _is_simple_intent(q: str) -> bool:
         return True
 
     # 续接/恢复/进度追问：不得在未判归属前标 simple（如「继续」「那你继续做啊」）
-    if _looks_like_task_resume(m) or _looks_like_task_status_inquiry(m):
+    if _looks_like_task_resume(m) or _looks_like_task_status_inquiry(m) or _looks_like_task_recall(m):
+        return False
+    # 窗口已有主任务时追问「当前任务是啥/执行到哪」：必须走延续主任务，禁止 simple
+    task_recall_hints = (
+        "当前任务", "当前的任务", "任务是啥", "任务是什么", "什么任务", "哪个任务",
+        "执行到哪", "进行到哪", "做到哪", "忘了", "忘记了", "啥来着",
+    )
+    if any(h in m for h in task_recall_hints):
         return False
     if any(h in m for h in _CONTINUE_HINTS):
         return False
@@ -1729,6 +1772,7 @@ async def chat_stream_v2(
                         error_message=str(ex)[:400],
                         stage="ReAct 推理",
                         user_message=message,
+                        trace_id=trace_id,
                     )
                     yield _sse("step_think_delta", {
                         "trace_id": trace_id, "step_id": span_step["step_id"],
@@ -2610,6 +2654,7 @@ async def chat_stream_v2(
                             error_message=str(e)[:500],
                             stage="MCP 工具链",
                             user_message=message,
+                            trace_id=trace_id,
                         )
                         break
 
@@ -2649,6 +2694,25 @@ async def chat_stream_v2(
                             react_round_idx += 1
                             tool_sub_plan_id, tool_sub_index = _alloc_step_group()
                             react_step_id = _new_id("step_")
+                            from .tool_invoke_qualifier import (
+                                attach_invoke_to_payload,
+                                format_tool_action_label,
+                                resolve_react_invoke_mode,
+                                resolve_tool_source,
+                            )
+
+                            _tool_source = resolve_tool_source(fn, tools_meta)
+                            tool_call_label = format_tool_action_label(fn, _tool_source)
+                            _tool_query_hint = str(
+                                args.get("query") or args.get("q") or ""
+                            ).strip()
+                            _react_invoke_mode = resolve_react_invoke_mode(
+                                tool_name=fn,
+                                rag_prefetch_done=_rag_prefetch_done_flag,
+                                rag_slice_count=_rag_slice_count,
+                                react_round=react_round_idx,
+                                seen_tools=react_tools_seen,
+                            )
                             yield _sse(
                                 "execution_round_start",
                                 {
@@ -2687,7 +2751,7 @@ async def chat_stream_v2(
                                     session_id=session_id,
                                     tool_name=fn,
                                     tool_args=args,
-                                    step_name=f"MCP 工具: {fn}",
+                                    step_name=tool_call_label,
                                     react_round=react_round_idx,
                                     sub_plan_id=tool_sub_plan_id,
                                     phase="tool",
@@ -2696,22 +2760,6 @@ async def chat_stream_v2(
                                 else None
                             )
                             step_id_tool = span_handle.step_id if span_handle else _new_id("step_")
-                            from .tool_invoke_qualifier import (
-                                attach_invoke_to_payload,
-                                resolve_react_invoke_mode,
-                            )
-
-                            tool_call_label = f"调用 {fn}"
-                            _tool_query_hint = str(
-                                args.get("query") or args.get("q") or ""
-                            ).strip()
-                            _react_invoke_mode = resolve_react_invoke_mode(
-                                tool_name=fn,
-                                rag_prefetch_done=_rag_prefetch_done_flag,
-                                rag_slice_count=_rag_slice_count,
-                                react_round=react_round_idx,
-                                seen_tools=react_tools_seen,
-                            )
                             _tool_invoke = attach_invoke_to_payload(
                                 {
                                     "trace_id": trace_id,
@@ -2739,6 +2787,8 @@ async def chat_stream_v2(
                                 mode=_react_invoke_mode,
                                 tool_name=fn,
                                 query=_tool_query_hint,
+                                tool_source=_tool_source,
+                                tools_meta=tools_meta,
                             )
                             yield _sse("thought_step_start", _tool_invoke)
                             tool_obj = by_name.get(fn)
@@ -2992,6 +3042,14 @@ async def chat_stream_v2(
                                 tool_payload=tool_payload,
                                 react_round=react_round_idx,
                             )
+                            async for _out_ev in _yield_step_output_delta_chunks(
+                                trace_id,
+                                task_id,
+                                step_id_tool,
+                                out_s,
+                                phase="tool",
+                            ):
+                                yield _out_ev
                             yield _sse(
                                 "thought_step_end",
                                 attach_invoke_to_payload(
@@ -3026,6 +3084,8 @@ async def chat_stream_v2(
                                     mode=_react_invoke_mode,
                                     tool_name=fn,
                                     query=_tool_query_hint,
+                                    tool_source=_tool_source,
+                                    tools_meta=tools_meta,
                                 ),
                             )
                             react_tools_seen.add(fn)
@@ -3034,7 +3094,7 @@ async def chat_stream_v2(
                                 {
                                     "task_id": task_id,
                                     "step_id": step_id_tool,
-                                    "step_name": f"MCP:{fn}",
+                                    "step_name": tool_call_label,
                                     "elapsed_ms": cost_tool,
                                     "status": "completed",
                                     "parent_status": PARENT_EXECUTING,
@@ -3163,6 +3223,7 @@ async def chat_stream_v2(
                 error_message=str(e)[:500],
                 stage="LLM 调用",
                 user_message=message,
+                trace_id=trace_id,
             )
     else:
         missing = []

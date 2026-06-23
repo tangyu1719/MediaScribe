@@ -7,6 +7,63 @@
 
   var RECENT_KEY = "sba_reader_recent";
   var RECENT_MAX = 40;
+  var MD_RETURN_KEY = "sba_md_return_ctx";
+  var MD_RESTORE_KEY = "sba_md_restore_pending";
+
+  function captureMdReturnContext(fromPage, extra) {
+    var scrollEl = document.querySelector(".p-60");
+    var scrollY = scrollEl ? scrollEl.scrollTop : global.scrollY || 0;
+    var ctx = {
+      from: fromPage || "video",
+      returnUrl: global.location.pathname + global.location.search,
+      scrollY: scrollY,
+      scrollTarget: scrollEl ? ".p-60" : "window",
+      taskQueuePage: extra && extra.taskQueuePage != null ? extra.taskQueuePage : null,
+      taskQueueViewMode: extra && extra.taskQueueViewMode ? extra.taskQueueViewMode : "",
+      taskId: extra && extra.taskId ? String(extra.taskId) : "",
+      subLinkPage: extra && extra.subLinkPage != null ? extra.subLinkPage : null,
+      ts: Date.now(),
+    };
+    try {
+      global.sessionStorage.setItem(MD_RETURN_KEY, JSON.stringify(ctx));
+    } catch (_) {}
+    return ctx;
+  }
+
+  /** 跳转至独立 MD 阅读页（非内嵌 overlay） */
+  function navigateToMdPreview(fileName, preset, ctxExtra) {
+    var name = String(fileName || "").trim();
+    if (!name) return null;
+    var extra = ctxExtra || {};
+    captureMdReturnContext(extra.from || "video", extra);
+    var presetQ = preset ? "&preset=" + encodeURIComponent(preset) : "&preset=split";
+    var fromQ = "&from=" + encodeURIComponent(extra.from || "video");
+    var url = "/preview/md.html?file=" + encodeURIComponent(name) + presetQ + fromQ;
+    recordRecentOpen(name, extra.mtime, extra.opened_at || Date.now());
+    global.location.assign(url);
+    return url;
+  }
+
+  function openPreviewUrl(url) {
+    if (!url) return null;
+    global.location.assign(url);
+    return global;
+  }
+
+  function mdPreviewGoBack() {
+    var ctx = null;
+    try {
+      ctx = JSON.parse(global.sessionStorage.getItem(MD_RETURN_KEY) || "null");
+    } catch (_) {}
+    try {
+      global.sessionStorage.setItem(MD_RESTORE_KEY, JSON.stringify(ctx || {}));
+    } catch (_) {}
+    var params = new URLSearchParams(global.location.search);
+    var from = (ctx && ctx.from) || params.get("from") || "video";
+    var target = (ctx && ctx.returnUrl) || (from === "reader" ? "/reader" : "/video");
+    if (!target.startsWith("/")) target = "/video";
+    global.location.assign(target);
+  }
 
   function authHeaders() {
     var h = { "Content-Type": "application/json" };
@@ -200,11 +257,6 @@
     return list;
   }
 
-  function openPreviewUrl(url) {
-    var winName = "sba_md_" + String(Date.now()) + "_" + Math.random().toString(36).slice(2, 8);
-    return global.open(url, winName, "noopener,noreferrer");
-  }
-
   function recordRecentOpen(fileName, mtime, openedAt) {
     var name = String(fileName || "").trim();
     if (!name) return;
@@ -222,20 +274,18 @@
     else fetchFileMtime(name).then(done);
   }
 
-  /** 与任务卡片 openTaskMd 相同：?file=basename&preset=split */
+  /** 与任务卡片 openTaskMd 相同：整页跳转 /preview/md.html */
   function openOutputMd(fileName, preset, entryExtra) {
     var name = String(fileName || "").trim();
     if (!name) return null;
-    var presetQ = preset ? "&preset=" + encodeURIComponent(preset) : "&preset=split";
-    var url = "/preview/md.html?file=" + encodeURIComponent(name) + presetQ;
     var extra = entryExtra || {};
-    recordRecentOpen(name, extra.mtime, extra.opened_at || Date.now());
-    return openPreviewUrl(url);
+    return navigateToMdPreview(name, preset || "split", extra);
   }
 
   /** 本地文件：先 POST 导入 output，再 ?file= 打开（与链接文档化产物一致） */
-  function openLocalFile(file, preset) {
+  function openLocalFile(file, preset, ctxExtra) {
     if (!file) return Promise.resolve(null);
+    var extra = ctxExtra || {};
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
       reader.onload = function () {
@@ -266,6 +316,7 @@
             var url = openOutputMd(saved, preset || "split", {
               mtime: mtime,
               opened_at: Date.now(),
+              from: extra.from || "reader",
             });
             resolve(url);
           })
@@ -292,6 +343,7 @@
           return openOutputMd(row.file, "split", {
             mtime: Number(d.mtime) || 0,
             opened_at: Date.now(),
+            from: "reader",
           });
         });
       })
@@ -348,8 +400,12 @@
     touchRecent: touchRecent,
     registerOpenedFile: registerOpenedFile,
     openOutputMd: openOutputMd,
+    navigateToMdPreview: navigateToMdPreview,
+    captureMdReturnContext: captureMdReturnContext,
+    mdPreviewGoBack: mdPreviewGoBack,
     openLocalFile: openLocalFile,
     openRecentItem: openRecentItem,
+    openPreviewUrl: openPreviewUrl,
     fmtRecentTime: fmtRecentTime,
   };
 })(typeof window !== "undefined" ? window : globalThis);

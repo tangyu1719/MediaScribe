@@ -11,9 +11,15 @@ from .scheduled_job_store import (
     create_run,
     finish_run,
     get_job,
+    get_run,
+    get_running_run_for_job,
     is_enabled,
+    is_run_cancel_requested,
+    list_active_run_cards,
     list_jobs,
     mark_job_run,
+    request_run_cancel,
+    update_run_live,
     upsert_job,
 )
 
@@ -156,40 +162,86 @@ def _summarize_result(job_key: str, result: Any) -> str:
     return str(result.get("error") or result.get("error_message") or "failed")[:500]
 
 
-async def execute_job(job_key: str, trigger: str = "scheduled") -> Dict[str, Any]:
+async def execute_job(
+    job_key: str,
+    trigger: str = "scheduled",
+    *,
+    retry_count: int = 0,
+    parent_run_id: str = "",
+) -> Dict[str, Any]:
     job = get_job(job_key)
     if not job:
         return {"ok": False, "error_code": "JOB_NOT_FOUND", "error": "任务不存在"}
     if not is_enabled():
         return {"ok": False, "error_code": "DB_UNAVAILABLE", "error": "SBA_DATABASE_URL 未配置"}
 
-    run_id = create_run(job_key, trigger)
+    existing = get_running_run_for_job(job_key)
+    if existing and trigger != "retry":
+        return {
+            "ok": False,
+            "error_code": "JOB_ALREADY_RUNNING",
+            "error": "该任务正在执行中",
+            "run_id": existing.get("run_id"),
+        }
+
+    run_id = create_run(job_key, trigger, retry_count=retry_count, parent_run_id=parent_run_id)
     started = time.time()
     result: Dict[str, Any] = {}
     status = "failed"
     err_msg = ""
+
+    def _progress(pct: int, stage: str) -> None:
+        update_run_live(run_id, progress=pct, stage=stage)
+
+    def _cancelled() -> bool:
+        return is_run_cancel_requested(run_id)
+
     try:
+        update_run_live(run_id, progress=3, stage="启动执行")
         if job_key == "creator_sync_all":
             from .creator_sync_runner import run_sync_all
 
-            result = await run_sync_all(trigger=trigger if trigger != "manual_test" else "manual")
-            status = "completed" if result.get("ok") else "failed"
-            if not result.get("ok"):
-                err_msg = str(result.get("error") or "sync_all_failed")
+            result = await run_sync_all(
+                trigger=trigger if trigger not in ("manual_test", "retry") else "manual",
+                progress_cb=_progress,
+                cancel_check=_cancelled,
+            )
+            if result.get("cancelled"):
+                status = "cancelled"
+                err_msg = "用户取消"
+            else:
+                status = "completed" if result.get("ok") else "failed"
+                if not result.get("ok"):
+                    err_msg = str(result.get("error") or "sync_all_failed")
         elif job_key == "favorites_sync_all":
             from .favorites_sync_runner import run_favorites_sync_all
 
-            result = await run_favorites_sync_all(trigger=trigger if trigger != "manual_test" else "manual")
-            status = "completed" if result.get("ok") else "failed"
-            if not result.get("ok"):
-                err_msg = str(result.get("error") or "favorites_sync_failed")
+            result = await run_favorites_sync_all(
+                trigger=trigger if trigger not in ("manual_test", "retry") else "manual",
+                progress_cb=_progress,
+                cancel_check=_cancelled,
+            )
+            if result.get("cancelled"):
+                status = "cancelled"
+                err_msg = "用户取消"
+            else:
+                status = "completed" if result.get("ok") else "failed"
+                if not result.get("ok"):
+                    err_msg = str(result.get("error") or "favorites_sync_failed")
         elif job_key == "rss_sync_all":
             from .rss_reader import sync_all_users_feeds
 
-            result = sync_all_users_feeds(trigger=trigger if trigger != "manual_test" else "manual")
-            status = "completed" if result.get("ok") else "failed"
-            if not result.get("ok"):
-                err_msg = str(result.get("error") or "rss_sync_failed")
+            _progress(8, "同步 RSS 源")
+            if _cancelled():
+                status = "cancelled"
+                err_msg = "用户取消"
+                result = {"ok": False, "cancelled": True}
+            else:
+                result = sync_all_users_feeds(trigger=trigger if trigger not in ("manual_test", "retry") else "manual")
+                _progress(92, "汇总 RSS 结果")
+                status = "completed" if result.get("ok") else "failed"
+                if not result.get("ok"):
+                    err_msg = str(result.get("error") or "rss_sync_failed")
         else:
             err_msg = f"未知任务类型: {job_key}"
             result = {"ok": False, "error": err_msg}
@@ -287,3 +339,35 @@ def api_update_job(job_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
 
 async def api_run_job(job_key: str, trigger: str = "manual_test") -> Dict[str, Any]:
     return await execute_job(job_key, trigger=trigger)
+
+
+def api_list_active_cards() -> Dict[str, Any]:
+    cards = list_active_run_cards()
+    running = sum(1 for c in cards if (c.get("status") or "") in ("running", "started", "in_progress"))
+    return {"ok": True, "cards": cards, "running_count": running}
+
+
+def api_cancel_run(run_id: str) -> Dict[str, Any]:
+    row = get_run(run_id)
+    if not row:
+        return {"ok": False, "error_code": "RUN_NOT_FOUND", "error": "执行记录不存在"}
+    if (row.get("status") or "") not in ("running", "started", "in_progress"):
+        return {"ok": False, "error_code": "NOT_RUNNING", "error": "任务未在运行中"}
+    ok = request_run_cancel(run_id)
+    return {"ok": ok, "run_id": run_id, "message": "已请求取消，将在当前步骤结束后停止"}
+
+
+async def api_retry_run(run_id: str) -> Dict[str, Any]:
+    row = get_run(run_id)
+    if not row:
+        return {"ok": False, "error_code": "RUN_NOT_FOUND", "error": "执行记录不存在"}
+    if (row.get("status") or "") not in ("failed", "cancelled"):
+        return {"ok": False, "error_code": "NOT_RETRYABLE", "error": "仅失败或已取消的任务可重试"}
+    job_key = row.get("job_key") or ""
+    retry_count = int(row.get("retry_count") or 0) + 1
+    return await execute_job(
+        job_key,
+        trigger="retry",
+        retry_count=retry_count,
+        parent_run_id=run_id,
+    )

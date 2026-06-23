@@ -44,15 +44,92 @@ def is_raw_technical_error(message: str) -> bool:
     return False
 
 
-def fallback_user_message(*, stage: str = "") -> str:
+def fallback_user_message(*, stage: str = "", trace_id: str = "", error_code: str = "") -> str:
     stage_cn = (stage or "任务处理").strip()
+    footer = _error_ref_footer(trace_id=trace_id, stage=stage, error_code=error_code)
     return (
         f"**{stage_cn}时遇到问题**\n\n"
         "系统未能完成本次请求，建议您：\n"
         "1. 稍后重试相同问题\n"
         "2. 简化或拆分问题后重新发送\n"
-        "3. 若反复出现，请联系管理员并说明操作步骤（无需提供技术报错原文）"
+        "3. 若反复出现，请重启后端后重试，并将下方参考编号提供给管理员\n"
+        f"{footer}"
     )
+
+
+def _error_ref_footer(*, trace_id: str = "", stage: str = "", error_code: str = "") -> str:
+    bits = []
+    if trace_id:
+        bits.append(f"trace={trace_id}")
+    if stage:
+        bits.append(f"阶段={stage}")
+    if error_code:
+        bits.append(f"内部码={error_code}")
+    if not bits:
+        return ""
+    return "\n\n---\n**参考编号（查日志用）**：" + " · ".join(bits)
+
+
+def known_internal_error_message(
+    *,
+    error_type: str,
+    error_message: str,
+    stage: str = "",
+    trace_id: str = "",
+) -> Optional[str]:
+    """
+    已知内部缺陷的确定性说明：跳过 LLM 转写，避免「内部变量未初始化」等空泛话术。
+    完整异常仍写入日志，此处仅输出可执行的用户说明。
+    """
+    et = (error_type or "").strip()
+    em = (error_message or "").strip()
+    low = em.lower()
+    stage_cn = (stage or "任务处理").strip()
+    footer = _error_ref_footer(trace_id=trace_id, stage=stage_cn, error_code="")
+
+    if et == "UnboundLocalError" and "task_id" in em:
+        footer = _error_ref_footer(trace_id=trace_id, stage=stage_cn, error_code="TASK_ID_UNBOUND")
+        return (
+            f"## 发生了什么\n"
+            f"{stage_cn}阶段，后端在同步「主任务 ID（task_id）」时触发了程序缺陷，任务被中断。"
+            "这不是您输入内容的问题。\n\n"
+            "## 可能原因\n"
+            "- 续接/追问先前主任务时，编排 handoff 到执行段的状态不完整\n"
+            "- 后端进程长时间未重启，仍在运行旧版代码\n\n"
+            "## 建议操作\n"
+            "1. **重启后端**（`start_backend.bat`）后重试同一会话\n"
+            "2. 仍失败则**新建会话**重新发起；续接时在消息中带上 `task_` 开头的任务 ID\n"
+            "3. 将下方参考编号提供给管理员，可在后端日志中检索 `chat_error_handler` 与完整堆栈\n"
+            f"{footer}"
+        )
+
+    if et in ("UnboundLocalError", "NameError") or "cannot access local variable" in low or "not associated with a value" in low:
+        footer = _error_ref_footer(trace_id=trace_id, stage=stage_cn, error_code="LOCAL_VAR_UNBOUND")
+        return (
+            f"## 发生了什么\n"
+            f"{stage_cn}阶段发生后端程序错误（局部变量未就绪），任务未能继续。\n\n"
+            "## 可能原因\n"
+            "- 特定编排分支（续接主任务 / HITL 恢复 / 工具链）未覆盖完整\n"
+            "- 后端代码版本与当前仓库不一致\n\n"
+            "## 建议操作\n"
+            "1. 重启后端后重试\n"
+            "2. 新建会话或简化问题后重发\n"
+            "3. 提供下方参考编号以便定位具体代码分支\n"
+            f"{footer}"
+        )
+
+    if et == "ImportError" or "No module named" in low:
+        footer = _error_ref_footer(trace_id=trace_id, stage=stage_cn, error_code="IMPORT_MISSING")
+        return (
+            f"## 发生了什么\n"
+            f"{stage_cn}阶段缺少必要的 Python 依赖模块，无法继续。\n\n"
+            "## 建议操作\n"
+            "1. 在 `backend` 目录执行依赖安装（如 `pip install -r requirements.txt`）\n"
+            "2. 若提示 langchain-mcp-adapters，按日志安装后重启后端\n"
+            f"{footer}"
+        )
+
+    return None
 
 
 async def llm_analyze_error_for_user(
@@ -62,8 +139,18 @@ async def llm_analyze_error_for_user(
     stage: str = "",
     user_message: str = "",
     context: Optional[Dict[str, Any]] = None,
+    trace_id: str = "",
 ) -> str:
     """调用 LLM 将内部异常转写为用户可读说明；失败时返回通用兜底文案（不含原始报错）。"""
+    known = known_internal_error_message(
+        error_type=error_type,
+        error_message=error_message,
+        stage=stage,
+        trace_id=trace_id,
+    )
+    if known:
+        return known
+
     from .ai_chat import load_chat_llm_config, resolve_chat_api_credentials
 
     cfg = load_chat_llm_config()
@@ -80,7 +167,7 @@ async def llm_analyze_error_for_user(
             stage,
             error_type,
         )
-        return fallback_user_message(stage=stage)
+        return fallback_user_message(stage=stage, trace_id=trace_id)
 
     ctx_bits = []
     if user_message:
@@ -145,7 +232,7 @@ async def llm_analyze_error_for_user(
             type(ex).__name__,
             str(ex)[:200],
         )
-    return fallback_user_message(stage=stage)
+    return fallback_user_message(stage=stage, trace_id=trace_id)
 
 
 async def _stream_text_as_answer(
@@ -249,9 +336,17 @@ async def stream_user_error_sse(
             stage=stage,
             user_message=user_message,
             context=context,
+            trace_id=trace_id,
         )
     else:
-        body = error_message or fallback_user_message(stage=stage)
+        body = error_message or fallback_user_message(stage=stage, trace_id=trace_id)
+
+    if need_llm and body and not body.strip().endswith(trace_id) and "参考编号" not in body:
+        body = body.rstrip() + _error_ref_footer(
+            trace_id=trace_id,
+            stage=stage,
+            error_code=error_type[:32] if error_type else "",
+        )
 
     async for line in _stream_text_as_answer(
         body,

@@ -1,0 +1,113 @@
+{
+  "name": "TOBE-WMS-RAG-EvalSets",
+  "version": "2026.06.3",
+  "description": "测试集规模与分层；金标/开发集正文由业务与数据治理标注，manifest 仅描述结构与数量",
+  "philosophy": "金标 100+ 条跨领域分层覆盖；开发池 1000+ 随文档治理与问题单沉淀；冒烟=模块数不计指标；Bad Case=人工反面教材+线上真实踩坑",
+  "sets": {
+    "gold_full": {
+      "path_env": "SBA_RAG_EVAL_DATASET",
+      "default_file": "gold_108.jsonl",
+      "count": 108,
+      "usage": "RegEval 发版门禁（108 条金标全量 RAG 评测）",
+      "runtime_per_case_sec": 8,
+      "runtime_total_minutes": 10,
+      "runtime_note": "单条 RAG 端到端约 8s；108 条约 14min 串行，2 路并发或批处理约 10min",
+      "track_metrics": true
+    },
+    "dev_pool": {
+      "path": "fixtures/datasets/dev_pool.jsonl",
+      "count_active": 320,
+      "count_cumulative": 1170,
+      "usage": "开发迭代：问题单+文档治理标注，累计 1000+，择优晋升金标",
+      "track_metrics": false
+    },
+    "smoke_module": {
+      "path": "fixtures/datasets/smoke_6.jsonl",
+      "count": 6,
+      "usage": "每业务模块 1 条连通性冒烟；不计入 RegEval 指标报表",
+      "runtime_seconds": 8,
+      "track_metrics": false
+    },
+    "bad_case_regression": {
+      "path": "fixtures/datasets/bad_cases_36.jsonl",
+      "count": 36,
+      "count_cumulative": 36,
+      "usage": "人工反面教材 + 实际使用踩坑，发版前回归禁止退化",
+      "source": "人工编写反面案例 + 线上真实问题复盘",
+      "track_metrics": true
+    },
+    "gate_only": {
+      "count": 28,
+      "usage": "GATE 规则单测，零 LLM 成本"
+    },
+    "human_calibration": {
+      "count": 20,
+      "usage": "每月从 108 金标中抽 20 条人工校准 LLM Judge",
+      "frequency": "monthly"
+    }
+  },
+  "gold_composition": {
+    "total": 108,
+    "by_domain": {
+      "业务领域-WMS运维": 58,
+      "开发领域-平台Agent": 32,
+      "跨域-问题单与Copilot": 18
+    },
+    "by_business_module": {
+      "极简上架/标准上架": 12,
+      "下架与转移": 10,
+      "盘点": 10,
+      "租户配置": 10,
+      "送货单与单据报表": 10,
+      "网络与设备故障": 6
+    },
+    "by_platform_module": {
+      "Agent编排与MCP工具": 10,
+      "RAG/知识库与切片": 8,
+      "权限租户与会话记忆": 6,
+      "OPS链路与Span": 4,
+      "Eval评测运维": 4
+    },
+    "by_cross_module": {
+      "问题单分类与模块映射": 10,
+      "多轮意图与Copilot小结": 8
+    },
+    "by_difficulty": {
+      "simple": 43,
+      "medium": 46,
+      "hard": 19
+    }
+  },
+  "dev_pool_composition": {
+    "count_cumulative": 1170,
+    "count_active": 320,
+    "by_source": {
+      "问题单-系统已处理含人工回复": 438,
+      "培训文档-入库前数据治理标注": 286,
+      "聊天记录-入库前数据治理标注": 198,
+      "业务文档-入库前数据治理标注": 162,
+      "开发边界与变体": 86
+    },
+    "governance_note": "文档导入知识库前的 chunk 校验、元数据标注阶段同步产出 Q-A 测试行，写入 dev_pool",
+    "promoted_to_gold": 108
+  },
+  "bad_case_composition": {
+    "count": 36,
+    "manual_negative_examples": 14,
+    "production_real_issues": 22,
+    "categories": {
+      "retrieval_miss": 8,
+      "wrong_module_route": 6,
+      "hallucination": 6,
+      "citation_missing": 4,
+      "multi_turn_drift": 4,
+      "tool_param_error": 4,
+      "反面教材-故意误导": 4
+    }
+  },
+  "online_sampling": {
+    "旁路比例": "8%",
+    "daily_sample_count": 9,
+    "人工复核_weekly": 12
+  }
+}

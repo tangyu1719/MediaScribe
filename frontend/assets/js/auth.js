@@ -11,8 +11,22 @@
     PUBLIC_PAGES: ['/login.html', '/register.html', '/forgot-password.html'],
     PUBLIC_API_PREFIXES: ['/api/auth/login', '/api/auth/register', '/api/auth/send-code', '/api/health', '/output/'],
     ADMIN_PAGES: ['iag', 'settings'],
-    REQUIRES_AUTH_PAGES: ['video', 'orch', 'chat', 'tasks', 'agpz', 'rag', 'multimodal', 'cache', 'ops', 'profile', 'settings']
+    REQUIRES_AUTH_PAGES: ['video', 'subscribe', 'sched', 'orch', 'chat', 'reader', 'tasks', 'agpz', 'rag', 'rss', 'multimodal', 'cache', 'ops', 'webreplay', 'profile', 'settings']
   };
+
+  function _spaPageFromPath(pathname) {
+    const p = String(pathname || '/').replace(/^\//, '').split('/')[0];
+    if (!p || p === 'index.html') return 'video';
+    if (p.endsWith('.html')) return p.replace(/\.html$/, '');
+    return p;
+  }
+
+  function redirectToLogin(nextPath) {
+    const next = nextPath || (window.location.pathname + window.location.search);
+    const safe = next && next.startsWith('/') && !next.startsWith('//') && next !== '/login.html';
+    const q = safe ? '?next=' + encodeURIComponent(next) : '';
+    window.location.replace('/login.html' + q);
+  }
 
   // ==================== 状态管理 ====================
   const AuthState = {
@@ -186,13 +200,16 @@
       if (response.status === 401) {
         AuthState.clearAuth();
         if (!isPublic && window.location.pathname !== '/login.html') {
-          window.location.href = '/login.html';
+          redirectToLogin();
         }
         throw new Error('登录已过期，请重新登录');
       }
 
-      // 处理 403 禁止访问
+      // 处理 403 禁止访问（未登录视同需重新认证）
       if (response.status === 403) {
+        if (!AuthState.isAuthenticated) {
+          redirectToLogin();
+        }
         throw new Error('没有权限执行此操作');
       }
 
@@ -272,23 +289,26 @@
       // 恢复登录状态
       AuthState.restore();
       
-      // 检查当前页面权限
       const currentPath = window.location.pathname;
-      const pageMatch = currentPath.match(/\/([^/]+)\.html?$/);
-      const currentPage = pageMatch ? pageMatch[1] : 'index';
+      const isLoginPage = currentPath === '/login.html' || currentPath.endsWith('/login.html');
       
       // 如果在登录页但已登录，跳转到首页
-      if (currentPage === 'login' && AuthState.isAuthenticated) {
-        window.location.href = '/index.html';
+      if (isLoginPage && AuthState.isAuthenticated) {
+        window.location.href = '/';
         return false;
       }
       
-      // 如果不在登录页且未登录，跳转到登录页
-      if (currentPage !== 'login' && !AuthState.isAuthenticated) {
-        if (!AUTH_CONFIG.PUBLIC_PAGES.includes(currentPath)) {
-          window.location.href = '/login.html';
-          return false;
-        }
+      if (isLoginPage || AUTH_CONFIG.PUBLIC_PAGES.includes(currentPath)) {
+        return true;
+      }
+
+      const spaPage = _spaPageFromPath(currentPath);
+      const needsAuth = AUTH_CONFIG.REQUIRES_AUTH_PAGES.includes(spaPage) || currentPath === '/' || currentPath === '/index.html';
+      
+      // SPA 路由：无 token 直接跳转登录（认证优先于页面渲染）
+      if (needsAuth && !AuthState.token) {
+        redirectToLogin(currentPath + window.location.search);
+        return false;
       }
       
       return true;
@@ -313,7 +333,11 @@
     
     logout() {
       AuthState.clearAuth();
-      window.location.href = '/login.html';
+      redirectToLogin();
+    },
+    
+    redirectToLogin(nextPath) {
+      redirectToLogin(nextPath);
     },
     
     checkAuth() {
@@ -355,8 +379,11 @@
       if (response.status === 401 && !isPublic) {
         AuthState.clearAuth();
         if (window.location.pathname !== '/login.html') {
-          window.location.href = '/login.html?expired=1';
+          redirectToLogin();
         }
+      }
+      if (response.status === 403 && !isPublic && !AuthState.isAuthenticated) {
+        redirectToLogin();
       }
       return response;
     });

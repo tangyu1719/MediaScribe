@@ -19,6 +19,8 @@ class ProcessRequest(BaseModel):
     importance: int = Field(default=5, ge=1, le=10, description="执行重要度 1-10，仅排队时生效")
     task_note: str = Field(default="", description="任务备注")
     task_keywords: str = Field(default="", description="任务关键词，逗号或换行分隔")
+    action: str = Field(default="start", description="start / resume / rerun")
+    dup_action: str = Field(default="", description="overwrite / new / 留空表示检测冲突")
 
 
 class TaskStatus(BaseModel):

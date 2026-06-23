@@ -323,8 +323,67 @@ def preview_from_analyzer_result(result: Dict, link: str, platform: str = "") ->
     }
 
 
+_link_author_cache: dict = {}
+
+
+def _extract_author_from_html(html: str, platform: str) -> Tuple[str, str]:
+    """从页面 HTML 中提取作者昵称和 ID。小红书优先从 __INITIAL_STATE__ 取。"""
+    if not html:
+        return "", ""
+    author_name = ""
+    author_id = ""
+    try:
+        if platform == "小红书":
+            import re as _re
+            m = _re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\})\s*</script>", html, _re.DOTALL)
+            if not m:
+                m = _re.search(r"__INITIAL_STATE__\s*=\s*(\{.+?\});", html, _re.DOTALL)
+            if m:
+                import json as _json
+                try:
+                    state = _json.loads(m.group(1).replace("undefined", "null"))
+                except Exception:
+                    state = {}
+                note = state.get("note") or {}
+                note_detail = note.get("noteDetailMap") or {}
+                for _k, nd in note_detail.items():
+                    note_data = nd.get("note") or nd
+                    user = note_data.get("user") or {}
+                    if user:
+                        author_name = str(user.get("nickname") or user.get("name") or "")
+                        author_id = str(user.get("userId") or user.get("id") or user.get("user_id") or "")
+                        if author_name:
+                            break
+    except Exception:
+        pass
+    if not author_name:
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            author_name = _meta_content(soup, "author", "article:author")
+            if author_name:
+                author_name = str(author_name).strip()
+        except Exception:
+            pass
+    return author_name, author_id
+
+
+def extract_author_from_link(link: str) -> Tuple[str, str]:
+    """下载页面并提取作者昵称和 ID（复用 _link_author_cache 避免重复请求）。"""
+    import json as _json
+    cache_key = _json.dumps(link, sort_keys=True)
+    if cache_key in _link_author_cache:
+        return _link_author_cache[cache_key]
+    plat = _detect_platform_from_link(link, "")
+    html = _fetch_link_html(link)
+    result = _extract_author_from_html(html, plat)
+    _link_author_cache[cache_key] = result
+    return result
+
+
 def extract_title_from_link(link: str, log_cb: Optional[Callable[[str], None]] = None) -> str:
-    """首层标题：从链接页面 title 或链接片段提取（video_gui.extract_title_from_link）。"""
+    """首层标题：从链接页面 title 或链接片段提取（video_gui.extract_title_from_link）。
+    同时也提取作者信息缓存到 _link_author_cache 供 pipeline 后续使用。"""
     link = (link or "").strip()
     if not link:
         return ""
@@ -338,6 +397,11 @@ def extract_title_from_link(link: str, log_cb: Optional[Callable[[str], None]] =
 
                     soup = BeautifulSoup(html, "html.parser")
                     title = _title_from_soup(soup, plat)
+                    # 顺便提取作者信息并缓存
+                    an, ai = _extract_author_from_html(html, plat)
+                    if an:
+                        import json as _json
+                        _link_author_cache[_json.dumps(link, sort_keys=True)] = (an, ai)
                     if title:
                         if log_cb:
                             log_cb(f"从链接中提取标题：{title}")

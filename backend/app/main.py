@@ -906,6 +906,25 @@ def route_output_file_read(file: str = Query(..., description="output 目录内 
         raise HTTPException(400, str(e)) from e
 
 
+@app.get("/api/doc/export-md")
+def route_doc_export_md_read(path: str = Query(..., description="output 目录内导出 MD 绝对路径")):
+    """读取多模态导出 MD（含 mm_exports 子目录），供前端 picture 预览。"""
+    from .services.file_naming import is_under_output_dir
+
+    p = Path(path).resolve()
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    if not is_under_output_dir(p):
+        raise HTTPException(400, "仅允许读取 output 目录内文件")
+    if p.suffix.lower() not in {".md", ".markdown", ".mdx", ".txt"}:
+        raise HTTPException(400, "仅支持 Markdown/文本文件")
+    try:
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError as e:
+        raise HTTPException(500, f"读取失败: {e}") from e
+    return {"ok": True, "path": str(p), "content": content, "basename": p.name}
+
+
 @app.post("/api/output/file/export")
 async def route_output_file_export(request: Request):
     """导出完整 Markdown（含文末标记块），供浏览器另存到本机任意目录。"""
@@ -1040,18 +1059,21 @@ async def route_process_start(req: ProcessRequest):
     from .services.task_source_meta import SOURCE_MANUAL, source_meta_kwargs
 
     src_meta = source_meta_kwargs(SOURCE_MANUAL, platform=platform)
-    task_id, reused = reuse_or_enqueue_task(
+    task_id, reused, conflict = reuse_or_enqueue_task(
         platform,
         link,
         req.user_prompt,
         comments_dict,
-        action="start",
+        action=req.action,
         fast_enqueue=True,
         importance=req.importance,
         task_note=req.task_note,
         task_keywords=req.task_keywords,
+        dup_action=req.dup_action,
         **src_meta,
     )
+    if conflict:
+        raise HTTPException(409, detail={"conflict": "duplicate_completed", "existing": conflict})
     if reused:
         add_log(task_id, f"同链接复用本卡片继续处理 [{platform}] {link}")
     add_log(task_id, f"收到处理请求 [{platform}] {link}")
@@ -1110,6 +1132,9 @@ def route_task_status(task_id: str):
             "pipeline_started_at",
             "total_duration_ms",
             "total_token_count",
+            "author_name",
+            "author_id",
+            "source_label",
         ]
     }
 
@@ -1320,7 +1345,7 @@ async def route_history_restart(request: Request):
         pipeline_stages = {}
 
     try:
-        task_id, reused = reuse_or_enqueue_task(
+        task_id, reused, _ = reuse_or_enqueue_task(
             platform,
             link,
             user_prompt=user_prompt,
@@ -1640,6 +1665,34 @@ async def route_scheduled_jobs_run(job_key: str):
     from .services.scheduled_job_service import api_run_job
 
     return await api_run_job(job_key, trigger="manual_test")
+
+
+@app.get("/api/scheduled-jobs/active")
+def route_scheduled_jobs_active():
+    from .services.scheduled_job_service import api_list_active_cards
+
+    return api_list_active_cards()
+
+
+@app.post("/api/scheduled-jobs/runs/{run_id}/cancel")
+def route_scheduled_jobs_run_cancel(run_id: str):
+    from .services.scheduled_job_service import api_cancel_run
+
+    result = api_cancel_run(run_id)
+    if not result.get("ok"):
+        raise HTTPException(400, detail={"error_code": result.get("error_code"), "message": result.get("error")})
+    return result
+
+
+@app.post("/api/scheduled-jobs/runs/{run_id}/retry")
+async def route_scheduled_jobs_run_retry(run_id: str):
+    from .services.scheduled_job_service import api_retry_run
+
+    result = await api_retry_run(run_id)
+    if not result.get("ok"):
+        code = 404 if result.get("error_code") == "RUN_NOT_FOUND" else 400
+        raise HTTPException(code, detail={"error_code": result.get("error_code"), "message": result.get("error")})
+    return result
 
 
 @app.get("/api/scheduled-jobs/runs")
@@ -4050,6 +4103,71 @@ async def route_eval_trajectory_from_span(task_id: str, request: Request):
         reference_outputs=body.get("reference_outputs"),
         mode=body.get("mode") or "strict",
     )
+
+
+@app.get("/api/eval/manifest")
+def route_eval_manifest():
+    """测试集规模、金标/BadCase 分层说明（manifest.json）。"""
+    from app.eval.ops_service import eval_get_manifest
+
+    return eval_get_manifest()
+
+
+@app.get("/api/eval/baseline")
+def route_eval_baseline():
+    """基线→目标→当前指标（baseline_targets.json）。"""
+    from app.eval.ops_service import eval_get_baseline
+
+    return eval_get_baseline()
+
+
+@app.get("/api/eval/gate-rubric")
+def route_eval_gate_rubric():
+    """GATE 规则 + RUBRIC 维度定义。"""
+    from app.eval.ops_service import eval_get_gate_rubric_schema
+
+    return eval_get_gate_rubric_schema()
+
+
+@app.post("/api/eval/offline/run")
+async def route_eval_offline_run(request: Request):
+    """RegEval 离线跑批：检索 + GATE + RUBRIC（RAGAS 需 SBA_RAG_EVAL_ENABLED=1）。"""
+    from app.eval.ops_service import eval_run_offline
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    return eval_run_offline(
+        dataset_path=body.get("dataset_path") or "",
+        include_ragas=bool(body.get("include_ragas")),
+    )
+
+
+@app.post("/api/eval/retrieval/metrics")
+async def route_eval_retrieval_metrics(request: Request):
+    """对 JSON 数组批量算 Recall/Precision/Hit/MRR/nDCG/Pass@K。"""
+    from app.eval.ops_service import eval_retrieval_metrics
+
+    body = await request.json()
+    rows = body.get("rows") or []
+    if not isinstance(rows, list):
+        raise HTTPException(400, "rows 须为数组")
+    k_list = body.get("k_list")
+    return eval_retrieval_metrics(rows, k_list=k_list)
+
+
+@app.post("/api/eval/gate/batch")
+async def route_eval_gate_batch(request: Request):
+    """批量 GATE 硬规则校验。"""
+    from app.eval.ops_service import eval_gate_batch
+
+    body = await request.json()
+    rows = body.get("rows") or []
+    if not isinstance(rows, list):
+        raise HTTPException(400, "rows 须为数组")
+    return eval_gate_batch(rows)
 
 
 # ── 用户反馈（打分 + 意图准确率） ──

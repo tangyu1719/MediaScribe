@@ -199,6 +199,17 @@ def dismiss_queue_task(task_id: str) -> bool:
     return existed or tid in _dismissed_task_ids
 
 
+def dismiss_queue_task_by_url_hash(url_hash: str) -> bool:
+    """根据 url_hash 标记已 dismiss，防止历史回填。不要求卡片当前在队列中。"""
+    _ensure_queue_persistence_loaded()
+    uh = (url_hash or "").strip()
+    if not uh:
+        return False
+    _dismissed_url_hashes.add(uh)
+    _save_queue_persistence()
+    return True
+
+
 def dismiss_queue_tasks(task_ids: list) -> Dict[str, Any]:
     """批量从队列移除卡片（幂等，跳过空 id）。"""
     requested = 0
@@ -274,6 +285,7 @@ def create_task(
     pipeline_options: Optional[Dict] = None,
     skip_bootstrap_meta: bool = False,
     skip_done_hist_check: bool = False,
+    skip_dedup: bool = False,
     importance: Optional[int] = None,
     task_note: str = "",
     task_keywords: str = "",
@@ -286,7 +298,7 @@ def create_task(
     norm = normalize_link_for_hash(link)
     uh = link_url_hash(link)
 
-    if not skip_done_hist_check:
+    if not skip_dedup and not skip_done_hist_check:
         done_hist = _completed_task_in_history(link, uh)
         if done_hist:
             tid = (done_hist.get("id") or done_hist.get("task_id") or "").strip()
@@ -296,25 +308,26 @@ def create_task(
                 return tid
 
     # 同链接禁止新建卡片：内存中已有则复用 task_id 重启入队
-    existing = find_task_by_url_hash(uh)
-    if existing and (existing.get("task_id") or "").strip():
-        tid = str(existing["task_id"])
-        if not skip_done_hist_check and _completed_task_in_history(link, uh):
-            reconcile_queue_with_history(save=True)
-            return tid
-        return restart_existing_task(
-            tid,
-            platform=platform,
-            link=link,
-            user_prompt=user_prompt,
-            comments=comments,
-            resume_from=resume_from,
-            resume_context=resume_context,
-            pipeline_stages=pipeline_stages,
-            pipeline_route=pipeline_route,
-            pipeline_options=pipeline_options,
-            full_rerun=False,
-        )
+    if not skip_dedup:
+        existing = find_task_by_url_hash(uh)
+        if existing and (existing.get("task_id") or "").strip():
+            tid = str(existing["task_id"])
+            if not skip_done_hist_check and _completed_task_in_history(link, uh):
+                reconcile_queue_with_history(save=True)
+                return tid
+            return restart_existing_task(
+                tid,
+                platform=platform,
+                link=link,
+                user_prompt=user_prompt,
+                comments=comments,
+                resume_from=resume_from,
+                resume_context=resume_context,
+                pipeline_stages=pipeline_stages,
+                pipeline_route=pipeline_route,
+                pipeline_options=pipeline_options,
+                full_rerun=False,
+            )
 
     task_id = uuid.uuid4().hex[:12]
 
@@ -933,7 +946,7 @@ def merge_history_into_queue(*, limit: int = _QUEUE_HISTORY_MERGE_LIMIT) -> int:
     for hist in _list_history_rows_for_queue(limit):
         st = (hist.get("status") or "").strip()
         if st in ("completed", "failed", "cancelled"):
-            pass
+            continue
         elif st not in _PIPELINE_ACTIVE_STATUSES:
             continue
         import_history_task_to_queue(hist)
@@ -951,22 +964,18 @@ def init_queue_from_history() -> int:
     return n
 
 
+_last_reconcile_ts: float = 0.0
+_RECONCILE_THROTTLE_SEC = 120.0
+
+
 def list_queue_tasks() -> list:
     """供 /api/process/queue 使用：以 .web_queue_cards.json 为权威，轮询不再限量回填历史。"""
+    global _last_reconcile_ts
     _ensure_queue_persistence_loaded()
-    reconcile_queue_with_history(save=True)
-    try:
-        from .history_manager import get_task_history
-
-        for t in _task_store.values():
-            hist = get_task_history(link=t.get("link") or "", url_hash=t.get("url_hash") or "")
-            if not hist:
-                continue
-            for k in ("html_path", "html_status", "html_message"):
-                if hist.get(k) is not None:
-                    t[k] = hist.get(k)
-    except Exception:
-        pass
+    now_ts = __import__("time").time()
+    if now_ts - _last_reconcile_ts > _RECONCILE_THROTTLE_SEC:
+        reconcile_queue_with_history(save=True)
+        _last_reconcile_ts = now_ts
     tasks = list_tasks()
     for t in tasks:
         _apply_read_status_to_task(t)
@@ -1187,14 +1196,16 @@ def restart_existing_task(
     if not task:
         raise KeyError(f"任务不存在: {task_id}")
     if (task.get("status") or "") in _PIPELINE_RUNNING_STATUSES:
-        raise RuntimeError("任务正在执行中，请稍候或先停止")
+        add_log(task_id, "[错误] 任务正在执行中，请稍候或先停止", "ERROR")
+        return task_id
     if not full_rerun and (task.get("status") or "") == "completed":
         hist = _completed_task_in_history(
             str(task.get("link") or ""),
             str(task.get("url_hash") or ""),
         )
         if hist and _history_doc_exists(hist):
-            raise RuntimeError("该链接已有完成产物，请点「重新执行」全量重跑，勿重复入队")
+            add_log(task_id, "[错误] 该链接已有完成产物，请点「重新执行」全量重跑，勿重复入队", "ERROR")
+            return task_id
 
     norm = normalize_link_for_hash(link)
     uh = link_url_hash(link)
@@ -1363,103 +1374,110 @@ def reuse_or_enqueue_task(
     author_name: str = "",
     author_id: str = "",
     subscription_id: str = "",
-) -> Tuple[str, bool]:
+    dup_action: str = "",
+) -> Tuple[str, bool, Optional[Dict]]:
     """
-    同链接复用同一卡片：返回 (task_id, reused)。
+    同链接复用同一卡片：返回 (task_id, reused, conflict_info)。
     action: resume/start → 断点；rerun → 全量。
+    dup_action: overwrite → 强制全量重跑；new → 跳过去重新建卡片；留空 → 已完成链接返回冲突信息。
     """
     from .history_manager import get_task_history
 
     full_rerun = (action or "").strip().lower() == "rerun"
+    dup = (dup_action or "").strip().lower()
+    if dup == "overwrite":
+        full_rerun = True
     uh = link_url_hash(link)
     tid = (task_id or "").strip()
+
+    def _build_conflict_info(task: Dict) -> Dict:
+        return {
+            "task_id": str(task.get("task_id") or ""),
+            "doc_title": str(task.get("doc_title") or ""),
+            "doc_path": str(task.get("doc_path") or ""),
+            "doc_filename": str(task.get("doc_filename") or ""),
+            "link_title": str(task.get("link_title") or ""),
+            "created_at": str(task.get("created_at") or ""),
+        }
+
+    # dup_action="new": 跳过所有去重逻辑，直接创建新任务
+    if dup == "new":
+        new_id = create_task(
+            platform, link, user_prompt, comments,
+            resume_from=resume_from, resume_context=resume_context,
+            pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            skip_bootstrap_meta=fast_enqueue, skip_done_hist_check=True, skip_dedup=True,
+            importance=importance, task_note=task_note, task_keywords=task_keywords,
+            import_source=import_source, source_label=source_label,
+            author_name=author_name, author_id=author_id,
+            subscription_id=subscription_id,
+        )
+        remove_duplicate_tasks(uh, new_id)
+        return new_id, False, None
 
     if tid and tid in _task_store:
         st = (_task_store[tid].get("status") or "")
         if st in _PIPELINE_ACTIVE_STATUSES:
-            return tid, True
+            return tid, True, None
+        if not full_rerun and st == "completed" and not dup:
+            hist = _completed_task_in_history(
+                str(_task_store[tid].get("link") or ""),
+                str(_task_store[tid].get("url_hash") or ""),
+            )
+            if hist:
+                return tid, False, _build_conflict_info(_task_store[tid])
         restart_existing_task(
-            tid,
-            platform=platform,
-            link=link,
-            user_prompt=user_prompt,
-            comments=comments,
-            resume_from=resume_from,
-            resume_context=resume_context,
-            pipeline_stages=pipeline_stages,
-            pipeline_route=pipeline_route,
-            full_rerun=full_rerun,
-            import_source=import_source,
-            source_label=source_label,
-            author_name=author_name,
-            author_id=author_id,
-            subscription_id=subscription_id,
+            tid, platform=platform, link=link, user_prompt=user_prompt,
+            comments=comments, resume_from=resume_from, resume_context=resume_context,
+            pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            full_rerun=full_rerun, import_source=import_source, source_label=source_label,
+            author_name=author_name, author_id=author_id, subscription_id=subscription_id,
         )
-        return tid, True
+        return tid, True, None
 
     mem = find_task_by_url_hash(uh)
     if mem:
         mtid = mem["task_id"]
         if (mem.get("status") or "") in _PIPELINE_ACTIVE_STATUSES:
-            return mtid, True
+            return mtid, True, None
+        if not full_rerun and (mem.get("status") or "") == "completed" and not dup:
+            hist = _completed_task_in_history(
+                str(mem.get("link") or ""),
+                str(mem.get("url_hash") or ""),
+            )
+            if hist:
+                return mtid, False, _build_conflict_info(mem)
         restart_existing_task(
-            mtid,
-            platform=platform,
-            link=link,
-            user_prompt=user_prompt,
-            comments=comments,
-            resume_from=resume_from,
-            resume_context=resume_context,
-            pipeline_stages=pipeline_stages,
-            pipeline_route=pipeline_route,
-            full_rerun=full_rerun,
-            import_source=import_source,
-            source_label=source_label,
-            author_name=author_name,
-            author_id=author_id,
-            subscription_id=subscription_id,
+            mtid, platform=platform, link=link, user_prompt=user_prompt,
+            comments=comments, resume_from=resume_from, resume_context=resume_context,
+            pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            full_rerun=full_rerun, import_source=import_source, source_label=source_label,
+            author_name=author_name, author_id=author_id, subscription_id=subscription_id,
         )
-        return mtid, True
+        return mtid, True, None
 
     if not fast_enqueue:
         hist = get_task_history(link=link, url_hash=uh)
         if hist:
             new_id = rehydrate_task_from_history(
-                hist,
-                platform=platform,
-                link=link,
-                user_prompt=user_prompt,
-                comments=comments,
-                resume_from=resume_from,
-                resume_context=resume_context,
-                pipeline_stages=pipeline_stages,
-                pipeline_route=pipeline_route,
+                hist, platform=platform, link=link, user_prompt=user_prompt,
+                comments=comments, resume_from=resume_from, resume_context=resume_context,
+                pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
                 full_rerun=full_rerun,
             )
-            return new_id, True
+            return new_id, True, None
 
     new_id = create_task(
-        platform,
-        link,
-        user_prompt,
-        comments,
-        resume_from=resume_from,
-        resume_context=resume_context,
-        pipeline_stages=pipeline_stages,
-        pipeline_route=pipeline_route,
-        skip_bootstrap_meta=fast_enqueue,
-        skip_done_hist_check=fast_enqueue,
-        importance=importance,
-        task_note=task_note,
-        task_keywords=task_keywords,
-        import_source=import_source,
-        source_label=source_label,
-        author_name=author_name,
-        author_id=author_id,
-        subscription_id=subscription_id,
+        platform, link, user_prompt, comments,
+        resume_from=resume_from, resume_context=resume_context,
+        pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+        skip_bootstrap_meta=fast_enqueue, skip_done_hist_check=fast_enqueue,
+        importance=importance, task_note=task_note, task_keywords=task_keywords,
+        import_source=import_source, source_label=source_label,
+        author_name=author_name, author_id=author_id, subscription_id=subscription_id,
     )
     remove_duplicate_tasks(uh, new_id)
-    return new_id, False
+    return new_id, False, None
 
 
 def consolidate_queue_by_url_hash() -> int:

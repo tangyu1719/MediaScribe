@@ -136,29 +136,78 @@ def _extract_xiaohongshu_content(
     try:
         import time as _time
 
-        t0 = _time.perf_counter()
-        if prefetched and isinstance(prefetched, dict) and not prefetched.get("error"):
-            timing = prefetched.get("_timing") or {}
-            _log(
-                task_id,
-                "[小红书图文沉淀] 复用路由阶段 LinkAnalyzer 结果，跳过二次 analyze_link; "
-                f"timing_total_ms={timing.get('total_ms', '')}",
-            )
-            result = prefetched
-        else:
+        from .pipeline_output_quality import assess_xhs_extractor_result
+
+        def _analyze_once() -> Optional[Dict]:
             analyzer = LinkAnalyzer()
             _log(task_id, "开始分析小红书链接（轻量解析，不含 OCR）…")
-            result = analyzer.analyze_link(link, include_image_ocr=False)
-            timing = (result or {}).get("_timing") or {}
+            t1 = _time.perf_counter()
+            out = analyzer.analyze_link(link, include_image_ocr=False)
+            timing = (out or {}).get("_timing") or {}
             _log(
                 task_id,
-                f"[小红书图文沉淀] analyze_link 完成; elapsed_ms={int((_time.perf_counter() - t0) * 1000)}; "
+                f"[小红书图文沉淀] analyze_link 完成; elapsed_ms={int((_time.perf_counter() - t1) * 1000)}; "
                 f"timing_total_ms={timing.get('total_ms', '')}; phases={timing.get('phases_ms', {})}",
             )
+            return out
+
+        t0 = _time.perf_counter()
+        result: Optional[Dict] = None
+        used_prefetch = False
+
+        if prefetched and isinstance(prefetched, dict) and not prefetched.get("error"):
+            gate_pre = assess_xhs_extractor_result(prefetched, after_ocr=False)
+            if gate_pre.ok:
+                timing = prefetched.get("_timing") or {}
+                _log(
+                    task_id,
+                    "[小红书图文沉淀] 复用路由阶段 LinkAnalyzer 结果，跳过二次 analyze_link; "
+                    f"timing_total_ms={timing.get('total_ms', '')}; "
+                    f"text_len={gate_pre.text_len}; image_links={gate_pre.image_links}",
+                )
+                result = prefetched
+                used_prefetch = True
+            else:
+                _log(
+                    task_id,
+                    f"[小红书图文沉淀] 路由 prefetch 无效，丢弃并重抓; "
+                    f"error_code={gate_pre.error_code}; {gate_pre.error_message}",
+                    "WARNING",
+                )
+
+        if result is None:
+            result = _analyze_once()
+
+        gate = assess_xhs_extractor_result(result, after_ocr=False)
+        if not gate.ok:
+            _log(
+                task_id,
+                f"[小红书图文沉淀] 首次抓取未通过前校验，1s 后重试 analyze_link; {gate.error_message}",
+                "WARNING",
+            )
+            _time.sleep(1.0)
+            result = _analyze_once()
+            gate = assess_xhs_extractor_result(result, after_ocr=False)
 
         if not result or result.get("error"):
             err = (result or {}).get("error", "分析失败")
             _log(task_id, f"小红书内容检测失败：{err}", "ERROR")
+            return None
+
+        if not gate.ok:
+            _plog(
+                task_id,
+                link[:80],
+                "提取前校验",
+                "抓取结果无效",
+                "ERROR",
+                error_code=gate.error_code,
+                text_len=gate.text_len,
+                image_links=gate.image_links,
+                used_prefetch=used_prefetch,
+                elapsed_ms=int((_time.perf_counter() - t0) * 1000),
+            )
+            _log(task_id, f"小红书内容提取前校验失败：{gate.error_message}", "ERROR")
             return None
 
         content_type = result.get("type", "")
@@ -174,8 +223,8 @@ def _extract_xiaohongshu_content(
 
         _log(task_id,
             f"[小红书图文沉淀] 提取统计："
-            f"text_len={len((result.get('text_content') or '').strip())} | "
-            f"image_links={len(result.get('image_links', []) or [])} | "
+            f"text_len={gate.text_len} | "
+            f"image_links={gate.image_links} | "
             f"image_ocr={len(result.get('image_analysis', []) or [])}"
         )
         return result
@@ -408,12 +457,35 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                 lambda: _extract_xiaohongshu_content(link, task_id, prefetched=prefetch),
             )
             if not result:
-                _end_span(extract_span, status="failed", error_code="XHS_EXTRACT_FAILED", error_message="小红书内容提取失败", open_layer={"decision": "stop"}, task_id=task_id)
-                tracker.fail("extract", "小红书内容提取失败")
+                _end_span(extract_span, status="failed", error_code="XHS_EXTRACT_EMPTY", error_message="小红书内容提取失败或前校验未通过", open_layer={"decision": "stop"}, task_id=task_id)
+                tracker.fail("extract", "小红书内容提取失败或前校验未通过")
+                _tm.update_task(task_id, status="failed", error="[XHS_EXTRACT_EMPTY] 抓取未得到有效正文或图片", error_code="XHS_EXTRACT_EMPTY")
+                mark_failure_from_task(task_id, "[XHS_EXTRACT_EMPTY] 抓取未得到有效正文或图片", route="xiaohongshu_graphic")
                 return
             _end_span(extract_span, status="completed", task_id=task_id, output_payload={"ok": True, "title": (result.get("title") or "")[:120]})
             tracker.complete("extract", {"title": (result.get("title") or "")[:120]})
             link_title = resolve_link_title(link, platform="小红书", analyzer_title=(result.get("title") or ""), log_cb=lambda msg: _log(task_id, msg)) or link_title
+            # 从分析结果提取作者信息（静态HTML优先）
+            an = str(result.get("author") or "").strip()
+            ai = str(result.get("author_id") or "").strip()
+            # 静态提取为空时，尝试 CDP 从渲染后 DOM 提取
+            if not an:
+                try:
+                    from .chrome_cdp_open import cdp_extract_note_author
+                    an2, ai2 = await loop.run_in_executor(
+                        _io_executor(),
+                        lambda: cdp_extract_note_author(link),
+                    )
+                    if an2:
+                        an = an2
+                        ai = ai2
+                except Exception:
+                    pass
+            if an and not task.get("author_name"):
+                from .task_source_meta import apply_task_source_meta
+                apply_task_source_meta(task, author_name=an, author_id=ai)
+                _tm.update_task(task_id, author_name=an, author_id=ai)
+                _log(task_id, f"作者信息: {an}" + (f" (id={ai})" if ai else ""))
             if link_title:
                 _tm.update_task(task_id, link_title=link_title, progress=25, **{k: v for k, v in preview_from_analyzer_result(result, link, "小红书").items() if v})
             else:
@@ -422,7 +494,36 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             tracker.start("ocr")
             _tm.update_task(task_id, status="ocr", stage="OCR补偿", progress=35)
             result = await loop.run_in_executor(_io_executor(), lambda: _ocr_compensation(result, task_id))
-            _end_span(ocr_span, status="completed", task_id=task_id, output_payload={"ok": True})
+            from .pipeline_output_quality import assess_xhs_extractor_result
+
+            ocr_gate = assess_xhs_extractor_result(result, after_ocr=True)
+            if not ocr_gate.ok:
+                _end_span(
+                    ocr_span,
+                    status="failed",
+                    error_code=ocr_gate.error_code,
+                    error_message=ocr_gate.error_message,
+                    task_id=task_id,
+                )
+                tracker.fail("ocr", ocr_gate.error_message)
+                _tm.update_task(
+                    task_id,
+                    status="failed",
+                    error=f"[{ocr_gate.error_code}] {ocr_gate.error_message}",
+                    error_code=ocr_gate.error_code,
+                )
+                mark_failure_from_task(task_id, f"[{ocr_gate.error_code}] {ocr_gate.error_message}", route="xiaohongshu_graphic")
+                return
+            _end_span(
+                ocr_span,
+                status="completed",
+                task_id=task_id,
+                output_payload={
+                    "ok": True,
+                    "text_len": ocr_gate.text_len,
+                    "ocr_text_len": ocr_gate.ocr_text_len,
+                },
+            )
             tracker.complete("ocr", {"title": link_title}, persist_payload=result)
         else:
             tracker.log_skip("extract")
@@ -479,6 +580,26 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             tracker.start("assemble")
             _tm.update_task(task_id, status="assembling", stage="原文装配", progress=50)
             source_text = await loop.run_in_executor(_io_executor(), lambda: _build_xiaohongshu_raw_text(result))
+            from .pipeline_output_quality import assess_assembled_source_text
+
+            asm_gate = assess_assembled_source_text(source_text)
+            if not asm_gate.ok:
+                _end_span(
+                    assemble_span,
+                    status="failed",
+                    error_code=asm_gate.error_code,
+                    error_message=asm_gate.error_message,
+                    task_id=task_id,
+                )
+                tracker.fail("assemble", asm_gate.error_message)
+                _tm.update_task(
+                    task_id,
+                    status="failed",
+                    error=f"[{asm_gate.error_code}] {asm_gate.error_message}",
+                    error_code=asm_gate.error_code,
+                )
+                mark_failure_from_task(task_id, f"[{asm_gate.error_code}] {asm_gate.error_message}", route="xiaohongshu_graphic")
+                return
             if not source_text:
                 _end_span(assemble_span, status="failed", error_code="XHS_ASSEMBLY_EMPTY", error_message="原文装配为空", task_id=task_id)
                 tracker.fail("assemble", "原文装配为空")
@@ -543,6 +664,20 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             extracted_metadata = consolidation.get("extracted_metadata") or {}
             if extracted_metadata:
                 _tm.update_task(task_id, extracted_metadata=extracted_metadata)
+            block_code = str(consolidation.get("error_code") or "").strip()
+            if block_code and consolidation.get("article_source") == "blocked":
+                err_msg = f"[{block_code}] {consolidation.get('error_message') or '文档沉淀前校验失败'}"
+                _end_span(
+                    consolidate_span,
+                    status="failed",
+                    task_id=task_id,
+                    error_code=block_code,
+                    error_message=str(consolidation.get("error_message") or ""),
+                )
+                tracker.fail("ai_analysis", err_msg)
+                _tm.update_task(task_id, status="failed", error=err_msg, error_code=block_code)
+                mark_failure_from_task(task_id, err_msg, route="xiaohongshu_graphic")
+                return
             ok_sum = bool(ai_summary) or _article_only
             _end_span(consolidate_span, status="completed" if ok_sum else "failed", task_id=task_id, error_code="" if ok_sum else "XHS_SUMMARY_FAILED")
             if not ok_sum:
@@ -667,6 +802,52 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             if not doc_path:
                 tracker.fail("generate_md", "断点缺少 MD 路径，无法恢复")
                 return
+
+        # ── 交付审核 Agent（结构 + 质量打分，不通过则 fail）──
+        review_span = _begin_span(task_id, session_id, "llm_call", "交付审核", {"doc_path": doc_path})
+        from .pipeline_delivery_review import run_delivery_review
+
+        review = await loop.run_in_executor(
+            _llm_executor(),
+            lambda: run_delivery_review(
+                task_id=task_id,
+                doc_path=doc_path,
+                doc_title=title,
+                article=article_text or source_text,
+                summary=ai_summary,
+                link_title=link_title,
+                platform="小红书",
+                source_text_len=len(source_text or ""),
+                llm_cfg=cfg,
+                log_cb=lambda msg, lvl="INFO": _log(task_id, msg, lvl),
+            ),
+        )
+        if not review.ok:
+            err_msg = f"[{review.error_code}] {review.error_message}"
+            _end_span(
+                review_span,
+                status="failed",
+                task_id=task_id,
+                error_code=review.error_code,
+                error_message=review.error_message,
+            )
+            _tm.update_task(
+                task_id,
+                status="failed",
+                error=err_msg,
+                error_code=review.error_code,
+                delivery_review=review.to_dict(),
+            )
+            tracker.fail("generate_md", err_msg)
+            mark_failure_from_task(task_id, err_msg, route="xiaohongshu_graphic")
+            return
+        _end_span(
+            review_span,
+            status="completed",
+            task_id=task_id,
+            output_payload={"score": review.score, "structure_ok": review.structure_ok},
+        )
+        _tm.update_task(task_id, delivery_review=review.to_dict())
 
         # ── MD 完成即任务完成；飞书/HTML 后台继续 ──
         html_span = _begin_span(task_id, session_id, "llm_call", "HTML长页生成", {"doc_path": doc_path})

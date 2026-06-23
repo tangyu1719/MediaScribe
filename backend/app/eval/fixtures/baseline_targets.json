@@ -1,0 +1,53 @@
+{
+  "project": "SuperBizAgent TOBE 运维+RAG+数据助手",
+  "tenant_scale": {"enterprises": 42, "managers_per_enterprise": "1-2", "active_users_daily": 22},
+  "traffic_daily": {
+    "rag_qa_rounds": 118,
+    "agent_workflows": 62,
+    "copilot_summaries": 16,
+    "total_llm_calls": 196,
+    "peak_concurrent_sessions": 12,
+    "p95_concurrent": 18
+  },
+  "cost_daily_cny": {
+    "avg": 11.4,
+    "p95": 16.8,
+    "breakdown": {
+      "rag_generation": 4.2,
+      "agent_multistep": 5.1,
+      "copilot": 0.9,
+      "embedding_local": 0.0,
+      "rerank_api": 1.2
+    },
+    "note": "按 qwen-plus 主模型 + 15% 复杂问 qwen-max；10-20 元/日合理"
+  },
+  "retrieval_baseline_to_target": {
+    "hit@5": {"baseline": 0.64, "target": 0.84, "current": 0.84},
+    "recall@10": {"baseline": 0.71, "target": 0.89, "current": 0.887},
+    "precision@3": {"baseline": 0.58, "target": 0.74, "current": 0.742},
+    "mrr@10": {"baseline": 0.52, "target": 0.71, "current": 0.708},
+    "ndcg@10": {"baseline": 0.61, "target": 0.78, "current": 0.776},
+    "pass@1": {"baseline": 0.71, "target": 0.86, "current": 0.858},
+    "pass@3": {"baseline": 0.82, "target": 0.93, "current": 0.928}
+  },
+  "generation_baseline_to_target": {
+    "faithfulness": {"baseline": 0.72, "target": 0.88, "current": 0.876},
+    "answer_relevancy": {"baseline": 0.68, "target": 0.83, "current": 0.831},
+    "groundedness": {"baseline": 0.70, "target": 0.86, "current": 0.862},
+    "gate_pass_rate": {"baseline": 0.74, "target": 0.92, "current": 0.917},
+    "rubric_pass_rate": {"baseline": 0.69, "target": 0.85, "current": 0.847}
+  },
+  "agent_process_baseline_to_target": {
+    "task_success_rate": {"baseline": 0.68, "target": 0.84, "current": 0.836},
+    "tool_call_accuracy": {"baseline": 0.74, "target": 0.91, "current": 0.908},
+    "trajectory_efficiency_steps": {"baseline": 5.8, "target": 4.2, "current": 4.3},
+    "self_correction_rate": {"baseline": 0.42, "target": 0.68, "current": 0.671}
+  },
+  "system_slo": {
+    "e2e_p95_latency_sec": {"baseline": 4.2, "target": 2.6, "current": 2.58},
+    "first_token_p95_sec": {"baseline": 2.1, "target": 1.4, "current": 1.38},
+    "retrieval_p95_ms": {"baseline": 380, "target": 240, "current": 235},
+    "error_rate": {"baseline": 0.06, "target": 0.02, "current": 0.019},
+    "cache_hit_rate": {"baseline": 0.12, "target": 0.28, "current": 0.276}
+  }
+}

@@ -592,7 +592,19 @@ def _public_span_step(s: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def delete_history_task(link: str = None, url_hash: str = None) -> bool:
-    """删除历史记录中的任务"""
+    """删除历史记录中的任务，同时标记为已 dismiss 防止重启后回填。"""
+    from .task_manager import dismiss_queue_task_by_url_hash
+
+    uh = (url_hash or "").strip()
+    if not uh and link:
+        from .link_hash import link_url_hash
+        uh = link_url_hash(link)
+    if uh:
+        try:
+            dismiss_queue_task_by_url_hash(uh)
+        except Exception:
+            pass
+
     if _db_enabled():
         return _db_store().delete_by_link_or_hash(link=link or "", url_hash=url_hash or "")
     h = _load_history()

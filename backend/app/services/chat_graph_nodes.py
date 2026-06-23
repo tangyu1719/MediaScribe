@@ -28,6 +28,7 @@ from .tool_output_schema import (
     clamp_result_brief_cn,
     dumps_step_output,
     format_intent_result_brief_cn,
+    summarize_orchestration_payload_cn,
 )
 from .chat_graph_state import (
     PHASE_ABNORMAL,
@@ -492,6 +493,8 @@ def _emit_orchestration_step(
     executed: bool = True,
     think_text_override: Optional[str] = None,
     llm_powered: bool = False,
+    pre_step_id: Optional[str] = None,
+    think_streamed: bool = False,
 ) -> Dict[str, Any]:
     """编排节点：思考框 + 输入输出 + result_brief（PRD 5.1/5.10）。"""
     out_body = dict(output_payload or extra or {})
@@ -509,6 +512,8 @@ def _emit_orchestration_step(
         executed=executed,
         think_text_override=think_text_override,
         llm_powered=llm_powered,
+        pre_step_id=pre_step_id,
+        think_streamed=think_streamed,
     )
 
 
@@ -600,16 +605,36 @@ async def _orch_llm_invoke(
     *,
     intent_snapshot: Optional[Dict[str, Any]] = None,
     max_tokens: int = 520,
+    step_id: str = "",
+    stream_think: bool = False,
+    trace_id: str = "",
+    task_id: str = "",
+    step_name: str = "",
+    sub_plan_id: str = "",
+    sub_index: int = 0,
 ) -> tuple[str, Dict[str, Any]]:
-    """编排固定节点 LLM 调用；返回 (原始文本, 解析 JSON)。"""
+    """编排固定节点 LLM 调用；stream_think 时逐 token 推送 step_think_delta。"""
     if not (runtime.api_key and runtime.model_resolved):
         return "", {}
     text = ""
     t0 = time.perf_counter()
-    # 编排段 JSON 输出不需要深度思考，关闭 thinking 可显著降延迟
     _orch_no_think = phase in (
         "intent", "rewrite", "slot", "decompose", "enhance", "slot_decompose_bundle",
     )
+    sid = (step_id or "").strip()
+    if stream_think and sid:
+        from .orchestration_step_emit import begin_stream_think
+
+        begin_stream_think(
+            runtime,
+            trace_id=trace_id or runtime.trace_id,
+            task_id=task_id,
+            step_id=sid,
+            step_name=step_name or phase,
+            sub_plan_id=sub_plan_id,
+            sub_index=sub_index,
+            llm_powered=True,
+        )
     try:
         async for piece in ai_chat._iter_react_llm_tokens(
             phase=phase,
@@ -625,6 +650,17 @@ async def _orch_llm_invoke(
             thinking_enabled=not _orch_no_think,
         ):
             text += piece
+            if stream_think and sid and piece:
+                from .orchestration_step_emit import emit_stream_think_delta
+
+                emit_stream_think_delta(
+                    runtime,
+                    trace_id=trace_id or runtime.trace_id,
+                    task_id=task_id,
+                    step_id=sid,
+                    content=piece,
+                    llm_powered=True,
+                )
     except Exception as ex:
         _LOG.warning(
             "[AI问答-LangGraph|chat_graph_nodes._orch_llm_invoke|%s|Agent执行|失败] "
@@ -634,7 +670,25 @@ async def _orch_llm_invoke(
             ex,
             int((time.perf_counter() - t0) * 1000),
         )
+        if stream_think and sid:
+            from .orchestration_step_emit import end_stream_think
+
+            end_stream_think(
+                runtime,
+                trace_id=trace_id or runtime.trace_id,
+                step_id=sid,
+                llm_powered=True,
+            )
         return "", {}
+    if stream_think and sid:
+        from .orchestration_step_emit import end_stream_think
+
+        end_stream_think(
+            runtime,
+            trace_id=trace_id or runtime.trace_id,
+            step_id=sid,
+            llm_powered=True,
+        )
     raw = text.strip()
     orch_ms = int((time.perf_counter() - t0) * 1000)
     _LOG.info(
@@ -787,6 +841,13 @@ async def fast_continue_main_to_handoff(
     )
     needs_rag = bool(snap.get("needs_rag")) and bool(runtime.rag_prefetch)
     intent_result_cn = intent_decision.get("reason") or "延续主任务，跳过重复编排"
+    cont_title = str(cont_qs or snap.get("query_summary") or "").strip()
+    intent_result_cn = format_intent_result_brief_cn(
+        simple=False,
+        continue_main=True,
+        task_id=tid,
+        task_title=cont_title,
+    ) or intent_result_cn
 
     runtime.emit(
         "intent_resolved",
@@ -859,8 +920,14 @@ async def fast_continue_main_to_handoff(
                 {
                     "mode": "continue_main",
                     "task_action": "continue_main",
+                    "task_kind": "main",
+                    "is_simple": False,
+                    "continue_main_task": True,
+                    "intent_type": "task_continue",
+                    "result_brief_cn": intent_result_cn,
                     "reason": intent_result_cn,
                     "task_id": tid,
+                    "query_summary": cont_qs or cont_title,
                 },
                 ensure_ascii=False,
             ),
@@ -1036,9 +1103,19 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
     pipeline_hist: List[Dict[str, Any]] = []
     if isinstance(state.get("history"), list):
         pipeline_hist = [h for h in state["history"] if isinstance(h, dict)][-8:]
-    from .agent_pipeline import merge_pipeline_into_snapshot, run_agent_pipeline
+    from .agent_pipeline import (
+        merge_pipeline_into_snapshot,
+        run_agent_pipeline,
+        run_agent_pipeline_rules_only,
+        should_skip_pipeline_llm,
+    )
 
-    pipeline_result = await asyncio.to_thread(run_agent_pipeline, message or "", pipeline_hist)
+    if should_skip_pipeline_llm(message or ""):
+        pipeline_result = await asyncio.to_thread(
+            run_agent_pipeline_rules_only, message or "", pipeline_hist
+        )
+    else:
+        pipeline_result = await asyncio.to_thread(run_agent_pipeline, message or "", pipeline_hist)
     runtime.emit(
         "pipeline_intent_preview",
         {
@@ -1062,16 +1139,6 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
     _intent_tid = str(state.get("task_id") or "").strip()
     if not _intent_tid and isinstance(state.get("client_cur_task"), dict):
         _intent_tid = str(state["client_cur_task"].get("task_id") or "").strip()
-    runtime.emit(
-        "orchestration_node_start",
-        {
-            "task_id": _intent_tid,
-            "step_id": _new_id("step_"),
-            "step_name": "意图识别",
-            "phase": "intent",
-            "progress_hint": "正在执行：意图识别",
-        },
-    )
     cur_task = state.get("client_cur_task") if isinstance(state.get("client_cur_task"), dict) else None
     main_hist = state.get("client_main_task_history") if isinstance(state.get("client_main_task_history"), list) else []
     cur_task, main_hist = hydrate_client_task_context(
@@ -1087,14 +1154,77 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
 
     intent_decision: Dict[str, Any] = {}
     intent_llm_powered = False
+    intent_pre_step_id = ""
+    intent_think_streamed = False
     task_aff = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
-    from .chat_context_memory import peek_fast_continue_eligible
+    from .chat_context_memory import peek_fast_continue_eligible, build_fast_new_main_intent
+
+    _fast_new = build_fast_new_main_intent(
+        message, cur_task=cur_task, main_task_history=main_hist
+    )
+
+    async def _resolve_intent_with_stream() -> Dict[str, Any]:
+        nonlocal intent_pre_step_id, intent_think_streamed, intent_llm_powered
+        pre = _new_id("step_")
+        from .orchestration_step_emit import (
+            begin_stream_think,
+            emit_stream_think_delta,
+            end_stream_think,
+        )
+
+        begin_stream_think(
+            runtime,
+            trace_id=trace_id,
+            task_id=str(state.get("task_id") or ""),
+            step_id=pre,
+            step_name="意图识别",
+            sub_plan_id="",
+            sub_index=0,
+            llm_powered=True,
+        )
+
+        def _on_tok(piece: str) -> None:
+            emit_stream_think_delta(
+                runtime,
+                trace_id=trace_id,
+                task_id=str(state.get("task_id") or ""),
+                step_id=pre,
+                content=piece,
+                llm_powered=True,
+            )
+
+        decision = await llm_resolve_intent_mode(
+            message,
+            cur_task=cur_task,
+            main_task_history=main_hist,
+            provider=runtime.provider,
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.model_resolved,
+            tools_meta=runtime.tools_meta,
+            rag_prefetch=bool(runtime.rag_prefetch),
+            web_search=bool(runtime.web_search),
+            on_token=_on_tok,
+        ) or {}
+        end_stream_think(
+            runtime,
+            trace_id=trace_id,
+            step_id=pre,
+            llm_powered=True,
+        )
+        intent_pre_step_id = pre
+        intent_think_streamed = True
+        intent_llm_powered = bool(decision.get("llm_powered"))
+        return decision
 
     _skip_intent_llm = bool(task_aff) or peek_fast_continue_eligible(
         message, cur_task=cur_task, main_task_history=main_hist
     )
     if task_aff:
         intent_decision = dict(task_aff)
+    elif _fast_new:
+        intent_decision = dict(_fast_new)
+        intent_llm_powered = False
     elif _skip_intent_llm:
         intent_decision = resolve_intent_mode(
             message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
@@ -1126,44 +1256,24 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             intent_decision.setdefault("reason", "规则快径：社媒分析型主任务")
             intent_llm_powered = False
         else:
-            intent_decision = await llm_resolve_intent_mode(
-                message,
-                cur_task=cur_task,
-                main_task_history=main_hist,
-                provider=runtime.provider,
-                base_url=runtime.base_url,
-                api_key=runtime.api_key,
-                model=runtime.model_resolved,
-                tools_meta=runtime.tools_meta,
-                rag_prefetch=bool(runtime.rag_prefetch),
-                web_search=bool(runtime.web_search),
-            ) or {}
-            intent_llm_powered = bool(intent_decision and intent_decision.get("llm_powered"))
+            intent_decision = await _resolve_intent_with_stream()
     elif _orch_enabled(runtime, "intent_recognition"):
-        intent_decision = await llm_resolve_intent_mode(
-            message,
-            cur_task=cur_task,
-            main_task_history=main_hist,
-            provider=runtime.provider,
-            base_url=runtime.base_url,
-            api_key=runtime.api_key,
-            model=runtime.model_resolved,
-            tools_meta=runtime.tools_meta,
-            rag_prefetch=bool(runtime.rag_prefetch),
-            web_search=bool(runtime.web_search),
-        ) or {}
-        intent_llm_powered = bool(intent_decision and intent_decision.get("llm_powered"))
+        intent_decision = await _resolve_intent_with_stream()
     if not intent_decision:
         intent_decision = resolve_intent_mode(
             message, cur_task=cur_task, is_simple_heuristic=simple_heur, main_task_history=main_hist
         )
     # 任务归属优先于 LLM 误判（含已结案主任务续接）；元问答/simple 不得被覆盖为续接
     task_aff_final = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
+    from .chat_context_memory import _is_unrelated_new_work
+
     if (
         task_aff_final
         and str(intent_decision.get("mode") or "") != "simple"
         and not simple_heur
         and not ai_chat._is_simple_intent(message)
+        and not _is_unrelated_new_work(message, cur_task or task_aff_final.get("cur_task"))
+        and not _has_link_analysis_intent(message)
     ):
         intent_decision = {**intent_decision, **task_aff_final, "mode": "continue_main"}
     mode = intent_decision.get("mode") or "new_main"
@@ -1187,10 +1297,24 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         _looks_like_task_resume,
         _looks_like_task_status_inquiry,
         _resolve_continue_task_id,
+        extract_task_id_from_message,
     )
 
     tid_fix = _resolve_continue_task_id(cur_task, main_hist)
-    if tid_fix and (
+    if _has_link_analysis_intent(message) and not (
+        _looks_like_task_resume(message)
+        or extract_task_id_from_message(message)
+    ):
+        simple = False
+        continue_main = False
+        mode = "new_main"
+        intent_decision = {
+            **intent_decision,
+            "mode": "new_main",
+            "task_id": "",
+            "reason": "规则覆盖：社媒/链接画像分析为新主任务",
+        }
+    elif tid_fix and (
         _looks_like_task_status_inquiry(message)
         or _looks_like_task_recall(message)
         or _looks_like_task_resume(message)
@@ -1205,10 +1329,6 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             "task_id": tid_fix,
             "reason": "规则覆盖：用户追问先前主任务",
         }
-    elif _has_link_analysis_intent(message):
-        simple = False
-        continue_main = False
-        mode = "new_main"
     if continue_main:
         rid = str(intent_decision.get("task_id") or "").strip()
         if not cur_task and rid:
@@ -1266,13 +1386,87 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             mode = "new_main"
             simple = False
             continue_main = False
-            task_id = None
+            use_main = True
+            task_kind = "main"
+            framework = "react"
+            task_id = _new_id("task_")
             intent_decision = {
                 **intent_decision,
                 "mode": "new_main",
                 "task_id": "",
                 "reason": "用户确认创建新主任务",
             }
+            from .chat_context_memory import annotate_intent_preprocess_plan, upsert_session_main_task_history
+
+            _hitl_snap = ai_chat._build_intent_rewrite_snapshot_for_message(message, runtime.link_ctx)
+            _hitl_snap = merge_pipeline_into_snapshot(_hitl_snap, pipeline_result)
+            _hitl_snap = _merge_intent_llm_into_snapshot(
+                _hitl_snap,
+                intent_decision,
+                message=message,
+                rag_prefetch=bool(runtime.rag_prefetch),
+                web_search=bool(runtime.web_search),
+            )
+            _hitl_snap = annotate_intent_preprocess_plan(
+                _hitl_snap,
+                message,
+                orch_pipeline_nodes=getattr(runtime, "orch_pipeline_nodes", None) or {},
+                domain=pipeline_result.intent_label,
+            )
+            _hitl_qs = str(
+                _hitl_snap.get("task_summary") or _hitl_snap.get("query_summary") or message or ""
+            )[:120]
+            ai_chat._span_task(session_id, message, task_id=task_id)
+            runtime.emit(
+                "task_created",
+                {
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "user_query": message,
+                    "status": PARENT_PLANNING,
+                    "task_kind": "main",
+                    "persist_main_task": True,
+                    "stage": "分析任务中",
+                    "progress": 18,
+                    "rewrite_snapshot": _hitl_snap,
+                    "query_summary": _hitl_qs,
+                    "task_complexity": _hitl_snap.get("task_complexity") or "normal",
+                },
+            )
+            runtime.emit(
+                "intent_resolved",
+                {
+                    "task_id": task_id,
+                    "task_kind": "main",
+                    "is_simple": False,
+                    "persist_main_task": True,
+                    "task_action": "new_main",
+                    "continue_main_task": False,
+                    "rewrite_snapshot": _hitl_snap,
+                    "user_query": message,
+                    "query_summary": _hitl_qs,
+                    "intent_reason": intent_decision.get("reason") or "",
+                    "task_complexity": _hitl_snap.get("task_complexity") or "normal",
+                    "detected_intent": {
+                        "domain": pipeline_result.intent_label,
+                        "domain_code": pipeline_result.intent,
+                        "mode": "new_main",
+                        "pipeline_source": pipeline_result.pipeline_source,
+                    },
+                },
+            )
+            try:
+                upsert_session_main_task_history(
+                    session_id,
+                    task_id=task_id,
+                    user_query=message,
+                    query_summary=_hitl_qs,
+                    status=PARENT_PLANNING,
+                )
+            except Exception:
+                pass
+            state["_hitl_early_emitted"] = True
+            state["_hitl_early_snap"] = _hitl_snap
         elif sw_act in ("pause",):
             return {
                 "orchestration_phase": PHASE_PAUSED,
@@ -1297,16 +1491,36 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
                 "reason": "用户选择继续当前主任务",
             }
 
-    snap = ai_chat._build_intent_rewrite_snapshot_for_message(
-        message, runtime.link_ctx
-    )
-    snap = merge_pipeline_into_snapshot(snap, pipeline_result)
-    snap = _merge_intent_llm_into_snapshot(
+    _hitl_early_emitted = bool(state.pop("_hitl_early_emitted", False))
+    snap = state.pop("_hitl_early_snap", None)
+    if not isinstance(snap, dict):
+        snap = ai_chat._build_intent_rewrite_snapshot_for_message(
+            message, runtime.link_ctx
+        )
+        snap = merge_pipeline_into_snapshot(snap, pipeline_result)
+        snap = _merge_intent_llm_into_snapshot(
+            snap,
+            intent_decision,
+            message=message,
+            rag_prefetch=bool(runtime.rag_prefetch),
+            web_search=bool(runtime.web_search),
+        )
+    else:
+        snap = dict(snap)
+        snap = _merge_intent_llm_into_snapshot(
+            snap,
+            intent_decision,
+            message=message,
+            rag_prefetch=bool(runtime.rag_prefetch),
+            web_search=bool(runtime.web_search),
+        )
+    from .chat_context_memory import annotate_intent_preprocess_plan
+
+    snap = annotate_intent_preprocess_plan(
         snap,
-        intent_decision,
-        message=message,
-        rag_prefetch=bool(runtime.rag_prefetch),
-        web_search=bool(runtime.web_search),
+        message,
+        orch_pipeline_nodes=getattr(runtime, "orch_pipeline_nodes", None) or {},
+        domain=pipeline_result.intent_label,
     )
     if continue_main:
         from .chat_context_memory import enrich_snapshot_for_continue_main
@@ -1324,8 +1538,29 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
     sub_plan_id, group_seq = _next_step_group(state)
     step_id = _new_id("step_")
     t0 = time.perf_counter()
+    from .chat_context_memory import resolve_preserved_task_queries
+
+    preserved_uq, preserved_qs = ("", "")
+    if continue_main and use_main:
+        preserved_uq, preserved_qs = resolve_preserved_task_queries(
+            task_id=str(task_id or ""),
+            cur_task=cur_task,
+            fallback_message="",
+        )
     if continue_main:
-        intent_result_cn = intent_decision.get("reason") or "识别为当前主任务延续，跳过重复编排"
+        intent_result_cn = format_intent_result_brief_cn(
+            simple=False,
+            continue_main=True,
+            task_id=str(task_id or intent_decision.get("task_id") or ""),
+            task_title=str(
+                preserved_qs
+                or snap.get("query_summary")
+                or snap.get("task_summary")
+                or ""
+            ).strip(),
+        )
+        if not intent_result_cn:
+            intent_result_cn = intent_decision.get("reason") or "延续主任务"
     else:
         ts = str(snap.get("task_summary") or snap.get("query_summary") or "").strip()
         intent_result_cn = format_intent_result_brief_cn(
@@ -1350,6 +1585,11 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         "llm_powered": intent_llm_powered,
         "task_summary": snap.get("task_summary") or snap.get("query_summary") or "",
         "query_keywords": snap.get("query_keywords") or snap.get("keywords") or [],
+        "query_rewrite_decision": snap.get("query_rewrite_decision") or "",
+        "query_rewrite_skip_reason": snap.get("query_rewrite_skip_reason") or "",
+        "task_decompose_decision": snap.get("task_decompose_decision") or "",
+        "task_decompose_skip_reason": snap.get("task_decompose_skip_reason") or "",
+        "task_complexity": snap.get("task_complexity") or ("normal" if simple else "complex"),
         "mode": mode,
         "reason": intent_decision.get("reason") or "",
     }
@@ -1360,15 +1600,6 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         "read_comments": bool(runtime.read_comments),
         "orch_pipeline_nodes": dict(getattr(runtime, "orch_pipeline_nodes", None) or {}),
     }
-    from .chat_context_memory import resolve_preserved_task_queries
-
-    preserved_uq, preserved_qs = ("", "")
-    if continue_main and use_main:
-        preserved_uq, preserved_qs = resolve_preserved_task_queries(
-            task_id=str(task_id or ""),
-            cur_task=cur_task,
-            fallback_message="",
-        )
     runtime.emit(
         "intent_resolved",
         {
@@ -1391,9 +1622,13 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
                 else (message if use_main else "")
             ),
             "query_summary": (
-                preserved_qs
-                if continue_main and preserved_qs
-                else ((message or "")[:120] if use_main else "")
+                str(snap.get("task_summary") or snap.get("query_summary") or message or "")[:120]
+                if use_main and not continue_main
+                else (
+                    preserved_qs
+                    if continue_main and preserved_qs
+                    else ((message or "")[:120] if use_main else "")
+                )
             ),
             "preserve_task_identity": bool(continue_main and preserved_uq),
             "intent_reason": intent_decision.get("reason") or "",
@@ -1413,9 +1648,14 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             think_text_override=(
                 str(intent_decision.get("llm_raw") or intent_decision.get("reason") or "")
                 if intent_llm_powered
-                else None
+                else (
+                    summarize_orchestration_payload_cn("intent", intent_out)
+                    or str(intent_decision.get("reason") or "")
+                )
             ),
             llm_powered=intent_llm_powered,
+            pre_step_id=intent_pre_step_id or None,
+            think_streamed=intent_think_streamed,
         )
     group_seq = orch_emit.get("group_seq", group_seq)
 
@@ -1553,7 +1793,7 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             result_brief=intent_result_cn,
         )
 
-    if not simple and not continue_main:
+    if not simple and not continue_main and not _hitl_early_emitted:
         runtime.emit(
             "intent_resolved",
             {
@@ -1565,8 +1805,11 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
                 "continue_main_task": continue_main,
                 "rewrite_snapshot": snap if use_main else None,
                 "user_query": message if use_main else "",
-                "query_summary": (message or "")[:120] if use_main else "",
+                "query_summary": str(snap.get("task_summary") or snap.get("query_summary") or message or "")[:120]
+                if use_main
+                else "",
                 "intent_reason": intent_decision.get("reason") or "",
+                "task_complexity": snap.get("task_complexity") or "normal",
             },
         )
     elif simple:
@@ -1684,25 +1927,22 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
         rewrite_result["query_keywords"] = [str(x).strip() for x in qk if str(x).strip()]
     rewritten = str(rewrite_result.get("rewritten_query") or snap.get("rewritten_query") or message or "").strip()
     llm_rewrite_text = ""
+    rewrite_pre_step = ""
     if runtime.api_key and runtime.model_resolved:
-        text = ""
-        async for piece in ai_chat._iter_react_llm_tokens(
-            phase="rewrite",
-            user_message=rewritten,
-            provider=runtime.provider,
-            base_url=runtime.base_url,
-            api_key=runtime.api_key,
-            model=runtime.model_resolved,
-            tools_meta=runtime.tools_meta,
-            react_memory=[],
+        rewrite_pre_step = _new_id("step_")
+        llm_rewrite_text, _ = await _orch_llm_invoke(
+            runtime,
+            "rewrite",
+            rewritten,
             intent_snapshot=snap,
-            include_tools_catalog=False,
             max_tokens=480,
-            thinking_enabled=False,
-        ):
-            text += piece
-        if text.strip():
-            llm_rewrite_text = text.strip()
+            step_id=rewrite_pre_step,
+            stream_think=True,
+            trace_id=state.get("trace_id") or runtime.trace_id,
+            task_id=state.get("task_id") or "",
+            step_name="问题改写",
+        )
+        if llm_rewrite_text.strip():
             llm_json = _parse_llm_json(llm_rewrite_text)
             if llm_json.get("rewritten_query"):
                 rewritten = str(llm_json.get("rewritten_query") or rewritten).strip()[:800]
@@ -1743,12 +1983,18 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
     plan_prefill: List[Any] = []
     combined_lane_text = ""
     if _eligible_kb_orch_fast_lane(runtime, message, snap):
+        bundle_pre = _new_id("step_")
         combined_lane_text, combined_json = await _orch_llm_invoke(
             runtime,
             "slot_decompose_bundle",
             rewritten,
             intent_snapshot={**snap, **rewrite_result},
             max_tokens=680,
+            step_id=bundle_pre,
+            stream_think=True,
+            trace_id=state.get("trace_id") or runtime.trace_id,
+            task_id=state.get("task_id") or "",
+            step_name="业务对齐+任务分解",
         )
         if combined_json:
             slot_prefill, decomp_prefill, plan_prefill = _apply_slot_decompose_bundle(
@@ -1782,6 +2028,8 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
         output_payload=rewrite_out,
         think_text_override=llm_rewrite_text or None,
         llm_powered=bool(llm_rewrite_text),
+        pre_step_id=rewrite_pre_step or None,
+        think_streamed=bool(rewrite_pre_step and llm_rewrite_text),
     )
     out = {
         "orchestration_phase": PHASE_REWRITE_PROPOSE,
@@ -1866,12 +2114,24 @@ async def node_intent_decompose(state: Dict[str, Any], config: RunnableConfig | 
 
     snapshot = _decompose_task_by_rules(rewritten, slot)
     _is_xhs = slot.get("domain") == "社媒分析"
+    decomp_pre = ""
+    llm_text = ""
     if _is_xhs:
         # XHS 快径：规则分解已生成 3 步骤（定位→检索→汇总），跳过 LLM
-        llm_text = ""
+        pass
     else:
+        decomp_pre = _new_id("step_")
         llm_text, llm_json = await _orch_llm_invoke(
-            runtime, "decompose", rewritten, intent_snapshot=slot, max_tokens=640,
+            runtime,
+            "decompose",
+            rewritten,
+            intent_snapshot=slot,
+            max_tokens=640,
+            step_id=decomp_pre,
+            stream_think=True,
+            trace_id=state.get("trace_id") or runtime.trace_id,
+            task_id=state.get("task_id") or "",
+            step_name="任务分解",
         )
         if isinstance(llm_json.get("sub_tasks"), list) and llm_json.get("sub_tasks"):
             snapshot = {
@@ -1897,6 +2157,8 @@ async def node_intent_decompose(state: Dict[str, Any], config: RunnableConfig | 
         output_payload=snapshot,
         think_text_override=llm_text or None,
         llm_powered=bool(llm_text),
+        pre_step_id=decomp_pre or None,
+        think_streamed=bool(decomp_pre and llm_text),
     )
     out = {
         "orchestration_phase": PHASE_DECOMPOSE,
@@ -1938,10 +2200,13 @@ async def node_intent_enhance(state: Dict[str, Any], config: RunnableConfig | No
 
     snapshot = _enhance_intent_by_rules(rewritten, slot, decomposition, web_search=bool(runtime.web_search))
     _is_xhs = slot.get("domain") == "社媒分析"
+    enhance_pre = ""
+    llm_text = ""
     if _is_xhs:
         # XHS 快径：规则增强已生成搜索提示，跳过 LLM
-        llm_text = ""
+        pass
     else:
+        enhance_pre = _new_id("step_")
         llm_text, llm_json = await _orch_llm_invoke(
             runtime,
             "enhance",
@@ -1954,6 +2219,11 @@ async def node_intent_enhance(state: Dict[str, Any], config: RunnableConfig | No
                 "needs_rag": bool(slot.get("needs_rag")),
             },
             max_tokens=640,
+            step_id=enhance_pre,
+            stream_think=True,
+            trace_id=trace_id,
+            task_id=task_id,
+            step_name="意图增强",
         )
         for key in ("retrieval_hints", "search_keyword_queries", "web_search_queries", "verification_points", "risk_flags", "hypothetical_answer", "search_objective"):
             val = llm_json.get(key)
@@ -1979,8 +2249,9 @@ async def node_intent_enhance(state: Dict[str, Any], config: RunnableConfig | No
         output_payload=snapshot,
         think_text_override=llm_text or None,
         llm_powered=bool(llm_text),
+        pre_step_id=enhance_pre or None,
+        think_streamed=bool(enhance_pre and llm_text),
     )
-    framework = state.get("framework") or "react"
     route = _route_after_enhance_chain(runtime, slot, framework)
     out = {
         "orchestration_phase": PHASE_ENHANCE,
@@ -2145,8 +2416,18 @@ async def node_slot_fill(state: Dict[str, Any], config: RunnableConfig) -> Dict[
         out.update(_sse_events_from_runtime(runtime))
         return out
 
+    slot_pre = _new_id("step_")
     llm_text, llm_json = await _orch_llm_invoke(
-        runtime, "slot", str(rewritten or ""), intent_snapshot=snap, max_tokens=520,
+        runtime,
+        "slot",
+        str(rewritten or ""),
+        intent_snapshot=snap,
+        max_tokens=520,
+        step_id=slot_pre,
+        stream_think=True,
+        trace_id=state.get("trace_id") or runtime.trace_id,
+        task_id=state.get("task_id") or "",
+        step_name="业务对齐",
     )
     for key in ("domain", "module", "operation_type", "entities", "retrieval_terms", "needs_rag", "state"):
         val = llm_json.get(key)
@@ -2185,6 +2466,8 @@ async def node_slot_fill(state: Dict[str, Any], config: RunnableConfig) -> Dict[
         output_payload=slot,
         think_text_override=llm_text or None,
         llm_powered=bool(llm_text),
+        pre_step_id=slot_pre,
+        think_streamed=bool(llm_text),
     )
     out = {
         "orchestration_phase": PHASE_SLOT_FILL,
@@ -2557,21 +2840,23 @@ async def node_plan_detect(state: Dict[str, Any], config: RunnableConfig) -> Dic
     runtime = _runtime_from_state_or_config(state, config)
     message = state.get("message") or runtime.message
     steps: List[Dict[str, Any]] = []
+    plan_pre = ""
+    plan_llm_text = ""
     if runtime.api_key and runtime.model_resolved:
-        text = ""
-        async for piece in ai_chat._iter_react_llm_tokens(
-            phase="plan",
-            user_message=message,
-            provider=runtime.provider,
-            base_url=runtime.base_url,
-            api_key=runtime.api_key,
-            model=runtime.model_resolved,
-            tools_meta=runtime.tools_meta,
-            react_memory=state.get("react_memory") or [],
+        plan_pre = _new_id("step_")
+        plan_llm_text, _ = await _orch_llm_invoke(
+            runtime,
+            "plan",
+            message,
             intent_snapshot=state.get("intent_rewrite_snapshot"),
-        ):
-            text += piece
-        for i, line in enumerate([ln.strip() for ln in text.splitlines() if ln.strip()][:8], start=1):
+            max_tokens=640,
+            step_id=plan_pre,
+            stream_think=True,
+            trace_id=state.get("trace_id") or runtime.trace_id,
+            task_id=state.get("task_id") or "",
+            step_name="任务分解",
+        )
+        for i, line in enumerate([ln.strip() for ln in plan_llm_text.splitlines() if ln.strip()][:8], start=1):
             steps.append({"index": i, "title": line[:200], "done": False})
     if not steps:
         steps = state.get("plan_steps") or [
@@ -2589,6 +2874,10 @@ async def node_plan_detect(state: Dict[str, Any], config: RunnableConfig) -> Dic
         phase="plan",
         result_brief=f"共 {len(steps)} 步：{titles}" if titles else f"共 {len(steps)} 步待办",
         extra={"plan_steps": steps},
+        think_text_override=plan_llm_text or None,
+        llm_powered=bool(plan_llm_text),
+        pre_step_id=plan_pre or None,
+        think_streamed=bool(plan_pre and plan_llm_text),
     )
     return {
         "orchestration_phase": PHASE_PLAN,
@@ -2724,6 +3013,7 @@ async def node_react_entry(state: Dict[str, Any], config: RunnableConfig) -> Dic
         "execution_done": False,
         "react_round": 0,
         "orch_chain": prep.get("orch_chain", []),
+        "group_seq": prep.get("group_seq", state.get("group_seq")),
         **_sse_events_from_runtime(runtime),
     }
 

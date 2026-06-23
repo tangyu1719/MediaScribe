@@ -315,6 +315,23 @@ def extract_description_body(result: ImageProcessResult) -> str:
     return body
 
 
+def _detect_annotations(result: ImageProcessResult) -> bool:
+    """检测描述中是否含红框/编号等标注特征（对齐 HaiChiAgent）。"""
+    combined = " ".join(
+        [
+            result.vlm_description or "",
+            result.ocr_text or "",
+            str(result.extra.get("title_hint") or ""),
+        ]
+    ).lower()
+    markers = [
+        "区块(", "标记", "红框", "箭头", "标注", "编号",
+        "①", "②", "③", "④", "⑤", "「", "」", "框选", "高亮",
+        "箭头指向", "注明", "备注",
+    ]
+    return any(m in combined for m in markers)
+
+
 def build_picture_id(result: ImageProcessResult, *, ordinal: int = 0) -> str:
     title = result.extra.get("title_hint") or result.image_id
     ord_num = ordinal
@@ -334,16 +351,19 @@ def build_rag_image_block(
     ordinal: int = 0,
     include_link: bool = True,
 ) -> str:
-    """RAG 切片友好 picture 块：picture_id + 绝对路径 url + description。"""
-    _ = include_link  # 保留参数兼容；url 固定写绝对路径
+    """RAG 切片友好 picture 块：picture_id + url + description + is_annotated（对齐 HaiChiAgent）。"""
+    _ = include_link
     picture_id = build_picture_id(result, ordinal=ordinal)
     url = str(Path(result.abs_path).resolve()) if result.abs_path else ""
     description = extract_description_body(result)
+    is_annotated = _detect_annotations(result)
     lines = [
         "{picture_id:" + picture_id + ";",
         "url:" + url + ";",
-        "description:",
     ]
+    if is_annotated:
+        lines.append("is_annotated:true;")
+    lines.append("description:")
     if description:
         lines.append(description)
     lines.append("}")

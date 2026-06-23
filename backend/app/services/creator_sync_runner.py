@@ -468,12 +468,28 @@ async def run_sync(subscription_id: str, trigger: str = "manual") -> Dict[str, A
             return {"ok": False, "sync_run_id": sync_run_id, "error_code": err_code, "error": msg}
 
 
-async def run_sync_all(trigger: str = "scheduled") -> Dict[str, Any]:
+async def run_sync_all(
+    trigger: str = "scheduled",
+    *,
+    progress_cb=None,
+    cancel_check=None,
+) -> Dict[str, Any]:
     from .creator_subscription_store import list_active_subscriptions
 
     subs = [s for s in list_active_subscriptions() if s.get("platform") == "xiaohongshu"]
+    total = len(subs)
+    if progress_cb:
+        progress_cb(5, f"准备同步 {total} 个 UP 订阅")
     results = []
-    for s in subs:
+    for i, s in enumerate(subs):
+        if cancel_check and cancel_check():
+            return {"ok": False, "cancelled": True, "count": len(results), "results": results}
+        if progress_cb and total:
+            pct = 5 + int((i / max(total, 1)) * 88)
+            progress_cb(pct, f"同步 UP 订阅 {i + 1}/{total}")
         r = await run_sync(s["subscription_id"], trigger=trigger)
         results.append({"subscription_id": s["subscription_id"], **r})
-    return {"ok": True, "count": len(results), "results": results}
+    if progress_cb:
+        progress_cb(95, "汇总 UP 同步结果")
+    ok = all(r.get("ok") for r in results) if results else True
+    return {"ok": ok, "count": len(results), "results": results}

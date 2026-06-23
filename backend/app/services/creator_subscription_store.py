@@ -709,12 +709,39 @@ def _artifact_status_from_history(row: Any) -> Dict[str, str]:
     }
 
 
+def _publish_meta_for_note_ids(db: Any, note_ids: List[str]) -> Dict[str, Dict[str, str]]:
+    """按 note_id 取最近一次同步条目中的发布时间（小红书原文发布，非入库时间）。"""
+    ids = [str(n or "").strip() for n in (note_ids or []) if str(n or "").strip()]
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(SyncRunItem.note_id, SyncRunItem.published_at, SyncRunItem.published_date)
+        .where(SyncRunItem.note_id.in_(ids))
+        .order_by(desc(SyncRunItem.id))
+    ).all()
+    out: Dict[str, Dict[str, str]] = {}
+    for nid, pub_at, pub_date in rows:
+        key = str(nid or "").strip()
+        if not key or key in out:
+            continue
+        out[key] = {
+            "published_at": str(pub_at or "").strip(),
+            "published_date": str(pub_date or "").strip(),
+        }
+    return out
+
+
 def _link_card_from_seen_and_history(
     sn: SubscriptionSeenNote,
     hist: Any,
+    *,
+    publish_meta: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """合并 seen 表与链接库 pipeline_task_history 为前端卡片结构。"""
     first_seen = sn.first_seen_at.isoformat() if sn.first_seen_at else ""
+    pm = publish_meta or {}
+    pub_at = str(pm.get("published_at") or "").strip()
+    pub_date = str(pm.get("published_date") or "").strip()
     card: Dict[str, Any] = {
         "subscription_id": sn.subscription_id,
         "platform": sn.platform or "",
@@ -723,7 +750,8 @@ def _link_card_from_seen_and_history(
         "url_hash": sn.url_hash or "",
         "title": (sn.title or "").strip() or sn.note_id or "",
         "content_type": sn.content_type or "",
-        "published_at": first_seen,
+        "published_at": pub_at,
+        "published_date": pub_date,
         "task_id": (sn.analysis_task_id or "").strip(),
         "analysis_status": sn.analysis_status or "pending",
         "task_note": "",
@@ -797,7 +825,16 @@ def list_subscription_link_cards(
             .offset((page - 1) * page_size)
             .limit(page_size)
         ).all()
-        items = [_link_card_from_seen_and_history(sn, hist) for sn, hist in rows]
+        note_ids = [str(sn.note_id or "").strip() for sn, _ in rows if str(sn.note_id or "").strip()]
+        pub_map = _publish_meta_for_note_ids(db, note_ids)
+        items = [
+            _link_card_from_seen_and_history(
+                sn,
+                hist,
+                publish_meta=pub_map.get(str(sn.note_id or "").strip()),
+            )
+            for sn, hist in rows
+        ]
 
     return {
         "ok": True,

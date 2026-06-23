@@ -39,11 +39,11 @@
         return;
       }
       showToastMsg("正在导入并打开…");
-      hub
-        .openLocalFile(f, "split")
+        hub
+        .openLocalFile(f, "split", { from: "reader" })
         .then(() => {
           refreshRecent();
-          showToastMsg("已在阅读器窗口打开");
+          showToastMsg("已打开阅读器");
         })
         .catch((err) => showToastMsg((err && err.message) || "打开失败", "err"));
       e.target.value = "";
@@ -71,7 +71,7 @@
 
     function readerOpenOutputFile(fileName) {
       if (!hub) return;
-      hub.openOutputMd(fileName, "split");
+      hub.openOutputMd(fileName, "split", { from: "reader" });
       hub.syncRecentFromServer().then(function (list) {
         rh.recent = list || hub.loadRecentList();
       });

@@ -1,11 +1,14 @@
 /**
- * 富文本渲染：picture_id 块解析、绝对路径 → /output/、Markdown、Mermaid
+ * 富文本渲染：picture_id 块解析（对齐 HaiChiAgent pictureBlocks.ts）、Markdown、Mermaid
  */
 (function (global) {
   "use strict";
 
+  var PICTURE_BLOCK_DETECT_RE = /\{picture_id\s*:/;
+
+  /** description / is_annotated 可选（对齐 HaiChiAgent build_rag_image_block） */
   var PICTURE_BLOCK_RE =
-    /\{picture_id\s*:\s*([^;\n]+)\s*;\s*\n?\s*url\s*:\s*([^;\n]+)\s*;\s*\n?\s*description\s*:\s*\n?([\s\S]*?)\n\}/gi;
+    /\{picture_id\s*:([^;]+);\s*url\s*:([^;]+)(?:;\s*is_annotated\s*:([^;]+);)?(?:;\s*description\s*:([^}]*?))?;?\s*\}/gi;
 
   function escHtml(s) {
     return String(s || "")
@@ -15,18 +18,25 @@
       .replace(/"/g, "&quot;");
   }
 
-  /** 绝对路径 / 相对 /output/ → 可 fetch 的 HTTP 路径 */
-  function resolveAssetHttpUrl(url) {
-    var u = String(url || "").trim();
-    if (!u) return "";
-    if (/^https?:\/\//i.test(u)) return u;
-    if (u.indexOf("/output/") === 0) return u;
-    var norm = u.replace(/\\/g, "/");
-    var low = norm.toLowerCase();
+  /** 绝对路径 / output 相对路径 → 前端可访问的 /output/... URL（对齐 HaiChiAgent absPathToPublicUrl） */
+  function resolveAssetHttpUrl(rawPath) {
+    var p = String(rawPath || "").trim();
+    p = p.replace(/\\\\/g, "\\");
+    p = p.replace(/\\/g, "/");
+    if (!p) return "";
+    if (/^https?:\/\//i.test(p)) return p;
+    if (p.indexOf("/output/") === 0) return p;
+    var low = p.toLowerCase();
     var idx = low.indexOf("/output/");
-    if (idx >= 0) return norm.slice(idx);
-    var base = norm.split("/").pop();
-    return base ? "/output/" + encodeURIComponent(base) : "";
+    if (idx >= 0) return p.slice(idx);
+    var kbIdx = low.indexOf("kb_assets/");
+    if (kbIdx >= 0) return "/output/" + p.slice(kbIdx).replace(/^\/+/, "");
+    var outOnly = low.indexOf("output/");
+    if (outOnly >= 0) return "/" + p.slice(outOnly).replace(/^\/+/, "");
+    var mmIdx = low.indexOf("mm_exports/");
+    if (mmIdx >= 0) return "/output/" + p.slice(mmIdx).replace(/^\/+/, "");
+    if (p.charAt(0) === "/") return p;
+    return "";
   }
 
   function parsePictureBlocks(text) {
@@ -39,52 +49,106 @@
         picture_id: String(m[1] || "").trim(),
         url: String(m[2] || "").trim(),
         http_url: resolveAssetHttpUrl(m[2]),
-        description: String(m[3] || "").trim(),
+        is_annotated: String(m[3] || "").trim().toLowerCase() === "true",
+        description: String(m[4] || "").trim(),
         raw: m[0],
       });
     }
     return out;
   }
 
-  function pictureBlockToHtml(block) {
-    var pid = escHtml(block.picture_id);
-    var http = resolveAssetHttpUrl(block.url);
-    var descHtml = block.description
-      ? renderMarkdownHtml(block.description, { mermaid: false, pictureBlocks: false })
-      : '<p class="sba-picture-empty">（无描述）</p>';
-    var img = http
-      ? '<img class="sba-picture-img" src="' +
-        escHtml(http) +
-        '" alt="' +
-        pid +
-        '" loading="lazy" />'
-      : '<div class="sba-picture-noimg">图片路径不可解析：' +
-        escHtml(block.url) +
-        "</div>";
+  /** 用户可见：仅图片 + 放大/复制，不展示 picture_id 与 description（对齐 HaiChiAgent） */
+  function renderPictureFigure(imgUrl) {
+    if (!imgUrl) return "";
+    var src = escHtml(imgUrl);
     return (
-      '<figure class="sba-picture-block" data-picture-id="' +
-      pid +
+      '<figure class="kb-picture-block" data-kb-src="' +
+      src +
       '">' +
-      '<figcaption class="sba-picture-id"><code>picture_id:' +
-      pid +
-      "</code></figcaption>" +
-      img +
-      '<div class="sba-picture-desc">' +
-      descHtml +
-      "</div></figure>"
+      '<div class="kb-picture-toolbar">' +
+      '<button type="button" class="kb-picture-btn" data-kb-zoom title="放大查看">🔍 放大</button>' +
+      '<button type="button" class="kb-picture-btn" data-kb-copy title="复制图片">📋 复制</button>' +
+      "</div>" +
+      '<img class="kb-picture-img kb-picture-zoomable" src="' +
+      src +
+      '" alt="" loading="lazy" data-kb-src="' +
+      src +
+      '" />' +
+      "</figure>"
     );
   }
 
   function preprocessPictureBlocks(text) {
-    return String(text || "").replace(PICTURE_BLOCK_RE, function (full, pid, url, desc) {
-      return pictureBlockToHtml({
-        picture_id: String(pid || "").trim(),
-        url: String(url || "").trim(),
-        http_url: resolveAssetHttpUrl(url),
-        description: String(desc || "").trim(),
-        raw: full,
-      });
+    if (!text || !PICTURE_BLOCK_DETECT_RE.test(text)) return String(text || "");
+    return String(text || "").replace(PICTURE_BLOCK_RE, function (_full, _pid, url) {
+      var imgUrl = resolveAssetHttpUrl(url);
+      return renderPictureFigure(imgUrl);
     });
+  }
+
+  async function copyKbImage(src) {
+    var url = String(src || "").trim();
+    if (!url) return false;
+    try {
+      var res = await fetch(url);
+      if (!res.ok) throw new Error("fetch failed");
+      var blob = await res.blob();
+      if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
+        var type = blob.type || "image/png";
+        await navigator.clipboard.write([new ClipboardItem((function () {
+          var o = {};
+          o[type] = blob;
+          return o;
+        })())]);
+        return true;
+      }
+    } catch (_) {
+      /* 降级复制链接 */
+    }
+    try {
+      await navigator.clipboard.writeText(new URL(url, global.location.origin).href);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function handleKbPictureClick(e, onZoom) {
+    var el = e.target;
+    if (!el || !el.closest) return false;
+    var zoomBtn = el.closest("[data-kb-zoom]");
+    var copyBtn = el.closest("[data-kb-copy]");
+    var img = el.closest(".kb-picture-zoomable");
+
+    function resolveSrc() {
+      var fig = el.closest(".kb-picture-block");
+      return (
+        (fig && fig.getAttribute("data-kb-src")) ||
+        (img && img.getAttribute("data-kb-src")) ||
+        (img && img.src) ||
+        ""
+      );
+    }
+
+    if (zoomBtn || (img && !copyBtn)) {
+      var zsrc = resolveSrc();
+      if (zsrc) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof onZoom === "function") onZoom(zsrc);
+        return true;
+      }
+    }
+
+    if (copyBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      var csrc = resolveSrc();
+      if (csrc) void copyKbImage(csrc);
+      return true;
+    }
+
+    return false;
   }
 
   var _markedRendererInstalled = false;
@@ -154,7 +218,6 @@
     return false;
   }
 
-  /** 合并段内软换行，避免 marked 拆成多个 <p> 或空块 */
   function collapseSoftLineBreaks(text) {
     var lines = String(text || "").split("\n");
     var out = [];
@@ -232,8 +295,16 @@
     }
     if (typeof DOMPurify !== "undefined") {
       html = DOMPurify.sanitize(html, {
-        ADD_TAGS: ["figure", "figcaption"],
-        ADD_ATTR: ["target", "rel", "loading", "data-picture-id", "data-mermaid-id"],
+        ADD_TAGS: ["figure"],
+        ADD_ATTR: [
+          "target",
+          "rel",
+          "loading",
+          "data-kb-src",
+          "data-kb-zoom",
+          "data-kb-copy",
+          "data-mermaid-id",
+        ],
       });
     }
     return html;
@@ -277,7 +348,9 @@
       el.classList.add("sba-mermaid-error");
       el.insertAdjacentHTML(
         "beforeend",
-        '<div class="sba-mermaid-err">' + escHtml(String(err && err.message || err)) + "</div>"
+        '<div class="sba-mermaid-err">' +
+          escHtml(String((err && err.message) || err)) +
+          "</div>"
       );
     }
   }
@@ -317,10 +390,14 @@
   }
 
   global.SBA_RICH_CONTENT = {
+    PICTURE_BLOCK_DETECT_RE: PICTURE_BLOCK_DETECT_RE,
     PICTURE_BLOCK_RE: PICTURE_BLOCK_RE,
     resolveAssetHttpUrl: resolveAssetHttpUrl,
     parsePictureBlocks: parsePictureBlocks,
     preprocessPictureBlocks: preprocessPictureBlocks,
+    renderPictureFigure: renderPictureFigure,
+    copyKbImage: copyKbImage,
+    handleKbPictureClick: handleKbPictureClick,
     normalizeMarkdownSource: normalizeMarkdownSource,
     renderMarkdownHtml: renderMarkdownHtml,
     renderRichContentHtml: renderRichContentHtml,

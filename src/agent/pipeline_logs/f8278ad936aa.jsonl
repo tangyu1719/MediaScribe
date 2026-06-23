@@ -21,3 +21,139 @@
 {"timestamp": "23:02:51", "level": "ERROR", "message": "Traceback (most recent call last):\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 706, in process_video_pipeline\n    update_task(task_id, status=\"transcribing\", stage=\"步骤2: 语音转文字\", progress=40)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\python解释器\\Lib\\concurrent\\futures\\thread.py\", line 58, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\backend\\app\\services\\video_pipeline.py\", line 708, in <lambda>\n    transcript = await loop.run_in_executor(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: speech_to_text() got an unexpected keyword argument 'strict'\n"}
 {"timestamp": "23:02:51", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1779980571322_1de3 status=failed; step_id=step_1779980571322_1de3; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
 {"timestamp": "23:02:51", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
+{"timestamp": "17:57:02", "level": "INFO", "message": "[断点恢复] 复用本卡片 task_id=f8278ad936aa"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "同链接复用本卡片继续处理 [抖音] https://v.douyin.com/mUXkHOWXC_8/"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "收到处理请求 [抖音] https://v.douyin.com/mUXkHOWXC_8/"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "17:57:04", "level": "INFO", "message": "[首层标题] 开始从链接解析展示标题…"}
+{"timestamp": "17:57:06", "level": "INFO", "message": "[首层标题] 解析结束; ok=False; elapsed_ms=1732"}
+{"timestamp": "17:57:06", "level": "INFO", "message": "断点恢复：复用已下载视频 F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\001-05-28-douyin.mp4"}
+{"timestamp": "17:57:14", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1780307826464_7228 status=running; step_id=step_1780307826464_7228; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "17:57:14", "level": "INFO", "message": "使用 Whisper 本地模型进行语音转文字..."}
+{"timestamp": "17:57:15", "level": "INFO", "message": "加载 Whisper 模型..."}
+{"timestamp": "17:57:15", "level": "INFO", "message": "首次加载 Whisper 模型..."}
+{"timestamp": "17:57:15", "level": "INFO", "message": "加载 Whisper tiny 模型（提高转写速度）..."}
+{"timestamp": "17:57:17", "level": "INFO", "message": "Whisper tiny 模型加载完成并缓存"}
+{"timestamp": "17:57:17", "level": "INFO", "message": "模型加载耗时: 1.46秒"}
+{"timestamp": "17:57:17", "level": "INFO", "message": "开始转写..."}
+{"timestamp": "17:57:17", "level": "INFO", "message": "使用优化参数进行转写..."}
+{"timestamp": "17:57:38", "level": "INFO", "message": "转写耗时: 21.41秒"}
+{"timestamp": "17:57:38", "level": "INFO", "message": "语音转文字完成！"}
+{"timestamp": "17:57:38", "level": "INFO", "message": "转写结果: 在企业销售右中,如何更好的服务客户是持续贬定单的关键因素之一。隐结AI只能套件。通过将AI融入业务以更高效的业务自动画和更明节的业务动查理,重速运营兴格局。当企业受到客户采购定单时,业务员需要第一时间..."}
+{"timestamp": "17:57:38", "level": "INFO", "message": "语音转文字总耗时: 24.20秒"}
+{"timestamp": "17:57:42", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1780307826464_7228 status=completed; step_id=step_1780307826464_7228; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "17:57:42", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档-视频转写|video_pipeline.process_video_pipeline|https://v.douyin.com/mUXkHOWXC_8/|转写门禁拒绝|硬编执行] ERROR; error_message=转写重复率过高（100% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; transcribe_degraded=True; repetition_ratio=1.0; char_len=1029"}
+{"timestamp": "17:57:42", "level": "ERROR", "message": "[转写失败] transcribe_degraded_repetition: 转写重复率过高（100% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; error_code=transcribe_degraded_repetition; link=https://v.douyin.com/mUXkHOWXC_8/; transcribe_degraded=True; repetition_ratio=1.0; char_len=1029; transcribe_source="}
+{"timestamp": "17:57:42", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
+{"timestamp": "18:47:11", "level": "INFO", "message": "[断点恢复] 复用本卡片 task_id=f8278ad936aa"}
+{"timestamp": "18:47:13", "level": "INFO", "message": "断点恢复任务: https://v.douyin.com/mUXkHOWXC_8/ · 从阶段 transcribe 继续"}
+{"timestamp": "18:47:13", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "18:47:13", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "18:47:13", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "18:47:13", "level": "INFO", "message": "[首层标题] 开始从链接解析展示标题…"}
+{"timestamp": "18:47:15", "level": "INFO", "message": "[首层标题] 解析结束; ok=False; elapsed_ms=1998"}
+{"timestamp": "18:47:15", "level": "INFO", "message": "断点恢复：复用已下载视频 F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\001-05-28-douyin.mp4"}
+{"timestamp": "18:47:23", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1780310835314_889b status=running; step_id=step_1780310835314_889b; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "18:47:23", "level": "INFO", "message": "使用 Whisper 本地模型进行语音转文字..."}
+{"timestamp": "18:47:23", "level": "INFO", "message": "加载 Whisper 模型..."}
+{"timestamp": "18:47:23", "level": "INFO", "message": "首次加载 Whisper 模型..."}
+{"timestamp": "18:47:23", "level": "INFO", "message": "加载 Whisper tiny 模型（提高转写速度）..."}
+{"timestamp": "18:47:24", "level": "INFO", "message": "Whisper tiny 模型加载完成并缓存"}
+{"timestamp": "18:47:24", "level": "INFO", "message": "模型加载耗时: 0.74秒"}
+{"timestamp": "18:47:24", "level": "INFO", "message": "开始转写..."}
+{"timestamp": "18:47:24", "level": "INFO", "message": "使用优化参数进行转写..."}
+{"timestamp": "18:47:43", "level": "INFO", "message": "转写耗时: 18.51秒"}
+{"timestamp": "18:47:43", "level": "INFO", "message": "语音转文字完成！"}
+{"timestamp": "18:47:43", "level": "INFO", "message": "转写结果: 在企业销售右中,如何更好的服务客户是持续贬定单的关键因素之一。隐结AI只能套件。通过将AI融入业务以更高效的业务自动画和更明节的业务动查理,重速运营兴格局。当企业受到客户采购定单时,业务员需要第一时间..."}
+{"timestamp": "18:47:43", "level": "INFO", "message": "语音转文字总耗时: 19.64秒"}
+{"timestamp": "18:47:47", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1780310835314_889b status=completed; step_id=step_1780310835314_889b; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "18:47:47", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档-视频转写|video_pipeline.process_video_pipeline|https://v.douyin.com/mUXkHOWXC_8/|转写门禁拒绝|硬编执行] ERROR; error_message=转写重复率过高（100% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; transcribe_degraded=True; repetition_ratio=1.0; char_len=1029"}
+{"timestamp": "18:47:47", "level": "ERROR", "message": "[转写失败] transcribe_degraded_repetition: 转写重复率过高（100% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; error_code=transcribe_degraded_repetition; link=https://v.douyin.com/mUXkHOWXC_8/; transcribe_degraded=True; repetition_ratio=1.0; char_len=1029; transcribe_source="}
+{"timestamp": "18:47:47", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
+{"timestamp": "19:03:57", "level": "INFO", "message": "[断点恢复] 复用本卡片 task_id=f8278ad936aa"}
+{"timestamp": "19:03:57", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "19:03:57", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "19:03:57", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "19:03:57", "level": "INFO", "message": "[首层标题] 开始从链接解析展示标题…"}
+{"timestamp": "19:03:59", "level": "INFO", "message": "[首层标题] 解析结束; ok=False; elapsed_ms=1589"}
+{"timestamp": "19:03:59", "level": "INFO", "message": "断点恢复：复用已下载视频 F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\001-05-28-douyin.mp4"}
+{"timestamp": "19:04:09", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1780311841508_b272 status=running; step_id=step_1780311841508_b272; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "19:04:09", "level": "INFO", "message": "使用 Whisper 本地模型进行语音转文字..."}
+{"timestamp": "19:04:12", "level": "INFO", "message": "加载 Whisper 模型..."}
+{"timestamp": "19:04:12", "level": "INFO", "message": "首次加载 Whisper 模型..."}
+{"timestamp": "19:04:12", "level": "INFO", "message": "加载 Whisper tiny 模型（提高转写速度）..."}
+{"timestamp": "19:04:12", "level": "INFO", "message": "Whisper tiny 模型加载完成并缓存"}
+{"timestamp": "19:04:12", "level": "INFO", "message": "模型加载耗时: 0.75秒"}
+{"timestamp": "19:04:12", "level": "INFO", "message": "开始转写..."}
+{"timestamp": "19:04:12", "level": "INFO", "message": "使用优化参数进行转写..."}
+{"timestamp": "19:04:34", "level": "INFO", "message": "转写耗时: 21.72秒"}
+{"timestamp": "19:04:34", "level": "INFO", "message": "语音转文字完成！"}
+{"timestamp": "19:04:34", "level": "INFO", "message": "转写结果: 在企业销售右中,如何更好的服务客户是持续贬定单的关键因素之一。隐结AI只能套件。通过将AI融入业务以更高效的业务自动画和更明节的业务动查理,重速运营兴格局。当企业受到客户采购定单时,业务员需要第一时间..."}
+{"timestamp": "19:04:34", "level": "INFO", "message": "语音转文字总耗时: 25.06秒"}
+{"timestamp": "19:04:38", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1780311841508_b272 status=completed; step_id=step_1780311841508_b272; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "19:04:38", "level": "WARNING", "message": "[转写清洗] 已剔除尾部 Whisper 幻听循环（约 72 字），保留有效正文进入沉淀"}
+{"timestamp": "19:04:38", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档-视频转写|video_pipeline.process_video_pipeline|https://v.douyin.com/mUXkHOWXC_8/|转写门禁拒绝|硬编执行] ERROR; error_message=转写重复率过高（47% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; transcribe_degraded=True; repetition_ratio=0.47357293868921774; char_len=956"}
+{"timestamp": "19:04:38", "level": "ERROR", "message": "[转写失败] transcribe_degraded_repetition: 转写重复率过高（47% ≥ 38%），疑似 Whisper 幻听/并发劣化；样例：小伙伴们的小伙伴们的小伙伴们的小×7；伙伴们的小伙伴们的小伙伴们的小伙×7；伴们的小伙伴们的小伙伴们的小伙伴×7; error_code=transcribe_degraded_repetition; link=https://v.douyin.com/mUXkHOWXC_8/; transcribe_degraded=True; repetition_ratio=0.47357293868921774; char_len=956; transcribe_source="}
+{"timestamp": "19:04:38", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
+{"timestamp": "19:05:13", "level": "INFO", "message": "[断点恢复] 复用本卡片 task_id=f8278ad936aa"}
+{"timestamp": "19:05:13", "level": "INFO", "message": "[调度] 流水线排队（线程池 max_workers=8）; 调度协程=MainThread"}
+{"timestamp": "19:05:13", "level": "INFO", "message": "[调度] 已获得线程池槽位，提交执行; 当前线程=MainThread"}
+{"timestamp": "19:05:13", "level": "INFO", "message": "[调度] 工作线程接管整条流水线; thread=pipeline-run_0"}
+{"timestamp": "19:05:13", "level": "INFO", "message": "[首层标题] 开始从链接解析展示标题…"}
+{"timestamp": "19:05:16", "level": "INFO", "message": "[首层标题] 解析结束; ok=False; elapsed_ms=2454"}
+{"timestamp": "19:05:16", "level": "INFO", "message": "断点恢复：复用已下载视频 F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\src\\agent\\videos\\001-05-28-douyin.mp4"}
+{"timestamp": "19:05:26", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|开始] SPAN 语音转文字(api_call) step_id=step_1780311918525_502c status=running; step_id=step_1780311918525_502c; step_type=api_call; stage_id=transcribe"}
+{"timestamp": "19:05:26", "level": "INFO", "message": "使用 Whisper 本地模型进行语音转文字..."}
+{"timestamp": "19:05:43", "level": "INFO", "message": "加载 Whisper 模型..."}
+{"timestamp": "19:05:43", "level": "INFO", "message": "首次加载 Whisper 模型..."}
+{"timestamp": "19:05:43", "level": "INFO", "message": "加载 Whisper tiny 模型（提高转写速度）..."}
+{"timestamp": "19:05:43", "level": "INFO", "message": "Whisper tiny 模型加载完成并缓存"}
+{"timestamp": "19:05:43", "level": "INFO", "message": "模型加载耗时: 0.60秒"}
+{"timestamp": "19:05:43", "level": "INFO", "message": "开始转写..."}
+{"timestamp": "19:05:43", "level": "INFO", "message": "使用优化参数进行转写..."}
+{"timestamp": "19:06:04", "level": "INFO", "message": "转写耗时: 20.53秒"}
+{"timestamp": "19:06:04", "level": "INFO", "message": "语音转文字完成！"}
+{"timestamp": "19:06:04", "level": "INFO", "message": "转写结果: 在企业销售右中,如何更好的服务客户是持续贬定单的关键因素之一。隐结AI只能套件。通过将AI融入业务以更高效的业务自动画和更明节的业务动查理,重速运营兴格局。当企业受到客户采购定单时,业务员需要第一时间..."}
+{"timestamp": "19:06:04", "level": "INFO", "message": "语音转文字总耗时: 37.79秒"}
+{"timestamp": "19:06:08", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|语音转文字|Agent执行|结束] SPAN 语音转文字(api_call) step_id=step_1780311918525_502c status=completed; step_id=step_1780311918525_502c; step_type=api_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "19:06:08", "level": "WARNING", "message": "[转写清洗] 已剔除尾部 Whisper 幻听循环（约 96 字），保留有效正文进入沉淀"}
+{"timestamp": "19:06:16", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|原文整理与摘要|Agent执行|开始] SPAN 原文整理与摘要(llm_call) step_id=step_1780311968480_0d6c status=running; step_id=step_1780311968480_0d6c; step_type=llm_call; stage_id=ai_analysis"}
+{"timestamp": "19:06:16", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|入口] 文档沉淀开始; text_len=932; summary_after_article=True; comments_len=0"}
+{"timestamp": "19:06:16", "level": "INFO", "message": "[链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|入口] 文档沉淀开始; text_len=932; summary_after_article=True; comments_len=0"}
+{"timestamp": "19:06:16", "level": "INFO", "message": "[抖音视频沉淀] 顺序执行：先原文整理，再评论观点（可选），再摘要"}
+{"timestamp": "19:06:16", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|调用前] 原文整理Agent LLM 即将调用; primary_endpoint=ep-20260418230910-dqtqm; backup_endpoint=ep-20260418230009-b9grz; provider=ark; route_mode=priority; agent_name=doc_standardize_agent; task_type=summary; text_len=932; timeout_sec=90.0; timeout_desc=1.5 分钟; gateway_chosen=ep-20260418230910-dqtqm"}
+{"timestamp": "19:08:33", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|调用后] 原文整理Agent LLM 调用完成; ok=True; out_len=999; elapsed_ms=137221; token_count=499; confidence=0.82; primary_endpoint=ep-20260418230910-dqtqm; timeout_sec=90.0"}
+{"timestamp": "19:08:33", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|调用前] 摘要Agent LLM 即将调用; primary_endpoint=ep-20260418230910-dqtqm; backup_endpoint=ep-20260418230009-b9grz; provider=ark; route_mode=priority; agent_name=summary_agent; task_type=summary; text_len=958; timeout_sec=90.0; timeout_desc=1.5 分钟; gateway_chosen=ep-20260418230910-dqtqm"}
+{"timestamp": "19:08:33", "level": "INFO", "message": "[抖音视频沉淀] 摘要输入 958 字符，超时 1.5 分钟"}
+{"timestamp": "19:09:05", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|调用后] 摘要Agent LLM 调用完成; ok=True; out_len=650; elapsed_ms=31732; token_count=325; confidence=0.82; primary_endpoint=ep-20260418230910-dqtqm; timeout_sec=90.0"}
+{"timestamp": "19:09:05", "level": "INFO", "message": "[pipeline-llm_0] [链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|出口] 文档沉淀完成; ai_summary_len=580; article_len=958; article_source=llm_polish; summary_model=ep-20260418230910-dqtqm; article_model=ep-20260418230910-dqtqm"}
+{"timestamp": "19:09:05", "level": "INFO", "message": "[链接沉淀文档-抖音视频|document_consolidation.run_document_consolidation|抖音视频沉淀|Agent执行|出口] 文档沉淀完成; ai_summary_len=580; article_len=958; article_source=llm_polish; summary_model=ep-20260418230910-dqtqm; article_model=ep-20260418230910-dqtqm"}
+{"timestamp": "19:09:05", "level": "INFO", "message": "从AI摘要中提取标题：AI套件纳纳赋能企业销售全流程"}
+{"timestamp": "19:09:05", "level": "INFO", "message": "二层标题（AI摘要）: AI套件纳纳赋能企业销售全流程"}
+{"timestamp": "19:09:09", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|原文整理与摘要|Agent执行|结束] SPAN 原文整理与摘要(llm_call) step_id=step_1780311968480_0d6c status=completed; step_id=step_1780311968480_0d6c; step_type=llm_call; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "19:09:17", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|生成文档|Agent执行|开始] SPAN 生成文档(summary) step_id=step_1780312149498_76a0 status=running; step_id=step_1780312149498_76a0; step_type=summary; stage_id=generate_md"}
+{"timestamp": "19:09:17", "level": "INFO", "message": "文档生成成功: F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\output\\047-06-01-AI套件纳纳赋能企业销售全流程_视频分析.md"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档|pipeline_span_bridge|生成文档|Agent执行|结束] SPAN 生成文档(summary) step_id=step_1780312149498_76a0 status=completed; step_id=step_1780312149498_76a0; step_type=summary; token_count=0; confidence=0.0; elapsed_ms=0"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "MD 已生成，任务完成；耗时 245612ms，Token 824（958+580 字；飞书/HTML 后台继续）"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[pipeline-run_0] [链接沉淀文档-HTML长页|video_pipeline.start_html_generation|047-06-01-AI套件纳纳赋能企业销售全流程_视频分析.md|Agent执行|启动] HTML 三级降级后台任务已提交; max_bytes=20971520; sync_timeout_sec=60; async_timeout_sec=600; multiphase=False; legend_agent_enabled=True"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] 启动三级降级架构 HTML 生成..."}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] Tier1: delivery_pipeline / Tier2: diagram_pipeline / Tier3: simple_fallback"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] 超时: sync=60s async=600s"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[调度] 工作线程流水线结束; thread=pipeline-run_0"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] Tier1: 启动完整双Agent交付流水线 (multiphase=False)..."}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] [longpage_delivery] job_start path=F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\output\\047-06-01-AI套件纳纳赋能企业销售全流程_视频分析.md"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] [longpage_delivery] parse_md article=958 summary=601"}
+{"timestamp": "19:09:21", "level": "INFO", "message": "[HTML] [longpage_delivery] hygiene_strip done"}
+{"timestamp": "19:10:02", "level": "INFO", "message": "[HTML] [longpage_delivery] layout_invoke ok=True model=ep-20260418230910-dqtqm"}
+{"timestamp": "19:10:02", "level": "INFO", "message": "[HTML] [longpage_delivery] diagram_reqs count=1"}
+{"timestamp": "19:10:02", "level": "INFO", "message": "[HTML] [longpage_delivery] draw_parallel ERROR cannot schedule new futures after interpreter shutdown"}
+{"timestamp": "19:10:02", "level": "INFO", "message": "[HTML] [legend_compose] start diagram_jobs_present=True legend_llm_required=False n_req=1 n_drawings=1"}
+{"timestamp": "19:10:02", "level": "INFO", "message": "[HTML] [legend_agent] invoke figure_captions diagram_legend_agent ok_drawings=1 requirements=1 timeout_sec=90.0"}
+{"timestamp": "19:10:18", "level": "INFO", "message": "[HTML] [legend_agent] ok figure_captions n=1 note=''"}
+{"timestamp": "19:10:18", "level": "INFO", "message": "[HTML] [dsl_validate] attempt=0 invalid=0 ids=[]"}
+{"timestamp": "19:10:18", "level": "INFO", "message": "[HTML] [legend_compose] done legend_source=agent legend_note='ok' diagram_inner_chars=594 need_mermaid=True"}
+{"timestamp": "19:10:18", "level": "INFO", "message": "[HTML] [longpage_delivery] after_inline analysis_chars=1640 diagram_tail_chars=0 inject_mermaid_hint=True"}
+{"timestamp": "19:10:40", "level": "INFO", "message": "[HTML] [longpage_delivery] job_end status=ok path=F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\output\\047-06-01-AI套件纳纳赋能企业销售全流程_视频分析.longpage.html elapsed=79.03s"}
+{"timestamp": "19:10:40", "level": "INFO", "message": "[HTML] 生成成功: F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\output\\047-06-01-AI套件纳纳赋能企业销售全流程_视频分析.longpage.html (33053 bytes)"}

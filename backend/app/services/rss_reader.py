@@ -477,10 +477,12 @@ def sync_all_users_feeds(*, trigger: str = "manual") -> dict[str, Any]:
         ok += int(result.get("ok_count") or 0)
         fail += int(result.get("fail_count") or 0)
     return {
+        "ok": fail == 0,
         "trigger": trigger,
         "user_count": len(user_ids),
         "ok_count": ok,
         "fail_count": fail,
+        "error_count": fail,
     }
 
 
@@ -710,7 +712,7 @@ def enqueue_item_document(
 
     from .task_manager import reuse_or_enqueue_task
 
-    task_id, reused = reuse_or_enqueue_task(
+    task_id, reused, _ = reuse_or_enqueue_task(
         "RSS",
         link,
         user_prompt=(user_prompt or "").strip(),

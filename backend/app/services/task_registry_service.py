@@ -536,6 +536,7 @@ def _infer_invoke_from_step(step: Dict[str, Any]) -> Dict[str, str]:
             INVOKE_REACT,
             build_invoke_labels,
             is_rag_tool_name,
+            is_web_tool_name,
         )
     except Exception:
         return {
@@ -573,13 +574,14 @@ def _infer_invoke_from_step(step: Dict[str, Any]) -> Dict[str, str]:
     elif step_type == "tool_call" or tool_name:
         mode = INVOKE_REACT
         if is_rag_tool_name(tool_name):
-            purpose = "模型按需检索"
+            purpose = "按需检索"
+        elif is_web_tool_name(tool_name):
+            purpose = "按需联网"
         else:
-            purpose = "模型工具调用"
+            purpose = ""
     labels = build_invoke_labels(
         mode=mode,
         tool_name=tool_name,
-        action_label=str(step.get("step_name") or "")[:20],
         purpose=purpose,
         query=query,
         phase=phase,

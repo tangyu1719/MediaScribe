@@ -244,6 +244,45 @@ def warm_xhs_owner_session_via_cdp(
     return live
 
 
+def cdp_extract_note_author(link: str, *, timeout_sec: float = 20.0) -> tuple:
+    """通过 CDP 打开小红书笔记页面，从渲染后的 DOM 提取作者昵称和 ID。"""
+    from .cookie_manager import find_cdp_port, load_cookies
+    from .xhs_local_browser import cdp_list_tabs, cdp_tab_get_html
+
+    port = find_cdp_port()
+    if not port:
+        return "", ""
+    ws_url = cdp_pick_xhs_tab_ws(port)
+    if not ws_url:
+        return "", ""
+    try:
+        import websocket as _ws, json, time as _time
+        cdp_navigate_tab(ws_url, link, timeout_sec=timeout_sec)
+        # 等 JS 渲染
+        deadline = _time.time() + timeout_sec
+        author_name = ""
+        author_id = ""
+        while _time.time() < deadline:
+            _time.sleep(0.8)
+            html = cdp_tab_get_html(ws_url)
+            if not html:
+                continue
+            import re
+            # <span class="username" ...>作者名</span>
+            m = re.search(r'<span[^>]+class="username"[^>]*>([^<]+)</span>', html)
+            if m:
+                author_name = m.group(1).strip()
+            # userId from link: /user/profile/<userId>
+            m2 = re.search(r'/user/profile/([a-f0-9]{24})', html)
+            if m2:
+                author_id = m2.group(1)
+            if author_name:
+                break
+        return author_name, author_id
+    except Exception:
+        return "", ""
+
+
 def open_favorites_tab_if_needed(port: Optional[int] = None) -> Dict[str, Any]:
     from .cookie_manager import find_cdp_port
     from .xhs_local_browser import cdp_list_tabs, is_usable_xhs_tab_url

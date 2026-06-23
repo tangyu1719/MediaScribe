@@ -198,6 +198,22 @@ def summarize_orchestration_payload_cn(
             lines.append(f"需要联网：{'是' if p.get('needs_web_search') else '否'}")
         if p.get("reason"):
             lines.append(f"判定原因：{str(p.get('reason'))[:200]}")
+        qrd = str(p.get("query_rewrite_decision") or "").strip()
+        if qrd:
+            qrd_cn = {"skip": "跳过", "apply": "执行"}.get(qrd, qrd)
+            lines.append(f"Query 改写：{qrd_cn}")
+        if p.get("query_rewrite_skip_reason"):
+            lines.append(f"改写说明：{str(p.get('query_rewrite_skip_reason'))[:200]}")
+        tdd = str(p.get("task_decompose_decision") or "").strip()
+        if tdd:
+            tdd_cn = {"skip": "跳过", "apply": "执行"}.get(tdd, tdd)
+            lines.append(f"意图分解：{tdd_cn}")
+        if p.get("task_decompose_skip_reason"):
+            lines.append(f"分解说明：{str(p.get('task_decompose_skip_reason'))[:200]}")
+        tc = str(p.get("task_complexity") or "").strip()
+        if tc:
+            tc_cn = {"normal": "一般任务", "complex": "复杂任务"}.get(tc, tc)
+            lines.append(f"任务复杂度：{tc_cn}")
     elif ph == "rewrite":
         if p.get("rewritten_query"):
             lines.append(f"改写后问题：{str(p['rewritten_query'])[:200]}")
@@ -314,13 +330,24 @@ def format_intent_result_brief_cn(
     framework: str = "",
     keywords: Optional[List[str]] = None,
     needs_rag: bool = False,
+    continue_main: bool = False,
+    task_id: str = "",
+    task_title: str = "",
 ) -> str:
     """意图识别节点旁展示的中文结果摘要（非 JSON、非任务说明模板）。"""
+    if continue_main:
+        tid = str(task_id or "").strip()
+        title = str(task_title or "").strip()[:12]
+        if tid and title:
+            return clamp_result_brief_cn(f"延续·{tid}·{title}", 15)
+        if tid:
+            return clamp_result_brief_cn(f"延续主任务·{tid}", 15)
+        return clamp_result_brief_cn("延续主任务", 15)
     if simple:
-        return clamp_result_brief_cn("识别为简单问答，可直接回复")
+        return clamp_result_brief_cn("识别为简单问答", 15)
     if needs_rag:
-        return clamp_result_brief_cn("识别为复杂任务，需要资料检索")
-    return clamp_result_brief_cn("识别为复杂任务，需要继续分析")
+        return clamp_result_brief_cn("复杂任务·需检索", 15)
+    return clamp_result_brief_cn("复杂任务·继续分析", 15)
 
 
 def _looks_like_json_blob(text: str) -> bool:
@@ -382,13 +409,35 @@ def _brief_web_search_dict(tr: Dict[str, Any], max_len: int = 120) -> str:
     return clamp_result_brief_cn("无检索结果", max_len)
 
 
-def brief_from_tool_payload(payload: Dict[str, Any], max_len: int = 120) -> str:
+def _brief_rag_dict(tr: Dict[str, Any], max_len: int = 15) -> str:
+    """RAG 检索结果精简摘要：只报命中条数，禁止塞切片正文。"""
+    if not isinstance(tr, dict):
+        return clamp_result_brief_cn("无检索结果", max_len)
+    for key in ("hits", "slices", "rag_slices"):
+        val = tr.get(key)
+        if isinstance(val, list) and val:
+            return clamp_result_brief_cn(f"检索到 {len(val)} 处片段", max_len)
+    err = str(tr.get("error") or "").strip()
+    if err:
+        return clamp_result_brief_cn(err, max_len)
+    return clamp_result_brief_cn("无检索结果", max_len)
+
+
+def _is_rag_tool_name(name: str) -> bool:
+    from .tool_invoke_qualifier import is_rag_tool_name
+
+    return is_rag_tool_name(name)
+
+
+def brief_from_tool_payload(payload: Dict[str, Any], max_len: int = 15) -> str:
     """工具步骤绿框「结果」行：中文精简摘要，禁止整段 JSON。"""
     name = str(payload.get("tool_name") or "tool").strip() or "tool"
     if payload.get("error"):
         return clamp_result_brief_cn(str(payload["error"]), max_len)
     tr_raw = payload.get("tool_result")
     tr = _coerce_json_object(tr_raw)
+    if _is_rag_tool_name(name) and isinstance(tr, dict):
+        return _brief_rag_dict(tr, max_len)
     if name == "web_search" and isinstance(tr, dict):
         return _brief_web_search_dict(tr, max_len)
     msg = str(payload.get("result_brief_cn") or payload.get("result_msg") or "").strip()
@@ -401,6 +450,8 @@ def brief_from_tool_payload(payload: Dict[str, Any], max_len: int = 120) -> str:
             return clamp_result_brief_cn(str(tr["error"]), max_len)
         if isinstance(tr.get("results"), list):
             return _brief_web_search_dict(tr, max_len)
+        if isinstance(tr.get("hits"), list) or isinstance(tr.get("slices"), list):
+            return _brief_rag_dict(tr, max_len)
         for key in ("message", "detail", "summary", "result_msg"):
             val = tr.get(key)
             if val and str(val).strip() and not _looks_like_json_blob(str(val)):

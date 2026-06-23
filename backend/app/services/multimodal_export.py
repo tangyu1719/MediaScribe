@@ -1,7 +1,13 @@
-"""多模态文档解析后落盘 MD；可选 TXT 与摘要 Agent 沉淀（含结构化元数据）。"""
+"""多模态文档解析后落盘 MD；可选 TXT 与摘要 Agent 沉淀（含结构化元数据）。
+
+含图文档：同步复制 images/ + manifest.json 到 mm_exports/{slug}/，并重写 picture 块 url 为可 HTTP 引用路径。
+"""
 from __future__ import annotations
 
+import json
 import logging
+import re
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -9,6 +15,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# picture 块内 url 字段（对齐 HaiChiAgent build_rag_image_block）
+_PICTURE_URL_RE = re.compile(
+    r"(?P<prefix>\{picture_id\s*:[^;\n]+;\s*\n?\s*url\s*:)(?P<url>[^;\n]+)(;)",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def _log_mm(action: str, *, obj: str, stage: str, **kw: Any) -> None:
@@ -147,6 +159,89 @@ def _render_summarized_md(
     }
 
 
+def _sanitize_bundle_slug(basename: str) -> str:
+    from .file_naming import sanitize_filename_part
+
+    slug = sanitize_filename_part(Path(basename).stem)
+    return slug or "export"
+
+
+def rewrite_picture_block_urls(md_content: str, *, url_prefix: str) -> str:
+    """将 picture 块 url 重写为 mm_exports 下可 HTTP 访问的路径。"""
+
+    def _repl(m: re.Match[str]) -> str:
+        old = (m.group("url") or "").strip()
+        fn = Path(old.replace("\\", "/")).name
+        new_url = f"{url_prefix.rstrip('/')}/images/{fn}"
+        return m.group("prefix") + new_url + m.group(3)
+
+    return _PICTURE_URL_RE.sub(_repl, md_content)
+
+
+def _export_asset_bundle(
+    *,
+    md_content: str,
+    basename: str,
+    assets_dir: str,
+    manifest_path: str,
+    out_root: Path,
+) -> Dict[str, Any]:
+    """复制 kb_assets 图片与 manifest 到 mm_exports/{slug}/，并重写 MD 内 picture url。"""
+    slug = _sanitize_bundle_slug(basename)
+    bundle_dir = (out_root / slug).resolve()
+    images_dst = bundle_dir / "images"
+    images_dst.mkdir(parents=True, exist_ok=True)
+
+    src_images = Path(assets_dir) / "images"
+    image_count = 0
+    if src_images.is_dir():
+        for img in sorted(src_images.iterdir()):
+            if img.is_file():
+                shutil.copy2(img, images_dst / img.name)
+                image_count += 1
+
+    url_prefix = f"/output/mm_exports/{slug}"
+    manifest_export = ""
+    mp = Path(manifest_path) if manifest_path else None
+    if mp.is_file():
+        manifest = json.loads(mp.read_text(encoding="utf-8"))
+        for entry in manifest.get("images") or []:
+            fn = str(entry.get("file_name") or "").strip()
+            if fn:
+                new_url = f"{url_prefix}/images/{fn}"
+                entry["public_url"] = new_url
+                entry["abs_path"] = str((images_dst / fn).resolve())
+        manifest["export_slug"] = slug
+        manifest["export_url_prefix"] = url_prefix
+        manifest_export = str(bundle_dir / "manifest.json")
+        Path(manifest_export).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    md_rewritten = rewrite_picture_block_urls(md_content, url_prefix=url_prefix)
+    md_path = bundle_dir / basename
+    md_path.write_text(md_rewritten, encoding="utf-8")
+
+    _log_mm(
+        "资产包落盘",
+        obj=basename,
+        stage="图片复制",
+        ok=True,
+        slug=slug,
+        image_count=image_count,
+        bundle_dir=str(bundle_dir),
+    )
+    return {
+        "md_path": str(md_path),
+        "md_basename": md_path.name,
+        "assets_bundle_dir": str(bundle_dir),
+        "manifest_export_path": manifest_export,
+        "image_count_exported": image_count,
+        "export_url_prefix": url_prefix,
+    }
+
+
 def export_multimodal_document(
     file_path: str,
     *,
@@ -250,8 +345,29 @@ def export_multimodal_document(
         naming_rule=naming_rule if summarize and not summarize_error else "",
         content_type="文档",
     )
-    md_path = (out_root / basename).resolve()
-    md_path.write_text(md_content, encoding="utf-8")
+
+    assets_dir = str(base.get("assets_dir") or "").strip()
+    manifest_path = str(base.get("manifest_path") or "").strip()
+    has_images = bool(
+        assets_dir
+        and Path(assets_dir).is_dir()
+        and (Path(assets_dir) / "images").is_dir()
+        and any((Path(assets_dir) / "images").iterdir())
+    )
+
+    bundle_info: Dict[str, Any] = {}
+    if has_images:
+        bundle_info = _export_asset_bundle(
+            md_content=md_content,
+            basename=basename,
+            assets_dir=assets_dir,
+            manifest_path=manifest_path,
+            out_root=out_root,
+        )
+        md_path = Path(bundle_info["md_path"])
+    else:
+        md_path = (out_root / basename).resolve()
+        md_path.write_text(md_content, encoding="utf-8")
 
     txt_path = ""
     if export_txt and txt_content.strip():
@@ -267,6 +383,7 @@ def export_multimodal_document(
         md_path=str(md_path),
         txt_path=txt_path or "",
         summarized=summarized and not summarize_error,
+        has_images=has_images,
         elapsed_sec=round(elapsed, 2),
     )
 
@@ -284,5 +401,9 @@ def export_multimodal_document(
         "extracted_metadata": extracted_metadata,
         "processing_time": elapsed,
         "export_dir": str(out_root),
+        "assets_bundle_dir": bundle_info.get("assets_bundle_dir", ""),
+        "manifest_export_path": bundle_info.get("manifest_export_path", ""),
+        "image_count_exported": int(bundle_info.get("image_count_exported") or 0),
+        "export_url_prefix": bundle_info.get("export_url_prefix", ""),
     }
     return result

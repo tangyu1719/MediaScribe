@@ -315,7 +315,7 @@ async def _rerun_one(
         platform=plat,
         subscription_id=subscription_id,
     )
-    task_id, _ = reuse_or_enqueue_task(
+    task_id, _, _ = reuse_or_enqueue_task(
         "小红书",
         url,
         "",

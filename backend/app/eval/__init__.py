@@ -3,13 +3,20 @@ from .config import eval_enabled, eval_sdk_root
 from .tracing import build_run_callbacks, eval_tracing_status
 from .trajectory_eval import evaluate_trajectory, evaluate_trajectory_strict, messages_from_span_steps
 from .rag_eval import run_ragas_on_dataset
+from .retrieval_metrics import aggregate_retrieval_metrics
+from .gate_rubric import run_gate_checks, run_gate_batch, evaluate_rubric_scores
+from .offline_runner import run_offline_eval, load_dataset_manifest, eval_baseline_targets
 from .ops_service import (
     eval_extended_status,
     eval_get_overview,
     eval_get_references,
+    eval_get_manifest,
+    eval_get_baseline,
+    eval_get_gate_rubric_schema,
     eval_list_traces,
     eval_rag_status,
     eval_run_trajectory,
+    eval_run_offline,
     eval_trajectory_from_span,
 )
 
@@ -29,4 +36,15 @@ __all__ = [
     "evaluate_trajectory_strict",
     "messages_from_span_steps",
     "run_ragas_on_dataset",
+    "aggregate_retrieval_metrics",
+    "run_gate_checks",
+    "run_gate_batch",
+    "evaluate_rubric_scores",
+    "run_offline_eval",
+    "load_dataset_manifest",
+    "eval_baseline_targets",
+    "eval_get_manifest",
+    "eval_get_baseline",
+    "eval_get_gate_rubric_schema",
+    "eval_run_offline",
 ]

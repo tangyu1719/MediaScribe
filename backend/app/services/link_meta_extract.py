@@ -20,6 +20,7 @@ DEFAULT_META_EXTRACT_FIELDS: List[Dict[str, str]] = [
     {"key": "domain", "label": "领域", "description": "文档所属业务领域（大粒度）"},
     {"key": "module", "label": "模块", "description": "所属功能模块（中粒度）"},
     {"key": "doc_type", "label": "文档类型", "description": "如产品手册/技术文档/FAQ/政策/笔记"},
+    {"key": "author_name", "label": "作者", "description": "内容作者/博主昵称（从正文开头提取）"},
     {"key": "keyword1", "label": "关键词1", "description": "核心主题词或实体"},
     {"key": "keyword2", "label": "关键词2", "description": "次要主题词或补充实体"},
 ]

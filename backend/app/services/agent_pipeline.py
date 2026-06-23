@@ -284,6 +284,42 @@ def run_agent_pipeline(query: str, history: list[dict] | None = None) -> Pipelin
     )
 
 
+def run_agent_pipeline_rules_only(query: str, history: list[dict] | None = None) -> PipelineResult:
+    """仅规则预处理（跳过 LLM），用于原问已足够清晰的社媒画像等快径。"""
+    history = history or []
+    q = (query or "").strip()
+    rule_code, rule_label = _rule_domain(q)
+    rewritten = _rule_rewrite(q, history)
+    keywords = _extract_keywords(q)
+    terms: list[str] = []
+    rag_query = _build_rag_query(rewritten, keywords, terms)
+    return PipelineResult(
+        original_query=q,
+        intent=rule_code,
+        intent_label=rule_label,
+        rewritten_query=rewritten,
+        query_keywords=keywords,
+        retrieval_terms=terms,
+        rag_query=rag_query,
+        pipeline_source="rule",
+    )
+
+
+def should_skip_pipeline_llm(query: str) -> bool:
+    """社媒画像等：原问含平台 ID/昵称时不必再调 pipeline LLM。"""
+    q = (query or "").strip()
+    if not q:
+        return False
+    code, _ = _rule_domain(q)
+    if code != "social":
+        return False
+    if re.search(r"小红书号[：:\s]*[0-9]{5,12}", q):
+        return True
+    if re.search(r"(?:red_id|user_id)[=:\s]*[0-9]{5,12}", q, re.I):
+        return True
+    return False
+
+
 def merge_pipeline_into_snapshot(snap: Dict[str, Any], pipeline: PipelineResult) -> Dict[str, Any]:
     """将 pipeline 结果写入意图改写快照（供反馈与 RAG 使用）。"""
     out = dict(snap or {})

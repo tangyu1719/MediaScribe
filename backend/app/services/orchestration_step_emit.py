@@ -60,6 +60,109 @@ def append_orch_chain(
     return chain
 
 
+# 规则/LLM 思考文案分片推送，避免单条 step_think_delta 整段刷屏
+_THINK_CHUNK_SIZE = 3
+_OUTPUT_CHUNK_SIZE = 24
+
+
+def _emit_text_chunks_as_sse(
+    runtime: ChatGraphRuntime,
+    event: str,
+    text: str,
+    *,
+    trace_id: str,
+    task_id: str,
+    step_id: str,
+    chunk_size: int,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """将已生成的真实文本按小片推送 SSE（非 sleep 假流）。"""
+    if not text:
+        return
+    base = dict(extra or {})
+    base.setdefault("trace_id", trace_id)
+    base.setdefault("task_id", task_id or "")
+    base.setdefault("step_id", step_id)
+    for i in range(0, len(text), max(1, chunk_size)):
+        runtime.emit(
+            event,
+            {
+                **base,
+                "content": text[i : i + chunk_size],
+            },
+        )
+
+
+def begin_stream_think(
+    runtime: ChatGraphRuntime,
+    *,
+    trace_id: str,
+    task_id: str,
+    step_id: str,
+    step_name: str,
+    sub_plan_id: str,
+    sub_index: int,
+    llm_powered: bool = True,
+    think_kind: str = "node_analysis",
+) -> None:
+    runtime.emit(
+        "step_think_start",
+        {
+            "trace_id": trace_id,
+            "task_id": task_id or "",
+            "step_id": step_id,
+            "step_name": step_name,
+            "sub_plan_id": sub_plan_id,
+            "sub_index": sub_index,
+            "think_kind": think_kind,
+            "llm_powered": llm_powered,
+        },
+    )
+
+
+def emit_stream_think_delta(
+    runtime: ChatGraphRuntime,
+    *,
+    trace_id: str,
+    task_id: str,
+    step_id: str,
+    content: str,
+    llm_powered: bool = True,
+    think_kind: str = "node_analysis",
+) -> None:
+    piece = str(content or "")
+    if not piece:
+        return
+    runtime.emit(
+        "step_think_delta",
+        {
+            "trace_id": trace_id,
+            "task_id": task_id or "",
+            "step_id": step_id,
+            "content": piece,
+            "think_kind": think_kind,
+            "llm_powered": llm_powered,
+        },
+    )
+
+
+def end_stream_think(
+    runtime: ChatGraphRuntime,
+    *,
+    trace_id: str,
+    step_id: str,
+    llm_powered: bool = True,
+) -> None:
+    runtime.emit(
+        "step_think_end",
+        {
+            "trace_id": trace_id,
+            "step_id": step_id,
+            "llm_powered": llm_powered,
+        },
+    )
+
+
 def build_node_think_analysis(
     phase: str,
     *,
@@ -174,6 +277,8 @@ def emit_orchestration_step(
     executed: bool = True,
     think_text_override: Optional[str] = None,
     llm_powered: bool = False,
+    pre_step_id: Optional[str] = None,
+    think_streamed: bool = False,
 ) -> Dict[str, Any]:
     """编排节点标准 SSE：思考 → 步骤完成（含输入/输出 JSON，供 SPAN/前端按钮）。"""
     prior = prior if prior is not None else prior_from_state(state)
@@ -205,7 +310,7 @@ def emit_orchestration_step(
             touch_task_group_seq(str(task_id), group_seq)
         except Exception:
             pass
-    step_id = _new_id("step_")
+    step_id = (pre_step_id or "").strip() or _new_id("step_")
     brief = clamp_result_brief_cn(result_brief)
 
     runtime.emit(
@@ -219,7 +324,7 @@ def emit_orchestration_step(
             "sub_plan_id": sub_plan_id,
             "sub_index": group_seq,
             "stage": step_name,
-            "progress_hint": f"正在执行：{step_name}",
+            "progress_hint": f"正在执行下一步：{step_name}",
         },
     )
     inp_body = build_orchestration_step_output(
@@ -248,30 +353,41 @@ def emit_orchestration_step(
     inp_txt = dumps_step_output(inp_body)
     out_txt = dumps_step_output(out_body)
 
-    runtime.emit(
-        "step_think_start",
-        {
-            "trace_id": trace_id,
-            "task_id": task_id or "",
-            "step_id": step_id,
-            "step_name": step_name,
-            "sub_plan_id": sub_plan_id,
-            "sub_index": group_seq,
-            "think_kind": "node_analysis",
-            "llm_powered": llm_powered,
-        },
-    )
-    runtime.emit(
-        "step_think_delta",
-        {
-            "trace_id": trace_id,
-            "task_id": task_id or "",
-            "step_id": step_id,
-            "content": think_text,
-            "think_kind": "node_analysis",
-            "llm_powered": llm_powered,
-        },
-    )
+    if not think_streamed:
+        runtime.emit(
+            "step_think_start",
+            {
+                "trace_id": trace_id,
+                "task_id": task_id or "",
+                "step_id": step_id,
+                "step_name": step_name,
+                "sub_plan_id": sub_plan_id,
+                "sub_index": group_seq,
+                "think_kind": "node_analysis",
+                "llm_powered": llm_powered,
+            },
+        )
+        _emit_text_chunks_as_sse(
+            runtime,
+            "step_think_delta",
+            think_text,
+            trace_id=trace_id,
+            task_id=task_id or "",
+            step_id=step_id,
+            chunk_size=_THINK_CHUNK_SIZE,
+            extra={
+                "think_kind": "node_analysis",
+                "llm_powered": llm_powered,
+            },
+        )
+        runtime.emit(
+            "step_think_end",
+            {
+                "trace_id": trace_id,
+                "step_id": step_id,
+                "llm_powered": llm_powered,
+            },
+        )
 
     invoke_extra: Dict[str, str] = {}
     if phase == "rag_decision" and output_payload.get("needs_rag"):
@@ -325,6 +441,17 @@ def emit_orchestration_step(
         )
 
     step_status = SUB_DONE if executed else "skipped"
+    if out_txt:
+        _emit_text_chunks_as_sse(
+            runtime,
+            "step_output_delta",
+            out_txt,
+            trace_id=trace_id,
+            task_id=task_id or "",
+            step_id=step_id,
+            chunk_size=_OUTPUT_CHUNK_SIZE,
+            extra={"phase": phase, "step_lane": "orchestration"},
+        )
     runtime.emit(
         "thought_step_end",
         {

@@ -30,24 +30,22 @@ from .pipeline_logging import (
     log_llm_prepare,
     pipeline_log,
 )
+from .llm_agent_signals import (
+    _JSON_OUTPUT_RULE_ARTICLE_WITH_SIGNAL,
+    _JSON_OUTPUT_RULE_SUMMARY_WITH_SIGNAL,
+    input_stats_block,
+    parse_agent_status,
+)
 from .json_llm_output import (
     LLM_JSON_PARSE_FAILED,
     build_json_retry_user_suffix,
     normalize_llm_string_escapes,
     parse_llm_json_object,
 )
+from .pipeline_output_quality import LLMInputRejectedError
 
-_JSON_OUTPUT_RULE_ARTICLE = (
-    "\n【输出格式-硬性】仅输出一个 JSON 对象（可用 ```json 代码块包裹），禁止 JSON 外任何文字。"
-    ' 结构: {"article": "整理后的正文"}。article 为字符串，段落用换行分隔；'
-    "不要 title/目录/列表字段；JSON 内换行按标准转义一次（解析后为真实换行）。"
-)
-_JSON_OUTPUT_RULE_SUMMARY = (
-    "\n【输出格式-硬性】仅输出一个 JSON 对象（可用 ```json 代码块包裹），禁止 JSON 外任何文字。"
-    ' 结构: {"title": "不超过20字的简洁中文标题", "summary": "摘要正文"}。'
-    "title 不要含 #；summary 可含 Markdown 目录与要点；"
-    "JSON 内换行按标准转义一次即可（解析后须为真实换行，勿在字段值里留下可见的两字符 \\n）。"
-)
+_JSON_OUTPUT_RULE_ARTICLE = _JSON_OUTPUT_RULE_ARTICLE_WITH_SIGNAL
+_JSON_OUTPUT_RULE_SUMMARY = _JSON_OUTPUT_RULE_SUMMARY_WITH_SIGNAL
 _LLM_JSON_MAX_RETRY = 2
 
 _DEFAULT_SUMMARY_PROMPT = (
@@ -429,8 +427,20 @@ def run_document_consolidation(
                 "attempt": attempt,
             }
             if parsed.ok:
+                status, payload = parse_agent_status(parsed.data)
+                if status == "reject":
+                    raise LLMInputRejectedError(
+                        str(payload.get("reject_code") or "LLM_INPUT_REJECTED"),
+                        str(payload.get("reject_reason") or f"{role} 拒答：输入不足以生成有效输出"),
+                        reject_reason=str(payload.get("reject_reason") or ""),
+                    )
                 if role == "原文整理Agent":
                     art = normalize_llm_string_escapes(str(parsed.data.get("article") or ""))
+                    if not art.strip():
+                        raise LLMInputRejectedError(
+                            "LLM_INPUT_REJECTED",
+                            "原文整理返回空 article",
+                        )
                     return art, meta
                 title = normalize_llm_string_escapes(str(parsed.data.get("title") or "").strip())
                 summary = normalize_llm_string_escapes(str(parsed.data.get("summary") or "").strip())
@@ -489,15 +499,13 @@ def run_document_consolidation(
             if is_retry:
                 rendered = (
                     "请对以下文本进行高质量中文总结与要点提炼。\n"
-                    "硬性要求：\n"
-                    "1. 不允许输出\"无法总结/乱码/请提供更清晰文本\"等拒绝式话术；必须给出可用总结。\n"
-                    "2. 第一行输出一个简洁中文标题（<=20字，不要#）。\n"
-                    "3. 必须有目录结构，最后有面试应答要点（关键词）。\n\n"
+                    "若输入仍不足以忠实摘要，必须输出 status=reject，禁止编造。\n\n"
                     + body
+                    + input_stats_block(len(body))
                 )
             else:
                 summary_prompt = (llm_cfg.get("summary_prompt") or _DEFAULT_SUMMARY_PROMPT).strip()
-                rendered = _render_summary_prompt(summary_prompt, body)
+                rendered = _render_summary_prompt(summary_prompt, body) + input_stats_block(len(body))
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (f"分析规则：\n{rules}\n\n{rendered}").strip()},
@@ -533,6 +541,8 @@ def run_document_consolidation(
             )
             llm_meta.setdefault("summary_json", json_meta)
             return parsed_text
+        except LLMInputRejectedError:
+            raise
         except Exception as e:
             log(f"[{stage_label}] 摘要异常：{e}", "WARNING")
             log_llm_done(task_id, chain, log_module, log_obj, role=role_label, routes=routes, ok=False, error=str(e))
@@ -556,7 +566,7 @@ def run_document_consolidation(
                 _plog("原文整理", "未配置 article_polish_prompt，使用启发式清洗", source="heuristic_fallback")
                 return _build_article_from_text(raw)
 
-            prompt = polish_prompt.replace("{transcript}", raw)
+            prompt = polish_prompt.replace("{transcript}", raw) + input_stats_block(len(raw or ""))
             messages = [
                 {"role": "system", "content": article_system},
                 {"role": "user", "content": (article_rules + "\n\n" + prompt) if article_rules else prompt},
@@ -583,6 +593,8 @@ def run_document_consolidation(
             )
             llm_meta.setdefault("article_json", json_meta)
             return parsed_text if parsed_text else _build_article_from_text(raw)
+        except LLMInputRejectedError:
+            raise
         except Exception as e:
             log(f"[{stage_label}] 原文整理异常：{e}", "WARNING")
             log_llm_done(task_id, chain, log_module, log_obj, role="原文整理Agent", routes=routes, ok=False, error=str(e))
@@ -596,6 +608,31 @@ def run_document_consolidation(
     comments_block = ""
     comments_viewpoint = ""
     comments_summary_mode = "none"
+
+    # LLM 沉淀前校验（空/占位/junk 禁止进入 Agent）
+    from .pipeline_output_quality import assess_consolidation_input
+
+    in_gate = assess_consolidation_input(raw_text, stage_label=stage_label)
+    if not in_gate.ok:
+        _plog(
+            "入口",
+            "文档沉淀前校验失败",
+            "ERROR",
+            error_code=in_gate.error_code,
+            text_len=in_gate.text_len,
+        )
+        return {
+            "ai_summary": "",
+            "article": "",
+            "article_source": "blocked",
+            "error_code": in_gate.error_code,
+            "error_message": in_gate.error_message,
+            "comments_viewpoint": "",
+            "comments_summary_mode": "none",
+            "llm_meta": llm_meta,
+            "extracted_metadata": {},
+        }
+
     if has_comments and not summary_after_article:
         log(f"[{stage_label}] 已抓取评论，摘要将与整理后正文合并（强制顺序摘要）", "INFO")
         summary_after_article = True
@@ -625,7 +662,21 @@ def run_document_consolidation(
 
     if skip_summary:
         log(f"[{stage_label}] 仅原文整理模式（跳过摘要 Agent）")
-        article_text = do_article(raw_text)
+        try:
+            article_text = do_article(raw_text)
+        except LLMInputRejectedError as rej:
+            _plog("出口", "原文整理拒答", "ERROR", error_code=rej.error_code, reason=rej.message)
+            return {
+                "ai_summary": "",
+                "article": "",
+                "article_source": "blocked",
+                "error_code": rej.error_code,
+                "error_message": rej.message,
+                "comments_viewpoint": "",
+                "comments_summary_mode": "none",
+                "llm_meta": llm_meta,
+                "extracted_metadata": {},
+            }
         article_source = "llm_polish"
         if not (article_text and article_text.strip()):
             article_source = "heuristic_fallback"
@@ -647,22 +698,36 @@ def run_document_consolidation(
             "extracted_metadata": {},
         }
 
-    if summary_after_article:
-        log(f"[{stage_label}] 顺序执行：先原文整理，再评论观点（可选），再摘要" + ("（含评论）" if has_comments else ""))
-        article_text = do_article(raw_text)
-        _prepare_comments_block(article_text or raw_text)
-        summary_input = compose_summary_input(article_text or raw_text, comments_block)
-        ai_summary = do_summarize(summary_input)
-    else:
-        log(f"[{stage_label}] 并发：摘要 + 原文整理（共享 LLM 池）")
-        _prepare_comments_block(raw_text)
-        llm_ex = get_llm_executor()
-        merged_raw = compose_summary_input(raw_text, comments_block)
-        f_s = llm_ex.submit(lambda: do_summarize(merged_raw))
-        f_a = llm_ex.submit(do_article, raw_text)
-        concurrent.futures.wait([f_s, f_a], timeout=300)
-        ai_summary = f_s.result() or ""
-        article_text = f_a.result() or ""
+    try:
+        if summary_after_article:
+            log(f"[{stage_label}] 顺序执行：先原文整理，再评论观点（可选），再摘要" + ("（含评论）" if has_comments else ""))
+            article_text = do_article(raw_text)
+            _prepare_comments_block(article_text or raw_text)
+            summary_input = compose_summary_input(article_text or raw_text, comments_block)
+            ai_summary = do_summarize(summary_input)
+        else:
+            log(f"[{stage_label}] 并发：摘要 + 原文整理（共享 LLM 池）")
+            _prepare_comments_block(raw_text)
+            llm_ex = get_llm_executor()
+            merged_raw = compose_summary_input(raw_text, comments_block)
+            f_s = llm_ex.submit(lambda: do_summarize(merged_raw))
+            f_a = llm_ex.submit(do_article, raw_text)
+            concurrent.futures.wait([f_s, f_a], timeout=300)
+            ai_summary = f_s.result() or ""
+            article_text = f_a.result() or ""
+    except LLMInputRejectedError as rej:
+        _plog("出口", "LLM Agent 拒答", "ERROR", error_code=rej.error_code, reason=rej.message)
+        return {
+            "ai_summary": "",
+            "article": "",
+            "article_source": "blocked",
+            "error_code": rej.error_code,
+            "error_message": rej.message,
+            "comments_viewpoint": comments_viewpoint,
+            "comments_summary_mode": comments_summary_mode,
+            "llm_meta": llm_meta,
+            "extracted_metadata": {},
+        }
 
     article_source = "llm_polish"
     if not (article_text and article_text.strip()):
@@ -705,9 +770,22 @@ def run_document_consolidation(
                     )
                 except Exception:
                     pass
-            # Fallback: 文本截取
+            # 二次摘要仍不合格：不再用原文截取冒充摘要，直接阻断
             if not ai_summary or _is_bad_summary(ai_summary):
-                ai_summary = (raw_text[:500] + "...") if len(raw_text) > 500 else raw_text
+                from .pipeline_output_quality import LLM_INPUT_REJECTED
+
+                _plog("出口", "摘要质量门禁失败", "ERROR", error_code=LLM_INPUT_REJECTED)
+                return {
+                    "ai_summary": "",
+                    "article": article_text,
+                    "article_source": "blocked",
+                    "error_code": LLM_INPUT_REJECTED,
+                    "error_message": "摘要结果不合格且二次摘要仍失败，禁止降级为原文截取",
+                    "comments_viewpoint": comments_viewpoint,
+                    "comments_summary_mode": comments_summary_mode,
+                    "llm_meta": llm_meta,
+                    "extracted_metadata": {},
+                }
 
     _plog(
         "出口",

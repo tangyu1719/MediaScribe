@@ -20,6 +20,16 @@ _BUILTIN_ID_TO_FN = {
     "tool_ops_snapshot": "ops_overview",
     "tool_rss_reader": "rss_list_recent",
     "tool_xhs_user_search": "xhs_user_search",
+    "tool_local_file_list": "local_file_list",
+    "tool_local_file_read": "local_file_read",
+    "tool_local_file_write": "local_file_write",
+    "tool_local_file_info": "local_file_info",
+    "tool_local_file_delete": "local_file_delete",
+    "tool_local_file_mkdir": "local_file_mkdir",
+    "tool_local_file_move": "local_file_move",
+    "tool_local_file_copy": "local_file_copy",
+    "tool_local_file_find": "local_file_find",
+    "tool_local_file_grep": "local_file_grep",
 }
 
 
@@ -50,6 +60,50 @@ def is_tools_inventory_query(message: str) -> bool:
         "mcp 工具", "mcp工具", "有哪些mcp", "有哪些 mcp",
     )
     return any(h in ql or h in q for h in hints)
+
+
+def is_streaming_meta_query(message: str) -> bool:
+    """用户询问 SSE/流式输出/为何不是逐字显示等产品架构元问题。"""
+    q = (message or "").strip()
+    ql = q.lower()
+    if not q:
+        return False
+    hints = (
+        "流式", "流式输出", "streaming", "stream", "sse", "server-sent",
+        "逐字", "打字机", "chunk", "分块", "event-stream", "readablestream",
+        "为啥不是流式", "为什么不是流式", "不是流式", "为何不是流式",
+        "一次性返回", "请求-响应", "非流式", "没有流式", "没流式",
+        "怎么不是逐字", "为什么不逐字", "为何不是逐字",
+    )
+    if any(h in q or h in ql for h in hints):
+        return True
+    if re.search(r"(流式|streaming|sse|逐字|分块)", ql) and re.search(
+        r"(为什么|为何|为啥|怎么|是不是|有没有|不是|没)", q
+    ):
+        return True
+    return False
+
+
+def format_streaming_architecture_markdown() -> str:
+    """SuperBizAgent Web 问答真实传输架构说明（禁止 LLM 编造相反结论）。"""
+    return "\n".join(
+        [
+            "## 本系统**已启用 SSE 流式传输**",
+            "",
+            "SuperBizAgent Web 问答**不是**「普通 POST 一次性返回全文」模式，链路如下：",
+            "",
+            "1. **前端**：`fetch('POST /api/chat/stream')` + `response.body.getReader()`（ReadableStream），解析 `text/event-stream`。",
+            "2. **后端**：FastAPI `StreamingResponse`，分块推送 SSE 事件（如 `stream_open`、`answer_delta`、`step_think_delta`、`thought_step_end` 等）。",
+            "3. **正文展示**：前端收到 `answer_delta` 后按打字机队列逐字渲染；思考链/编排步骤也有独立 SSE 事件。",
+            "",
+            "若感觉「不像流式」，常见原因：",
+            "- 编排阶段（意图识别、RAG 预取、工具绑定等）耗时较长，**最终回答**的 `answer_delta` 尚未开始；",
+            "- LLM/网关 token 缓冲导致间隔偏大；",
+            "- 浏览器后台标签页节流，打字动画变慢。",
+            "",
+            "**请勿**向用户声称本系统未启用 SSE、未实现前端流式渲染，或只能一次性 POST 返回全文。",
+        ]
+    )
 
 
 def format_tools_catalog_markdown(meta: Dict[str, Any]) -> str:
@@ -170,7 +224,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         count = normalize_comments_count(comment_count, default=10) if rc else 10
         sort = (comment_sort or "hot").strip() or "hot"
         comments_cfg = {"enabled": rc, "count": count, "sort": sort}
-        tid, reused = reuse_or_enqueue_task(
+        tid, reused, _ = reuse_or_enqueue_task(
             plat, url, user_prompt=user_prompt[:500], comments=comments_cfg, action="start",
         )
         add_log(tid, f"AI 工具 link_pipeline_start: {url}; read_comments={rc}; reused={reused}")
@@ -233,7 +287,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         main_tid = str(span_ctx.get("task_id") or "").strip()
         plat = "小红书"
         up = (user_prompt or "").strip() or f"分析小红书用户 {display_name}（小红书号 {rid}）的主页内容，做用户画像"
-        tid, reused = reuse_or_enqueue_task(plat, profile_url, user_prompt=up[:500], comments={"enabled": False}, action="start")
+        tid, reused, _ = reuse_or_enqueue_task(plat, profile_url, user_prompt=up[:500], comments={"enabled": False}, action="start")
         add_log(tid, f"AI 工具 xhs_user_search: red_id={rid} -> creator_id={creator_id} url={profile_url}; reused={reused}")
 
         from .pipeline_scheduler import request_video_pipeline_async
@@ -441,6 +495,185 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         description=(
             "列出当前登录用户在 RSS 阅读器中的近期文章（标题、摘要、链接、已读/星标）。"
             "用户询问订阅资讯、RSS、未读或星标文章时调用；勿编造未返回的条目。"
+        ),
+    ))
+
+    def local_file_list(
+        path: str = "",
+        recursive: bool = False,
+        max_depth: int = 3,
+        limit: int = 500,
+    ) -> str:
+        from .local_file_ops import list_local_path
+
+        return _json_result(list_local_path(path, recursive=recursive, max_depth=max_depth, limit=limit))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_list,
+        name="local_file_list",
+        description=(
+            "列举白名单目录：默认一层；recursive=true 时递归（max_depth/limit 控规模）。"
+            "path 为空返回 FS_ALLOW_ROOTS 根。大型整理前先用 local_file_find/grep。"
+        ),
+    ))
+
+    def local_file_read(path: str, limit: int = 50000) -> str:
+        from .local_file_ops import read_local_file
+
+        return _json_result(read_local_file(path, limit=limit))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_read,
+        name="local_file_read",
+        description=(
+            "读取白名单内 UTF-8 文本文件内容。"
+            "path 为绝对路径；limit 可选最大字符数（默认 50000）。"
+            "用户要查看 MD/TXT/JSON 等本地文本文件时调用。"
+        ),
+    ))
+
+    def local_file_write(path: str, content: str, append: bool = False) -> str:
+        from .local_file_ops import write_local_file
+
+        return _json_result(write_local_file(path, content, append=append))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_write,
+        name="local_file_write",
+        description=(
+            "写入或追加白名单内文本文件；可自动创建父目录。"
+            "append=true 追加，false 覆盖。内容上限 512KB。"
+            "用户要求保存笔记、写入临时文件或更新本地文本时调用。"
+        ),
+    ))
+
+    def local_file_info(path: str) -> str:
+        from .local_file_ops import info_local_file
+
+        return _json_result(info_local_file(path))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_info,
+        name="local_file_info",
+        description=(
+            "查询白名单内文件或目录元信息：类型、大小、修改时间。"
+            "用户询问文件是否存在、多大、何时修改时调用。"
+        ),
+    ))
+
+    def local_file_delete(path: str, recursive: bool = False) -> str:
+        from .local_file_ops import delete_local_path
+
+        return _json_result(delete_local_path(path, recursive=recursive))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_delete,
+        name="local_file_delete",
+        description=(
+            "删除白名单内文件；recursive=true 可删目录树（非空目录）。"
+            "整理/清理任务时调用；删除前须确认 path。"
+        ),
+    ))
+
+    def local_file_mkdir(path: str, parents: bool = True) -> str:
+        from .local_file_ops import mkdir_local_path
+
+        return _json_result(mkdir_local_path(path, parents=parents))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_mkdir,
+        name="local_file_mkdir",
+        description="在白名单内创建目录；parents=true 自动创建父目录。整理任务前建目标文件夹时调用。",
+    ))
+
+    def local_file_move(source: str, dest: str, overwrite: bool = False) -> str:
+        from .local_file_ops import move_local_path
+
+        return _json_result(move_local_path(source, dest, overwrite=overwrite))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_move,
+        name="local_file_move",
+        description=(
+            "移动或重命名白名单内文件/目录（source -> dest）。"
+            "overwrite=true 覆盖已存在目标。文件整理、归档、改名时调用。"
+        ),
+    ))
+
+    def local_file_copy(source: str, dest: str, overwrite: bool = False, recursive: bool = True) -> str:
+        from .local_file_ops import copy_local_path
+
+        return _json_result(copy_local_path(source, dest, overwrite=overwrite, recursive=recursive))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_copy,
+        name="local_file_copy",
+        description=(
+            "复制/粘贴白名单内文件或目录（source -> dest，等同文件管理器复制粘贴）。"
+            "recursive=true 复制整个目录树。备份、批量整理时调用。"
+        ),
+    ))
+
+    def local_file_find(
+        root: str,
+        glob_pattern: str = "**/*",
+        name_contains: str = "",
+        min_size_bytes: int = 0,
+        max_size_bytes: int = 0,
+        modified_after: str = "",
+        limit: int = 500,
+    ) -> str:
+        from .local_file_ops import find_local_files
+
+        return _json_result(find_local_files(
+            root,
+            glob_pattern=glob_pattern,
+            name_contains=name_contains,
+            min_size_bytes=min_size_bytes,
+            max_size_bytes=max_size_bytes,
+            modified_after=modified_after,
+            limit=limit,
+        ))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_find,
+        name="local_file_find",
+        description=(
+            "递归查找文件（Cursor 式 glob）：按 glob_pattern、名称关键词、大小、修改时间过滤。"
+            "示例 glob：*.md、**/*.py。大型文件查找/整理任务的首选入口；默认跳过 node_modules/.git。"
+        ),
+    ))
+
+    def local_file_grep(
+        pattern: str,
+        path: str = "",
+        glob: str = "",
+        case_insensitive: bool = False,
+        output_mode: str = "content",
+        head_limit: int = 200,
+        context_before: int = 0,
+        context_after: int = 0,
+    ) -> str:
+        from .local_file_ops import grep_local_files
+
+        return _json_result(grep_local_files(
+            pattern,
+            path=path,
+            glob=glob,
+            case_insensitive=case_insensitive,
+            output_mode=output_mode,
+            head_limit=head_limit,
+            context_before=context_before,
+            context_after=context_after,
+        ))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_grep,
+        name="local_file_grep",
+        description=(
+            "Cursor 式 grep：白名单内正则搜索文件内容。"
+            "output_mode=content|files_with_matches|count；glob 过滤扩展名如 *.py；"
+            "context_before/after 带上下文行。按内容定位文件后配合 move/copy 整理。"
         ),
     ))
 

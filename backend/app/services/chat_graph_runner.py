@@ -508,12 +508,17 @@ async def _stream_simple_answer_events(
     client_cur_task: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[str]:
     """简单任务直答：在 runner 侧流式刷 SSE，避免 LangGraph 单节点阻塞导致长时间卡在「正在编排」。"""
-    from .chat_tool_registry import format_tools_catalog_markdown, is_tools_inventory_query
+    from .chat_tool_registry import (
+        format_streaming_architecture_markdown,
+        format_tools_catalog_markdown,
+        is_streaming_meta_query,
+        is_tools_inventory_query,
+    )
 
     def _flush() -> List[str]:
         return list(runtime.drain_sse())
 
-    runtime.emit("answer_generating", {"task_id": "", "label": "简单任务直答", "ephemeral": True})
+    runtime.emit("answer_generating", {"task_id": "", "label": "正在生成最终回答", "ephemeral": True})
     for line in _flush():
         yield line
     runtime.emit("answer_start", {"task_id": "", "ephemeral": True, "stream_mode": "token"})
@@ -522,8 +527,18 @@ async def _stream_simple_answer_events(
 
     full = ""
     tools_inventory = is_tools_inventory_query(message)
+    streaming_meta = is_streaming_meta_query(message)
     if tools_inventory:
         full = format_tools_catalog_markdown(runtime.tools_meta)
+        for pos in range(0, len(full), 48):
+            runtime.emit(
+                "answer_delta",
+                {"task_id": "", "content": full[pos : pos + 48], "kind": "body", "stream_mode": "token"},
+            )
+            for line in _flush():
+                yield line
+    elif streaming_meta:
+        full = format_streaming_architecture_markdown()
         for pos in range(0, len(full), 48):
             runtime.emit(
                 "answer_delta",
@@ -658,8 +673,8 @@ async def stream_langgraph_chat(
 
         ai_chat._sessions[session_id]["updated_at"] = _dt.now().isoformat(timespec="seconds")
 
-    # 即刻发送首个 SSE 事件，避免前端长时间空白等待编排启动
-    yield f"event: pipeline_progress\ndata: {json.dumps({'stage': '正在启动编排引擎', 'progress': 0, 'detail': '正在准备运行时…'}, ensure_ascii=False)}\n\n"
+    # 即刻发送首个 SSE 事件，避免前端长时间空白等待
+    yield f"event: pipeline_progress\ndata: {json.dumps({'stage': '正在处理您的请求', 'progress': 0, 'detail': ''}, ensure_ascii=False)}\n\n"
 
     trace_id = _new_trace()
     mem = memory_prepared or {}
@@ -736,7 +751,7 @@ async def stream_langgraph_chat(
         "stream_open",
         {
             "session_id": session_id,
-            "stage": "编排启动",
+            "stage": "意图识别",
             "progress": 1,
             "orchestration_engine": "langgraph",
             "expected_orchestration_phases": [
@@ -871,7 +886,7 @@ async def stream_langgraph_chat(
     else:
         yield (
             "event: pipeline_progress\n"
-            + f"data: {json.dumps({'trace_id': trace_id, 'stage': '意图识别', 'progress': 5, 'detail': 'LangGraph 进入首节点'}, ensure_ascii=False)}\n\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'stage': '意图识别', 'progress': 5, 'detail': ''}, ensure_ascii=False)}\n\n"
         )
         pre_step_id = "step_" + uuid.uuid4().hex[:12]
         runtime.emit(
@@ -881,7 +896,7 @@ async def stream_langgraph_chat(
                 "step_id": pre_step_id,
                 "step_name": "意图识别",
                 "phase": "intent",
-                "progress_hint": "正在执行：意图识别",
+                "progress_hint": "正在执行下一步：意图识别",
             },
         )
         runtime.emit(
@@ -1029,7 +1044,7 @@ async def stream_langgraph_chat(
     ):
         yield (
             "event: pipeline_progress\n"
-            + f"data: {json.dumps({'trace_id': trace_id, 'stage': '绑定执行工具', 'progress': 68, 'detail': 'MCP 已在启动健康检查中预连；正在绑定执行段工具'}, ensure_ascii=False)}\n\n"
+            + f"data: {json.dumps({'trace_id': trace_id, 'stage': '正在准备工具能力', 'progress': 68, 'detail': ''}, ensure_ascii=False)}\n\n"
         )
         tools_full, meta_full = await _handoff_load_execution_tools(
             runtime,

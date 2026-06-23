@@ -47,12 +47,218 @@ _CONTINUE_HINTS = (
     "怎么回事", "啥情况", "什么情况", "任务呢", "分析的任务", "要你分析", "之前的",
     "刚才的", "上面的", "还没", "怎么还没",
 )
+# 禁止子串盲目命中（如「分析这个人物的画像」中的「这个」）
+_CONTINUE_HINTS_AMBIGUOUS = frozenset({"这个", "那个", "还有", "然后", "上面", "补充"})
+
+
+def _has_explicit_continue_hint(message: str) -> bool:
+    """仅匹配明确的续接/进度短语，避免普通新任务句中的「这个/那个」误触续接。"""
+    m = (message or "").strip()
+    if not m:
+        return False
+    for h in _CONTINUE_HINTS:
+        if h in _CONTINUE_HINTS_AMBIGUOUS:
+            continue
+        if h in m:
+            return True
+    if len(m) <= 14:
+        for h in _CONTINUE_HINTS_AMBIGUOUS:
+            if m == h or m.startswith(h + "呢") or m.startswith(h + "？"):
+                return True
+    return False
+
+
+def _is_unrelated_new_work(message: str, task_row: Optional[Dict[str, Any]] = None) -> bool:
+    """当前句与主任务摘要明显无关 → 应开新任务，禁止续接旧 task_id。"""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if _looks_like_new_task(msg):
+        return True
+    if _has_link_analysis_intent(msg):
+        anchor = str(
+            (task_row or {}).get("user_query") or (task_row or {}).get("query_summary") or ""
+        ).strip()
+        if not anchor:
+            return True
+        social = ("小红书", "画像", "主页", "用户分析", "红人", "博主", "xhs", "red_id")
+        kb = ("知识库", "mcp", "rag", "检索", "文档总结", "文档进行总结", "总结反馈")
+        msg_l = msg.lower()
+        anchor_l = anchor.lower()
+        msg_social = any(k in msg or k in msg_l for k in social)
+        anchor_kb = any(k in anchor or k in anchor_l for k in kb)
+        if msg_social and anchor_kb and not any(k in msg or k in msg_l for k in kb):
+            return True
+    return False
+
+
+def extract_profile_query_keywords(message: str) -> List[str]:
+    """从原问抽取可展示关键词（昵称、平台 ID、业务词）。"""
+    msg = (message or "").strip()
+    if not msg:
+        return []
+    keys: List[str] = []
+    seen: set = set()
+
+    def _add(v: str) -> None:
+        t = str(v or "").strip()
+        if not t or t in seen:
+            return
+        seen.add(t)
+        keys.append(t)
+
+    try:
+        from .link_doc_routing import extract_xhs_numeric_id
+
+        xhs_id = extract_xhs_numeric_id(msg)
+        if xhs_id:
+            _add(xhs_id)
+    except Exception:
+        pass
+    for m in re.finditer(r"小红书号[：:\s]*([0-9]{5,12})", msg):
+        _add(m.group(1))
+    for m in re.finditer(r"([^\s，,。；;\n：:]{2,16})[ \t\n]*小红书号", msg):
+        _add(m.group(1))
+    for m in re.finditer(r"主页[：:\s]*([^\s，,。；;\n：:]{2,16})", msg):
+        _add(m.group(1))
+    for token in ("小红书", "人物画像", "画像", "主页", "用户分析"):
+        if token in msg:
+            _add(token)
+    if len(keys) < 2:
+        for m in re.finditer(r"[\u4e00-\u9fffA-Za-z0-9_]{2,12}", msg):
+            w = m.group(0)
+            if w in ("可以", "帮我", "分析", "一下", "这个", "人物", "不用", "记录", "订阅", "模块", "只需", "简单"):
+                continue
+            _add(w)
+            if len(keys) >= 6:
+                break
+    return keys[:8]
+
+
+def build_profile_task_summary(message: str, keywords: Optional[List[str]] = None) -> str:
+    """社媒画像类任务摘要（规则，毫秒级）。"""
+    msg = (message or "").strip()
+    qk = keywords if isinstance(keywords, list) else extract_profile_query_keywords(msg)
+    nick = ""
+    xhs_id = ""
+    for k in qk:
+        if re.fullmatch(r"[0-9]{5,12}", str(k)):
+            xhs_id = str(k)
+        elif len(str(k)) >= 2 and not re.fullmatch(r"(小红书|人物画像|画像|主页|用户分析)", str(k)):
+            if not nick:
+                nick = str(k)
+    if nick and xhs_id:
+        return f"分析小红书用户「{nick}」（ID:{xhs_id}）的人物画像"
+    if xhs_id:
+        return f"分析小红书用户（ID:{xhs_id}）的人物画像"
+    if nick:
+        return f"分析小红书用户「{nick}」的人物画像"
+    return (msg or "社媒用户画像分析")[:120]
+
+
+def build_fast_new_main_intent(
+    message: str,
+    *,
+    cur_task: Optional[Dict[str, Any]] = None,
+    main_task_history: Optional[List] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    与当前/最近主任务明显无关的新课题：规则秒级意图，免编排 LLM。
+    典型：MCP 知识库任务后的小红书用户画像。
+    """
+    msg = (message or "").strip()
+    if not msg:
+        return None
+    if extract_task_id_from_message(msg) or _looks_like_task_resume(msg):
+        return None
+    recent = _get_recent_main_task(cur_task, main_task_history)
+    anchor = cur_task if isinstance(cur_task, dict) and cur_task.get("task_id") else recent
+    if not anchor:
+        return None
+    if not _is_unrelated_new_work(msg, anchor):
+        return None
+    qk = extract_profile_query_keywords(msg)
+    task_summary = build_profile_task_summary(msg, qk)
+    needs_rag = any(k in msg.lower() for k in ("知识库", "mcp", "rag", "检索", "文档"))
+    return {
+        "mode": "new_main",
+        "task_id": "",
+        "skip_orchestration": False,
+        "reason": "规则快径：新主任务（与当前主任务主题无关，原问要素已足够清晰）",
+        "llm_powered": False,
+        "task_summary": task_summary,
+        "query_keywords": qk,
+        "needs_rag": needs_rag,
+        "needs_web_search": False,
+        "task_complexity": "normal",
+    }
+
+
+def annotate_intent_preprocess_plan(
+    snap: Dict[str, Any],
+    message: str,
+    *,
+    orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    domain: str = "",
+) -> Dict[str, Any]:
+    """
+    在意图识别输出中记录 Query 改写 / 术语映射 / 任务分解 的判定（含跳过原因）。
+    """
+    out = dict(snap or {})
+    nodes = orch_pipeline_nodes if isinstance(orch_pipeline_nodes, dict) else {}
+    msg = (message or "").strip()
+    qk = out.get("query_keywords") or out.get("keywords") or []
+    if not isinstance(qk, list):
+        qk = []
+    qk = [str(x).strip() for x in qk if str(x).strip()]
+    dom = str(domain or out.get("domain") or "").strip()
+    is_xhs = dom == "社媒分析" or _has_link_analysis_intent(msg)
+    has_clear_ids = bool(qk) and any(re.fullmatch(r"[0-9]{5,12}", str(k)) for k in qk)
+    needs_rag = bool(out.get("needs_rag"))
+    rewrite_enabled = bool(nodes.get("query_rewrite", True))
+
+    if not rewrite_enabled:
+        out["query_rewrite_decision"] = "skip"
+        out["query_rewrite_skip_reason"] = "编排节点 query_rewrite 未启用"
+    elif is_xhs and has_clear_ids and not needs_rag:
+        out["query_rewrite_decision"] = "skip"
+        out["query_rewrite_skip_reason"] = (
+            "原问含明确平台 ID/昵称，关键词可直映射为内部检索词，无需指代消解与术语转换"
+        )
+        out["rewrite_state"] = "rewrite_hold"
+    elif qk and not needs_rag:
+        out["query_rewrite_decision"] = "skip"
+        out["query_rewrite_skip_reason"] = "原问关键词已足够清晰，且无知识库检索需求"
+        out["rewrite_state"] = "rewrite_hold"
+    else:
+        out["query_rewrite_decision"] = "apply"
+        out["query_rewrite_skip_reason"] = ""
+
+    decompose_enabled = bool(nodes.get("task_decompose", False))
+    complexity = str(out.get("task_complexity") or ("normal" if is_xhs else "complex")).strip()
+    out["task_complexity"] = complexity
+    if not decompose_enabled:
+        out["task_decompose_decision"] = "skip"
+        out["task_decompose_skip_reason"] = "编排节点 task_decompose 未启用"
+    elif complexity == "normal" or is_xhs:
+        out["task_decompose_decision"] = "skip"
+        out["task_decompose_skip_reason"] = "一般复杂度任务，单步 ReAct+工具可满足，无需意图分解"
+    else:
+        out["task_decompose_decision"] = "apply"
+        out["task_decompose_skip_reason"] = ""
+
+    return out
+
+
 _TASK_RECALL_HINTS = (
     "怎么回事", "啥情况", "任务呢", "分析的任务", "要你分析", "上面的任务", "之前说的",
+    "当前任务", "当前的任务", "任务是啥", "任务是什么", "什么任务", "哪个任务",
+    "忘记了", "忘了", "啥来着", "记不得",
 )
 _STATUS_INQUIRY_HINTS = (
     "好了吗", "完成了吗", "结果呢", "进度", "怎么样了", "搞定了吗", "出来了吗", "好了没",
     "分析好了", "处理好了", "完成了没",
+    "执行到哪", "进行到哪", "做到哪", "到哪了", "到哪一步", "执行状态", "任务状态",
 )
 _TASK_RESUME_HINTS = (
     "任务恢复", "恢复说明", "重新启动", "重启检索", "恢复检索", "恢复流程", "重新执行",
@@ -1012,6 +1218,9 @@ def resolve_task_affiliation(
     if not recent:
         return None
 
+    if _is_unrelated_new_work(msg, recent):
+        return None
+
     tid = str(recent.get("task_id") or "").strip()
     if not tid:
         return None
@@ -1033,10 +1242,17 @@ def resolve_task_affiliation(
             _looks_like_task_resume(msg)
             or _looks_like_task_status_inquiry(msg)
             or _looks_like_task_recall(msg)
-            or any(h in msg for h in _CONTINUE_HINTS)
+            or _has_explicit_continue_hint(msg)
             or _looks_like_continuation(msg, cur_task if isinstance(cur_task, dict) else recent)
         ):
             belongs = True
+        if not belongs and _task_active(cur_task):
+            progress_ask = (
+                "当前任务", "当前的任务", "任务是啥", "执行到哪", "进行到哪",
+                "做到哪", "忘了", "忘记了", "啥来着", "任务状态",
+            )
+            if any(h in msg for h in progress_ask):
+                belongs = True
 
     if not belongs:
         return None
@@ -1068,7 +1284,7 @@ def _looks_like_continuation(message: str, cur_task: Optional[Dict[str, Any]]) -
         pass
     if _looks_like_new_task(m):
         return False
-    if any(h in m for h in _CONTINUE_HINTS):
+    if _has_explicit_continue_hint(m):
         return True
     if cur_task and len(m) <= 48 and not any(k in m for k in ("帮我", "请帮", "分析", "查询", "搜索")):
         qsum = str(cur_task.get("query_summary") or cur_task.get("user_query") or "")
@@ -1108,6 +1324,7 @@ async def llm_resolve_intent_mode(
     tools_meta: Optional[Dict[str, Any]] = None,
     rag_prefetch: bool = False,
     web_search: bool = False,
+    on_token: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """编排段意图识别：必须走 LLM；失败时返回 None 由规则兜底。"""
     if not (api_key and model):
@@ -1169,6 +1386,13 @@ async def llm_resolve_intent_mode(
             include_tools_catalog=False,
         ):
             text += piece
+            if on_token and piece:
+                try:
+                    cb = on_token(piece)
+                    if hasattr(cb, "__await__"):
+                        await cb
+                except Exception:
+                    pass
     except Exception as ex:
         _log.warning(
             "[上下文记忆|chat_context_memory.llm_resolve_intent_mode|intent|Agent执行|失败] "
@@ -1318,8 +1542,10 @@ def resolve_intent_mode(
                 "skip_orchestration": True,
                 "reason": "元问答/寒暄，不续接未结案主任务",
             }
-        # 主任务未结案时：短追问（如「现在呢？」）一律延续，禁止落回无上下文 simple chat
-        if _looks_like_continuation(msg, cur_task) or not _looks_like_new_task(msg):
+        # 主任务未结案时：仅明确续接/同主题追问才延续，禁止吞掉明显新课题
+        if not _is_unrelated_new_work(msg, cur_task) and (
+            _looks_like_continuation(msg, cur_task) or not _looks_like_new_task(msg)
+        ):
             return {
                 "mode": "continue_main",
                 "task_id": tid,
@@ -1338,7 +1564,7 @@ def resolve_intent_mode(
                 "reason": "元问答/寒暄，不续接未结案主任务",
             }
         recent = _get_recent_main_task(cur_task, hist)
-        if recent and not _looks_like_new_task(msg):
+        if recent and not _looks_like_new_task(msg) and not _is_unrelated_new_work(msg, recent):
             tid = str(recent.get("task_id") or "").strip() or _resolve_continue_task_id(cur_task, hist)
             if tid:
                 ct = dict(cur_task) if isinstance(cur_task, dict) else dict(recent)
@@ -1352,7 +1578,7 @@ def resolve_intent_mode(
                 }
         return {"mode": "simple", "task_id": "", "skip_orchestration": True, "reason": "简单问答，不建主任务"}
 
-    if active and tid and not _looks_like_new_task(msg):
+    if active and tid and not _looks_like_new_task(msg) and not _is_unrelated_new_work(msg, cur_task):
         return {
             "mode": "continue_main",
             "task_id": tid,
@@ -2276,11 +2502,13 @@ def peek_fast_continue_eligible(
         pass
     if _looks_like_new_task(msg):
         return False
+    if _is_unrelated_new_work(msg, cur_task or _get_recent_main_task(cur_task, main_task_history)):
+        return False
     if extract_task_id_from_message(msg):
         return True
     if _looks_like_task_resume(msg) or _looks_like_task_status_inquiry(msg) or _looks_like_task_recall(msg):
         return True
-    if any(h in msg for h in _CONTINUE_HINTS):
+    if _has_explicit_continue_hint(msg):
         return True
     if _looks_like_continuation(msg, cur_task):
         return True

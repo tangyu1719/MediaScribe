@@ -18,6 +18,9 @@ from .references import list_references, load_reference
 from .run_store import get_last_run, get_last_runs, save_run
 from .tracing import eval_tracing_status
 from .trajectory_eval import evaluate_trajectory, messages_from_span_steps
+from .offline_runner import eval_baseline_targets, load_dataset_manifest, run_offline_eval
+from .gate_rubric import gate_rules, rubric_schema, run_gate_batch, evaluate_rubric_scores
+from .retrieval_metrics import aggregate_retrieval_metrics
 
 _log = logging.getLogger("sba.eval.ops")
 
@@ -236,5 +239,46 @@ def eval_extended_status() -> Dict[str, Any]:
     base["packages"] = packages_installed()
     base["sdk_root"] = str(eval_sdk_root())
     base["last_trajectory_run"] = get_last_run("trajectory") or get_last_run("trajectory_manual")
-    base["last_rag_run"] = get_last_run("ragas")
+    base["last_rag_run"] = get_last_run("ragas") or get_last_run("offline_regeval")
+    manifest = load_dataset_manifest()
+    baseline = eval_baseline_targets()
+    base["dataset_manifest"] = manifest.get("data") if manifest.get("ok") else {}
+    base["baseline_targets"] = baseline.get("data") if baseline.get("ok") else {}
+    base["gate_rule_count"] = len(gate_rules())
     return base
+
+
+def eval_get_manifest() -> Dict[str, Any]:
+    return load_dataset_manifest()
+
+
+def eval_get_baseline() -> Dict[str, Any]:
+    return eval_baseline_targets()
+
+
+def eval_get_gate_rubric_schema() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "data": {
+            "gate_rules": gate_rules(),
+            "gate_count": len(gate_rules()),
+            "rubric": rubric_schema(),
+        },
+    }
+
+
+def eval_run_offline(*, dataset_path: Optional[str] = None, include_ragas: bool = False) -> Dict[str, Any]:
+    from pathlib import Path
+
+    p = Path(dataset_path).expanduser() if dataset_path else None
+    return run_offline_eval(dataset_path=p, include_ragas=include_ragas)
+
+
+def eval_retrieval_metrics(rows: List[Dict[str, Any]], *, k_list: Optional[List[int]] = None) -> Dict[str, Any]:
+    return aggregate_retrieval_metrics(rows, k_list=k_list)
+
+
+def eval_gate_batch(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    result = run_gate_batch(rows)
+    save_run("gate_batch", {"ok": result.get("ok"), "gate_pass_rate": result.get("gate_pass_rate"), "count": result.get("count")})
+    return result

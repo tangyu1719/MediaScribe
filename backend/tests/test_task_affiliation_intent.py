@@ -102,6 +102,25 @@ def test_self_intro_not_affiliated_to_active_main_task():
     assert not peek_fast_continue_eligible(msg, cur_task=cur, main_task_history=[cur])
 
 
+def test_task_status_recall_not_simple():
+    """追问「当前任务是啥/执行到哪」在有主任务时必须延续，不得标 simple。"""
+    from app.services.ai_chat import _is_simple_intent
+
+    msg = "当前的任务是啥来着，执行到哪了，有点忘记了"
+    assert _is_simple_intent(msg) is False
+    cur = {
+        "task_id": "task_6b9f679d6abe",
+        "user_query": "搜索知识库中MCP技术相关文档并总结",
+        "query_summary": "MCP技术文档总结",
+        "status": "executing",
+        "task_kind": "main",
+    }
+    aff = resolve_task_affiliation(msg, cur_task=cur, main_task_history=[cur])
+    assert aff is not None
+    assert aff["mode"] == "continue_main"
+    assert peek_fast_continue_eligible(msg, cur_task=cur, main_task_history=[cur])
+
+
 def test_explicit_new_task_skips_affiliation():
     hist = [
         {
@@ -114,3 +133,59 @@ def test_explicit_new_task_skips_affiliation():
     msg = "换个问题，新问题：今天天气怎么样"
     aff = resolve_task_affiliation(msg, cur_task=None, main_task_history=hist)
     assert aff is None
+
+
+def test_xhs_profile_after_resolved_mcp_task_is_new_main():
+    """已结案 MCP 知识库任务后，小红书画像分析须开新主任务，禁止续接。"""
+    from app.services.chat_context_memory import (
+        annotate_intent_preprocess_plan,
+        build_fast_new_main_intent,
+    )
+
+    hist = [
+        {
+            "task_id": "task_0b9f679d6abe",
+            "user_query": "搜索知识库中关于MCP技术相关的文档进行总结反馈",
+            "query_summary": "搜索知识库中关于MCP技术相关的文档进行总结反馈",
+            "status": "resolved",
+            "task_kind": "main",
+        }
+    ]
+    cur = {
+        "task_id": "task_0b9f679d6abe",
+        "user_query": hist[0]["user_query"],
+        "query_summary": hist[0]["query_summary"],
+        "status": "executing",
+        "task_kind": "main",
+    }
+    msg = (
+        "可以帮我 分析一下这个人物的画像吗？ 不用记录到订阅模块里，"
+        "你只需要简单分析下他的主页：产品老焦\n小红书号：981032418"
+    )
+    aff = resolve_task_affiliation(msg, cur_task=cur, main_task_history=hist)
+    assert aff is None, "「这个人物」不得误触续接"
+    dec = resolve_intent_mode(
+        msg,
+        cur_task=cur,
+        is_simple_heuristic=False,
+        main_task_history=hist,
+    )
+    assert dec["mode"] == "new_main", dec.get("reason")
+    assert not peek_fast_continue_eligible(msg, cur_task=cur, main_task_history=hist)
+
+    fast = build_fast_new_main_intent(msg, cur_task=cur, main_task_history=hist)
+    assert fast is not None
+    assert fast["mode"] == "new_main"
+    assert fast.get("llm_powered") is False
+    assert "981032418" in (fast.get("query_keywords") or [])
+    assert "产品老焦" in (fast.get("task_summary") or "")
+
+    snap = annotate_intent_preprocess_plan(
+        dict(fast),
+        msg,
+        orch_pipeline_nodes={"query_rewrite": True, "task_decompose": False},
+        domain="社媒分析",
+    )
+    assert snap.get("query_rewrite_decision") == "skip"
+    assert snap.get("task_decompose_decision") == "skip"
+    assert snap.get("task_complexity") == "normal"

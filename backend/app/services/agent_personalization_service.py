@@ -123,11 +123,9 @@ def get_current_payload(template_key: str) -> Dict[str, Any]:
 
 
 def catalog(*, user_facing: bool = True) -> Dict[str, Any]:
-    """user_facing=True 时仅暴露 default 内置模板（doc/ops 仅内部 Agent 配置页）。"""
+    """返回全部内置模板（default / doc / ops）。"""
     builtins = []
     ids = builtin_agent_ids()
-    if user_facing:
-        ids = [x for x in ids if x == "default"]
     for bid in ids:
         tk = f"builtin:{bid}"
         latest = _db.get_latest_revision(tk)

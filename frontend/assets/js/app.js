@@ -65,6 +65,17 @@ function showAuthRequiredMask(show){
   mask.style.display=show?'flex':'none';
 }
 
+/** 未登录时跳转登录页（保留 next 回跳地址） */
+function redirectToLogin(nextPath){
+  if(typeof AuthManager!=='undefined'&&AuthManager.redirectToLogin){
+    AuthManager.redirectToLogin(nextPath);
+    return;
+  }
+  const next=nextPath||(window.location.pathname+window.location.search);
+  const q=next&&next!=='/login.html'?'?next='+encodeURIComponent(next):'';
+  window.location.replace('/login.html'+q);
+}
+
 let _runtimeFaultShown=false;
 /** 扩展/Cursor 浏览器注入脚本报错，不应触发整页「界面渲染异常」遮罩 */
 function isExternalInjectedError(evOrMsg,filename){
@@ -216,8 +227,7 @@ function guardPageSwitch(toPage){
   // 检查是否需要登录
   if(REQUIRES_AUTH_PAGES.includes(toPage)){
     if(!isAuthenticated.value){
-      showToastMsg('请先登录');
-      showAuthRequiredMask(true);
+      redirectToLogin('/'+toPage);
       return false;
     }
     showAuthRequiredMask(false);
@@ -1296,14 +1306,18 @@ async function loadSubLinkCards(id){
   if(!sid)return;
   await loadSubscriptionLinkCards(sid,{target:"up"});
 }
-function openSubscriptionLinkTask(c){
-  const tid=String((c&&c.task_id)||"").trim();
-  if(!tid){
+async function openSubscriptionLinkTask(c){
+  if(!c)return;
+  switchPage("video");
+  await pollQueue();
+  const task=findQueueTaskForLinkCard(c);
+  if(!task){
     showToastMsg("暂无关联任务，请先同步分析");
     return;
   }
-  switchPage("video");
-  pollQueue().then(()=>selectQueueTask(tid));
+  ensureQueueTaskVisible(task.task_id);
+  selectQueueTask(task.task_id);
+  scrollToQueueTask(task.task_id);
 }
 function setSubLinkPageSize(n){
   const v=Math.min(100,Math.max(5,Number(n)||20));
@@ -1363,6 +1377,103 @@ function linkCardSourceLine(c){
   if(src)parts.push("来源："+src);
   if(author)parts.push("作者："+author);
   return parts.join(" · ");
+}
+function linkCardPublishedLine(c){
+  if(!c)return"";
+  const pd=String(c.published_date||"").trim();
+  if(pd)return"发布 "+pd;
+  const pa=String(c.published_at||"").trim();
+  if(pa)return"发布 "+subFmtTime(pa);
+  return"";
+}
+function linkCardAsTask(c){
+  if(!c)return null;
+  const docPath=String(c.doc_path||"").trim();
+  const htmlPath=String(c.html_path||"").trim();
+  const htmlSt=String(c.html_status||"").toLowerCase();
+  return{
+    task_id:String(c.task_id||"").trim(),
+    doc_path:docPath,
+    doc_filename:pathBasename(docPath),
+    html_path:htmlPath,
+    html_status:htmlSt==="ready"?"completed":htmlSt,
+  };
+}
+function linkCardHasMd(c){
+  if(!c)return false;
+  if(String(c.doc_path||"").trim())return true;
+  return String(c.md_status||"").toLowerCase()==="ready";
+}
+function linkCardHasHtml(c){
+  if(!c)return false;
+  if(String(c.html_path||"").trim())return true;
+  return String(c.html_status||"").toLowerCase()==="ready";
+}
+function openLinkCardMd(c){
+  const t=linkCardAsTask(c);
+  if(!t||!linkCardHasMd(c)){showToastMsg("MD 尚未生成");return}
+  return openTaskMd(t);
+}
+async function onLinkCardHtmlClick(c){
+  const t=linkCardAsTask(c);
+  if(!t){showToastMsg("尚无 MD，无法生成 HTML");return}
+  return onTaskHtmlClick(t);
+}
+function openLinkCardFeishu(c){
+  const url=String((c&&c.feishu_doc_url)||"").trim();
+  if(!url){showToastMsg("飞书文档尚未生成");return}
+  window.open(url,"_blank","noopener");
+}
+function findQueueTaskForLinkCard(c){
+  if(!c)return null;
+  const tid=String(c.task_id||"").trim();
+  const rows=taskQueue.value||[];
+  if(tid){
+    const hit=rows.find(t=>t.task_id===tid);
+    if(hit)return hit;
+  }
+  const uh=String(c.url_hash||"").trim();
+  const link=String(c.canonical_url||"").trim().toLowerCase();
+  if(!uh&&!link)return null;
+  return rows.find(t=>{
+    if(uh&&String(t.url_hash||"").trim()===uh)return true;
+    const tl=String(t.link||"").trim().toLowerCase();
+    const nl=String(t.normalized_link||"").trim().toLowerCase();
+    if(!link)return false;
+    return tl===link||nl===link||tl.includes(link)||link.includes(tl);
+  })||null;
+}
+function ensureQueueTaskVisible(tid){
+  const all=taskQueue.value||[];
+  if(!all.some(t=>t.task_id===tid))return false;
+  let rows=filteredTaskQueue.value||[];
+  if(!rows.some(t=>t.task_id===tid)){
+    taskQueueFilter.query="";
+    taskQueueFilter.author="";
+    taskQueueFilter.enableTitle=false;
+    taskQueueFilter.enableAuthor=false;
+    rows=filteredTaskQueue.value||[];
+  }
+  const idx=rows.findIndex(t=>t.task_id===tid);
+  if(idx<0)return false;
+  if(taskQueueViewMode.value!=="expanded"){
+    const ps=Math.max(1,Number(taskQueuePaging.page_size)||12);
+    taskQueuePaging.page=Math.floor(idx/ps)+1;
+  }
+  return true;
+}
+function scrollToQueueTask(tid){
+  const id=String(tid||"").trim();
+  if(!id)return;
+  nextTick(()=>{
+    setTimeout(()=>{
+      const el=document.getElementById("queue-task-"+id);
+      if(!el)return;
+      el.scrollIntoView({behavior:"smooth",block:"center"});
+      el.classList.add("q-card-scroll-flash");
+      setTimeout(()=>el.classList.remove("q-card-scroll-flash"),2200);
+    },100);
+  });
 }
 function favCardMetaLine(c){
   const parts=[];
@@ -1860,6 +1971,53 @@ function taskQueuePageNext(){
   if(taskQueuePaging.page>=taskQueuePageCount())return;
   taskQueuePaging.page+=1;
 }
+function jumpTaskQueuePage(n){
+  if(taskQueueViewMode.value!=="compact")return;
+  const max=taskQueuePageCount();
+  const v=Math.min(max,Math.max(1,parseInt(String(n),10)||1));
+  taskQueuePaging.page=v;
+}
+function buildMdNavContext(opts){
+  const o=opts||{};
+  return{
+    from:o.from||page.value||"video",
+    taskQueuePage:taskQueuePaging.page,
+    taskQueueViewMode:taskQueueViewMode.value,
+    taskId:o.taskId||"",
+    subLinkPage:subLinkPaging.page,
+  };
+}
+function restoreMdReturnContext(){
+  let raw;
+  try{raw=sessionStorage.getItem("sba_md_restore_pending");}catch(_){}
+  if(!raw)return;
+  let ctx;
+  try{ctx=JSON.parse(raw);sessionStorage.removeItem("sba_md_restore_pending");}catch(_){return}
+  if(!ctx||typeof ctx!=="object")return;
+  const from=String(ctx.from||"").trim();
+  if(from&&guardPageSwitch(from)){
+    page.value=from;
+    if(!openTabs.value.includes(from))openTabs.value=openTabs.value.concat([from]);
+    const path=from==="video"?"/":("/"+from);
+    if(history.replaceState)history.replaceState({page:from},"",path);
+  }
+  if(ctx.taskQueueViewMode==="compact"||ctx.taskQueueViewMode==="expanded"){
+    taskQueueViewMode.value=ctx.taskQueueViewMode;
+  }
+  if(ctx.taskQueuePage!=null)taskQueuePaging.page=Math.max(1,Number(ctx.taskQueuePage)||1);
+  if(ctx.subLinkPage!=null)subLinkPaging.page=Math.max(1,Number(ctx.subLinkPage)||1);
+  const applyScroll=()=>{
+    const y=Number(ctx.scrollY)||0;
+    const el=ctx.scrollTarget===".p-60"?document.querySelector(".p-60"):null;
+    if(el)el.scrollTop=y;
+    else window.scrollTo(0,y);
+    const tid=String(ctx.taskId||"").trim();
+    if(tid){
+      if(ensureQueueTaskVisible(tid))scrollToQueueTask(tid);
+    }
+  };
+  nextTick(()=>{setTimeout(applyScroll,150);setTimeout(applyScroll,500);});
+}
 function toggleTaskQueueViewMode(){
   taskQueueViewMode.value=taskQueueViewMode.value==="compact"?"expanded":"compact";
   nextTick(()=>{
@@ -1886,7 +2044,6 @@ watch(
     taskQueueFilter.enableRead,
     taskQueueFilter.enableSource,
     JSON.stringify(taskQueueFilter.sources||{}),
-    filteredTaskQueue.value.length,
   ],
   ()=>{taskQueuePaging.page=1}
 );
@@ -1956,6 +2113,7 @@ function taskQueueFilterActive(){
   );
 }
 const queueNoteOpen=reactive({});
+const queueNoteDraft=reactive({});
 const queueDismissedIds=reactive({});
 const queueBatchSel=reactive({});
 const queueBatchMode=ref(false);
@@ -1991,6 +2149,7 @@ function closeAllPageOverlays(opts){
   if(except!=="modalOut")modalOut.show=false;
   if(except!=="modalArtifact")modalArtifact.show=false;
   if(except!=="queueBatch")exitQueueBatchMode();
+  if(except!=="csBatch")exitCsBatchMode();
   if(except!=="hist")showHist.value=false;
   if(except!=="chatExpand")chatExpandOpen.value=false;
   if(except!=="taskHistModal"){c.taskHistModalOpen=false;c.taskHistModalRow=null;c.taskHistModalFromChat=false;}
@@ -2002,7 +2161,9 @@ function openPageOverlay(kind,openFn){
   if(typeof openFn==="function")openFn();
 }
 const modalOut=reactive({show:false,path:"",files:[],newAbs:""});
-let toastT=null;let procEs=null;let queueTimer=null;let vecTimer=null;
+const modalDupLink=reactive({show:false,task_id:"",link:"",doc_title:"",link_title:"",doc_filename:"",doc_path:""});
+function resubmitDupLink(dupAction){if(!modalDupLink.link)return;modalDupLink.show=false;v.link=modalDupLink.link;setTimeout(()=>{startProcInternal(dupAction)},100)}
+let toastT=null;let procEs=null;let queueTimer=null;let schedTimer=null;let vecTimer=null;
 function showToastMsg(msg){toast.msg=msg;toast.show=true;clearTimeout(toastT);toastT=setTimeout(()=>{toast.show=false},2400)}
 async function ldVec(){try{const r=await fetch("/api/vector/health");const d=await r.json();vec.ok=!!d.milvus_ok;vec.ver=d.version||"-";vec.lat=d.latency_ms||0;vec.err=d.error||""}catch(e){vec.ok=false;vec.err=String(e)}}
 async function fetchJsonSafe(url, opts){
@@ -2038,6 +2199,9 @@ function mergeQueueTasksPreserveOrder(incoming){
   const kept=prev.filter(t=>byId[t.task_id]).map(t=>{
     const inc=byId[t.task_id];
     const merged={...t,...inc};
+    if(queueNoteOpen[t.task_id]&&queueNoteDraft[t.task_id]!==undefined){
+      merged.task_note=queueNoteDraft[t.task_id];
+    }
     if(String(t.read_status||"").toLowerCase()==="read"&&String(inc.read_status||"").toLowerCase()!=="read"){
       merged.read_status="read";
     }
@@ -2079,28 +2243,66 @@ async function updateQueueImportance(t,ev){
   }catch(e){showToastMsg("更新重要度失败："+(e.message||String(e)))}
 }
 async function saveQueueTaskMeta(t,kind,ev){
-  if(!t||!t.task_id||!ev||!ev.target)return;
-  const val=String(ev.target.value||"").trim();
+  if(!t||!t.task_id)return;
+  let val="";
+  if(kind==="note"){
+    if(queueNoteDraft[t.task_id]!==undefined)val=String(queueNoteDraft[t.task_id]||"");
+    else if(ev&&ev.target&&(ev.target.tagName==="TEXTAREA"||ev.target.tagName==="INPUT"))val=String(ev.target.value||"");
+    else val=String(t.task_note||"");
+    val=val.trim();
+  }else{
+    if(!ev||!ev.target)return;
+    let el=ev.target;
+    if(el.tagName!=="TEXTAREA"&&el.tagName!=="INPUT"){
+      el=el.parentElement?.parentElement?.querySelector("textarea")||el.parentElement?.querySelector("textarea");
+      if(!el||(el.tagName!=="TEXTAREA"&&el.tagName!=="INPUT"))return;
+    }
+    val=String(el.value||"").trim();
+  }
   const body={task_id:t.task_id};
   if(kind==="note")body.task_note=val; else body.task_keywords=val;
   try{
     await fetchJsonSafe("/api/process/queue/meta",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     patchQueueTask(t.task_id,kind==="note"?{task_note:val}:{task_keywords:val});
+    if(kind==="note"){
+      queueNoteDraft[t.task_id]=val;
+      showToastMsg("备注已保存");
+    }else if(ev&&ev.target&&ev.target.tagName==="TEXTAREA")showToastMsg("已保存");
   }catch(e){showToastMsg("保存失败："+(e.message||String(e)))}
 }
-function queueTaskHasNote(t){return !!(t&&String(t.task_note||"").trim())}
+function getQueueNoteDraft(t){
+  if(!t||!t.task_id)return "";
+  if(queueNoteDraft[t.task_id]!==undefined)return String(queueNoteDraft[t.task_id]);
+  return String(t.task_note||"");
+}
+function setQueueNoteDraft(t,val){
+  if(!t||!t.task_id)return;
+  queueNoteDraft[t.task_id]=String(val??"");
+}
+function queueTaskHasNote(t){return !!(t&&String(getQueueNoteDraft(t)||t.task_note||"").trim())}
 function isQueueTaskNoteOpen(t){return !!(t&&t.task_id&&queueNoteOpen[t.task_id])}
+function closeQueueTaskNoteEdit(t){
+  if(!t||!t.task_id)return;
+  queueNoteOpen[t.task_id]=false;
+  delete queueNoteDraft[t.task_id];
+}
 function toggleQueueTaskNote(t){
   if(!t||!t.task_id)return;
-  queueNoteOpen[t.task_id]=!queueNoteOpen[t.task_id];
+  const wasOpen=!!queueNoteOpen[t.task_id];
+  if(wasOpen){
+    closeQueueTaskNoteEdit(t);
+    return;
+  }
+  queueNoteOpen[t.task_id]=true;
+  queueNoteDraft[t.task_id]=String(t.task_note||"");
 }
 function queueTaskNoteBtnClass(t){
   if(isQueueTaskNoteOpen(t)||queueTaskHasNote(t))return "btn-artifact-ready";
   return "btn-artifact-off";
 }
 function queueTaskNoteBtnTitle(t){
-  if(isQueueTaskNoteOpen(t))return "收起备注";
-  if(queueTaskHasNote(t))return "查看或编辑备注";
+  if(isQueueTaskNoteOpen(t))return "收起编辑";
+  if(queueTaskHasNote(t))return "编辑备注";
   return "添加备注";
 }
 /** 链接分析队列：最近提交/重新执行在最左（queue_seq / updated_at 降序） */
@@ -2517,6 +2719,19 @@ function outputMdPreviewUrl(path,preset){
 function artifactBrowserUrl(path){
   return outputMdPreviewUrl(path)||outputHttpUrl(path);
 }
+function openOutputMdByPath(path,preset,opts){
+  const p=(path||'').trim();
+  if(!p){showToastMsg('MD 路径不可用');return}
+  const b=pathBasename(p);
+  if(!b){showToastMsg('MD 文件名无效');return}
+  const nav=buildMdNavContext(opts||{});
+  if(typeof SBA_READER_HUB!=='undefined'&&SBA_READER_HUB.navigateToMdPreview){
+    SBA_READER_HUB.navigateToMdPreview(b,preset||'split',nav);
+    return;
+  }
+  const url=outputMdPreviewUrl(p,preset||'split');
+  if(url)window.location.assign(url);
+}
 const modalArtifact=reactive({show:false,label:"",items:[]});
 async function openLocalOutput(path,action){
   const p=(path||"").trim();
@@ -2561,19 +2776,7 @@ function showArtifactModal(path,label){
 async function openTaskMd(t){
   const path=(t.doc_path||t.doc_filename||"").trim();
   if(!path){showToastMsg("MD 尚未生成");return}
-  const b=pathBasename(path);
-  const url=outputMdPreviewUrl(path,"split");
-  if(b&&typeof SBA_READER_HUB!=="undefined"&&SBA_READER_HUB.openOutputMd){
-    const w=SBA_READER_HUB.openOutputMd(b,"split");
-    if(!w)showToastMsg("浏览器拦截了弹窗，请允许本站弹窗后重试");
-    return;
-  }
-  if(url){
-    const w=window.open(url,"sba_md_"+Date.now(),"noopener,noreferrer");
-    if(!w)showToastMsg("浏览器拦截了弹窗，请允许本站弹窗后重试");
-    return;
-  }
-  await openLocalOutput(path,"file");
+  openOutputMdByPath(path,"split",{from:page.value,taskId:t.task_id});
 }
 async function openTaskHtml(t){
   const htmlPath=(t.html_path||"").trim();
@@ -2586,7 +2789,7 @@ async function openTaskHtml(t){
   const mdPath=(t.doc_path||t.doc_filename||"").trim();
   if(mdPath&&taskHtmlReady(t)){
     const b=pathBasename(mdPath);
-    window.open("/preview/md.html?file="+encodeURIComponent(b)+"&preset=html","_blank","noopener");
+    window.location.assign("/preview/md.html?file="+encodeURIComponent(b)+"&preset=html");
     return;
   }
   showToastMsg("HTML 尚未生成");
@@ -2727,14 +2930,16 @@ function findRunningTasksForLink(linkTrim){
     return tl===needle||nl===needle||tl.includes(needle)||needle.includes(tl);
   });
 }
-async function startProc(){
+async function startProcInternal(dupAction){
   const linkTrim=(v.link||"").trim();
   if(!linkTrim){alert("请输入链接");return}
   if(v.submitting)return;
   v.submitting=true;
   try{
-    const running=findRunningTasksForLink(linkTrim);
-    if(running.length&&!confirm("该链接已有任务在执行中，仍要再提交？"))return;
+    if(!dupAction){
+      const running=findRunningTasksForLink(linkTrim);
+      if(running.length&&!confirm("该链接已有任务在执行中，仍要再提交？")){v.submitting=false;return}
+    }
     const payload={
       platform:detectPlatform(linkTrim),
       link:linkTrim,
@@ -2744,7 +2949,25 @@ async function startProc(){
       task_note:(v.taskNote||"").trim(),
       task_keywords:(v.taskKeywords||"").trim()
     };
-    const d=await fetchJsonSafe("/api/process/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(dupAction)payload.dup_action=dupAction;
+    const r=await fetch("/api/process/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d=await parseApiJson(r);
+    if(r.status===409&&d.detail&&d.detail.conflict==="duplicate_completed"){
+      v.submitting=false;
+      const ex=d.detail.existing||{};
+      modalDupLink.task_id=ex.task_id||"";
+      modalDupLink.link=linkTrim;
+      modalDupLink.doc_title=ex.doc_title||"";
+      modalDupLink.link_title=ex.link_title||"";
+      modalDupLink.doc_filename=ex.doc_filename||"";
+      modalDupLink.doc_path=ex.doc_path||"";
+      modalDupLink.show=true;
+      return;
+    }
+    if(!r.ok){
+      const msg=d.detail||d.message||d.error||("HTTP "+r.status);
+      throw new Error(typeof msg==="string"?msg:JSON.stringify(msg));
+    }
     v.submitting=false;
     v.submitPulse=true;setTimeout(()=>{v.submitPulse=false},700);
     showToastMsg(d.reused?"同链接已复用原卡片继续处理":"已加入处理队列");
@@ -2752,9 +2975,10 @@ async function startProc(){
     logFocusId.value=d.task_id;
     connectLogEs(d.task_id);
     pollQueue();
-  }catch(e){showToastMsg("提交失败："+(e.message||String(e)));aLog("","ERROR",e.message||String(e))}
+  }catch(e){v.submitting=false;showToastMsg("提交失败："+(e.message||String(e)));aLog("","ERROR",e.message||String(e))}
   finally{v.submitting=false}
 }
+async function startProc(){return startProcInternal("")}
 function clrV(){v.link="";v.pr="";logs.value=[];v.pg=0;v.stage="就绪";v.stxt="就绪";v.sd="i";v.rd=null;v.htmlStat="";v.htmlMsg="";if(procEs){procEs.close();procEs=null}}
 let linkPipelinePrefTimer=null;
 async function persistLinkPipelinePrefs(){
@@ -2953,6 +3177,7 @@ function _boardUsageForKey(key){
   return row;
 }
 function _parseIsoMs(v){
+  if(typeof v==="number"&&Number.isFinite(v))return v;
   const s=String(v||"").trim();
   if(!s)return 0;
   const t=Date.parse(s);
@@ -4396,7 +4621,7 @@ const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",a
 function switchChatPanel(tab){
   const t=tab==="config"?"config":"room";
   c.chatPanelTab=t;
-  if(t==="room")nextTick(()=>{const el=document.querySelector(".chat-msgs");if(el)el.scrollTop=el.scrollHeight});
+  if(t==="room")chatScrollBottom(true);
 }
 const PARENT_TASK_STATUSES=new Set(["created","summarizing","planning","executing","paused","abnormal","resolved","failed","closed"]);
 const PARENT_STATUS_LABELS={
@@ -4444,6 +4669,15 @@ function resolveParentTaskStatus(aiMsg){
   return"executing";
 }
 function isParentTaskStatusRaw(st){return PARENT_TASK_STATUSES.has(String(st||"").toLowerCase())}
+function isParentTaskTerminal(st){
+  const s=normalizeParentTaskStatus(st,"executing");
+  return ["resolved","closed","failed"].includes(s);
+}
+function isActiveCurTask(t){
+  if(!t||!String(t.task_id||"").trim())return false;
+  if(String(t.task_kind||"").toLowerCase()==="simple")return false;
+  return !isParentTaskTerminal(t.status);
+}
 function formatDuration(ms){
   const n=Number(ms);
   if(!n||n<0)return"";
@@ -4484,6 +4718,19 @@ const MAX_PERSISTED_MESSAGES=40;
 const MAX_STORED_CONTENT_CHARS=12000;
 const MAX_STORED_STEP_WHAT_CHARS=240;
 const MAX_STORED_STEP_RESULT_CHARS=6000;
+const MAX_STEP_RESULT_BRIEF_CHARS=15;
+function clampStepResultBrief(text,maxLen){
+  const cap=maxLen||MAX_STEP_RESULT_BRIEF_CHARS;
+  const t=String(text||"").trim();
+  if(!t)return"";
+  if(t.length<=cap)return t;
+  return t.slice(0,cap-1)+"…";
+}
+function briefRagHitsBrief(hits){
+  const n=(Array.isArray(hits)?hits:[]).length;
+  if(!n)return"无检索结果";
+  return clampStepResultBrief(`检索到 ${n} 处片段`);
+}
 function extractToolNameFromStep(s){
   if(s&&s.tool_name)return String(s.tool_name).trim();
   const io=getStepIoFields(s);
@@ -4495,10 +4742,37 @@ function extractToolNameFromStep(s){
   const m=nm.match(/^调用\s+([^\s(（]+)/);
   if(m)return m[1];
   if(nm.startsWith("MCP 工具:"))return nm.replace(/^MCP 工具:\s*/,"").trim();
+  if(nm.startsWith("MCP:"))return nm.replace(/^MCP:\s*/,"").trim();
+  if(nm.startsWith("Tool Call ·"))return nm.replace(/^Tool Call ·\s*/,"").trim();
   if(nm==="联网搜索")return"web_search";
   return nm||"工具";
 }
 const INVOKE_MODE_CN={fixed_node:"固定节点",react:"ReAct",retry:"重试"};
+const TOOL_CHANNEL_CN={builtin:"Tool Call",mcp:"MCP",skill:"SKILL"};
+function normalizeLegacyToolText(text){
+  let t=String(text||"").trim();
+  if(!t)return"";
+  t=t.replace(/^MCP\s*工具\s*:\s*/i,"MCP · ");
+  t=t.replace(/^MCP\s*:\s*/i,"MCP · ");
+  t=t.replace(/模型工具调用/g,"按需调用");
+  t=t.replace(/模型按需检索/g,"按需检索");
+  t=t.replace(/模型按需联网/g,"按需联网");
+  return t;
+}
+function stepToolSource(s,d){
+  const raw=String((s&&s.tool_source)||(d&&d.tool_source)||stepUi(s).tool_source||"").trim().toLowerCase();
+  if(raw&&TOOL_CHANNEL_CN[raw])return raw;
+  const w=normalizeLegacyToolText(String((s&&s.what)||(d&&d.what)||""));
+  if(/\bMCP\s*·/.test(w)||/^MCP\b/.test(w))return"mcp";
+  if(/\bSKILL\s*·/.test(w))return"skill";
+  if(/\bTool Call\s*·/.test(w))return"builtin";
+  const sn=String((s&&s.step_name)||(d&&d.step_name)||"");
+  if(/^MCP\s*工具\s*:/i.test(sn)||/^MCP\s*:/i.test(sn))return"mcp";
+  return"builtin";
+}
+function formatToolChannelLabel(s,d){
+  return TOOL_CHANNEL_CN[stepToolSource(s,d)]||"Tool Call";
+}
 function stepInvokeMode(s,d){
   const raw=String(
     (s&&s.invoke_mode)||(d&&d.invoke_mode)||stepUi(s).invoke_mode||""
@@ -4539,7 +4813,7 @@ function formatToolPillPrimary(s){
   return"调用 "+extractToolNameFromStep(s);
 }
 function formatToolPillResult(s){
-  if(s&&String(s.result||"").trim())return String(s.result).trim().slice(0,2000);
+  if(s&&String(s.result||"").trim())return clampStepResultBrief(String(s.result).trim());
   return summarizeToolResultCn(s);
 }
 function stepIsToolCall(s){
@@ -4597,14 +4871,14 @@ function extractWhatFromSse(d){
     let action="";
     if(/read|file|文档/.test(name)&&args.path)action=`读取文件 ${String(args.path).slice(0,180)}`.trim();
     else if(/rag|kb|知识库/.test(name)){
-      const q=String(args.query||jIn&&jIn.query||d.target||"").trim();
-      action=q?`知识库检索 · ${q.slice(0,10)}`:`知识库检索`;
+      action="知识库检索";
     }else if(name==="web_search"||name.includes("search")){
       const q=String(args.query||"").trim()||formatQueryListBrief(args.search_queries||jIn&&jIn.search_queries);
       action=q?`联网搜索 · ${q.slice(0,10)}`:`联网搜索`;
     }else{
       const tgt=String(d.target||d.operation||"").trim();
-      action=tgt?`调用 ${name} · ${tgt.slice(0,120)}`:`调用 ${name}`;
+      const channel=formatToolChannelLabel(null,d);
+      action=tgt?`${channel} · ${name} · ${tgt.slice(0,120)}`:`${channel} · ${name}`;
     }
     const purpose=stepInvokePurpose(null,d);
     if(tag)return purpose?`${tag} · ${action} · ${purpose}`:`${tag} · ${action}`;
@@ -4791,31 +5065,40 @@ function dedupeContinueMainSteps(steps){
 }
 function extractResultFromSse(d){
   if(!d)return"";
-  if(String(d.result||"").trim())return String(d.result).trim().slice(0,MAX_STORED_STEP_RESULT_CHARS);
+  const rb=String(d.result_brief||d.description||"").trim();
+  if(rb&&!looksLikeJsonBlob(rb))return clampStepResultBrief(rb);
+  if(String(d.result||"").trim())return clampStepResultBrief(String(d.result).trim());
   const jOut=parseStepJson(d.output_text);
-  if(jOut&&jOut.error)return String(jOut.error).slice(0,MAX_STORED_STEP_RESULT_CHARS);
+  const ph=String(d.phase||"").toLowerCase();
+  if(jOut&&jOut.error)return clampStepResultBrief(String(jOut.error));
   if(jOut&&jOut.tool_call){
-    let msg=String(jOut.result_msg||"").trim();
+    const briefCn=String(jOut.result_brief_cn||"").trim();
+    if(briefCn&&!looksLikeJsonBlob(briefCn))return clampStepResultBrief(briefCn);
     const tr=coerceToolResult(jOut.tool_result);
-    if(tr&&Array.isArray(tr.hits)&&tr.hits.length)return formatRagHitsUserResult(tr.hits);
-    if(tr&&Array.isArray(tr.results)&&tr.results.length)return formatWebSearchUserResult(tr);
-    if(tr&&typeof tr==="object"){
-      for(const k of ["content","text","body","message","result_msg","detail","summary"]){
-        const v=tr[k];
-        if(v&&String(v).trim()&&!looksLikeJsonBlob(String(v)))return String(v).slice(0,MAX_STORED_STEP_RESULT_CHARS);
-      }
+    if(tr&&Array.isArray(tr.hits)&&tr.hits.length)return briefRagHitsBrief(tr.hits);
+    if(tr&&Array.isArray(tr.slices)&&tr.slices.length)return briefRagHitsBrief(tr.slices);
+    if(tr&&Array.isArray(tr.rag_slices)&&tr.rag_slices.length)return briefRagHitsBrief(tr.rag_slices);
+    if(tr&&Array.isArray(tr.results)&&tr.results.length){
+      const line=briefWebSearchDict(tr);
+      if(line)return clampStepResultBrief(line);
     }
-    if(msg&&!looksLikeJsonBlob(msg))return msg.slice(0,MAX_STORED_STEP_RESULT_CHARS);
-    if(typeof jOut.tool_result==="string"&&!looksLikeJsonBlob(jOut.tool_result))return jOut.tool_result.slice(0,MAX_STORED_STEP_RESULT_CHARS);
+    let msg=String(jOut.result_msg||"").trim();
+    if(msg.startsWith((jOut.tool_name||"")+":"))msg=msg.slice(String(jOut.tool_name||"").length+1).trim();
+    if(msg&&!looksLikeJsonBlob(msg))return clampStepResultBrief(msg);
+    return"执行完成";
   }
   if(jOut&&typeof jOut==="object"&&!jOut.tool_call){
-    const cn=summarizeOrchJsonCn(jOut,d.phase);
-    if(cn)return cn.slice(0,MAX_STORED_STEP_RESULT_CHARS);
+    const orchBrief=String(jOut.result_brief_cn||jOut.summary_cn||"").trim();
+    if(orchBrief&&!looksLikeJsonBlob(orchBrief))return clampStepResultBrief(orchBrief);
+    if(ph==="intent"){
+      const mode=String(jOut.mode||jOut.task_action||"").toLowerCase();
+      if(mode==="continue_main")return clampStepResultBrief(orchBrief||"延续主任务");
+      if(mode==="simple")return clampStepResultBrief("简单问答");
+      if(mode==="new_main")return clampStepResultBrief("新建主任务");
+    }
   }
   const think=stripReactDisplayMarkers(String(d.think_text||"").trim());
-  if(think&&!looksLikeJsonBlob(think))return think.slice(0,MAX_STORED_STEP_RESULT_CHARS);
-  const rb=String(d.result_brief||d.description||"").trim();
-  if(rb&&!looksLikeJsonBlob(rb))return rb.slice(0,MAX_STORED_STEP_RESULT_CHARS);
+  if(think&&!looksLikeJsonBlob(think)&&ph!=="intent")return think.slice(0,MAX_STORED_STEP_RESULT_CHARS);
   return"";
 }
 /** 用户视角：只做两件事 — 做了啥 / 结果是什么（落盘仅 what+result） */
@@ -4838,7 +5121,12 @@ function attachStepUiRuntime(st,d){
   st._ui={
     node_kind:d.node_kind||(st.kind==="tool"?"tool_call":ph==="react_round"?"llm_call":"sub_task"),
     phase:d.phase||st.phase||"",
-    status:d.status||st._ui&&st._ui.status||"done",
+    status:(()=>{
+      let s=String(d.status||st._ui&&st._ui.status||st.status||"").toLowerCase();
+      if((!s||["running","thinking","started","executing"].includes(s))&&(String(d.output_text||"").trim()||String(d.result||"").trim()))
+        return"done";
+      return s||"done";
+    })(),
     duration_ms:d.elapsed_ms!=null?d.elapsed_ms:d.duration_ms,
     sub_plan_id:d.sub_plan_id||st.sub_plan_id,
     sub_index:d.sub_index!=null?d.sub_index:st.sub_index,
@@ -4903,7 +5191,7 @@ function briefWebSearchDict(tr){
   return"无检索结果";
 }
 function summarizeToolResultCn(s){
-  if(s&&String(s.result||"").trim())return String(s.result).trim().slice(0,120);
+  if(s&&String(s.result||"").trim())return clampStepResultBrief(String(s.result).trim());
   const ui=stepUi(s);
   const st=String(ui.status||s.status||"").toLowerCase();
   const inFlight=["running","thinking","started","executing"].includes(st);
@@ -4915,12 +5203,18 @@ function summarizeToolResultCn(s){
     return hasOut?"处理中…":"执行中…";
   }
   const rb=String(s&&(s.result_brief||s.description)||"").trim();
-  if(rb&&rb!=="已返回"&&!looksLikeJsonBlob(rb))return rb.slice(0,120);
+  if(rb&&rb!=="已返回"&&!looksLikeJsonBlob(rb))return clampStepResultBrief(rb);
   const j=parseStepJson(io.output_text);
   if(j&&j.tool_call===true){
     const name=j.tool_name||extractToolNameFromStep(s);
-    if(j.error)return String(j.error).slice(0,120);
+    if(j.error)return clampStepResultBrief(String(j.error));
+    const briefCn=String(j.result_brief_cn||"").trim();
+    if(briefCn&&!looksLikeJsonBlob(briefCn))return clampStepResultBrief(briefCn);
     const tr=coerceToolResult(j.tool_result);
+    if(/rag|kb|知识库/.test(String(name||""))&&tr){
+      if(Array.isArray(tr.hits)&&tr.hits.length)return briefRagHitsBrief(tr.hits);
+      if(Array.isArray(tr.slices)&&tr.slices.length)return briefRagHitsBrief(tr.slices);
+    }
     if(name==="web_search"&&tr){
       const line=briefWebSearchDict(tr);
       if(line)return line;
@@ -5105,7 +5399,8 @@ function groupStepsBySubPlan(steps){
       const ob=stepLaneOrder(b.step_lane||b.steps?.[0]?.step_lane);
       if(oa!==ob)return oa-ob;
       return String(a.sub_plan_id||"").localeCompare(String(b.sub_plan_id||""));
-    });
+    })
+    .map((g,i)=>({...g,display_index:i+1}));
 }
 function stepIsSkipped(s){
   if(!s)return false;
@@ -5117,7 +5412,10 @@ function pillStatusClass(s){
   if(stepIsSkipped(s))return"skip";
   const st=String(stepUi(s).status||s.status||"").toLowerCase();
   if(["failed","abnormal"].includes(st)||s.success===false||stepUi(s).success===false)return"fail";
-  if(["running","thinking","started","executing"].includes(st))return"run";
+  if(["running","thinking","started","executing"].includes(st)){
+    if(stepHasCompletedOutput(s)&&!s._thinkStreaming)return"ok";
+    return"run";
+  }
   return"ok";
 }
 function execPillClass(s){
@@ -5127,6 +5425,46 @@ function execPillClass(s){
   const st=pillStatusClass(s);
   return[st,st!=="ok"?"orch":""].filter(Boolean).join(" ");
 }
+function platformHealthStats(h){
+  if(!h)return{ok:0,warn:0,error:0};
+  if(h.ready&&h.summary&&typeof h.summary==='object')return h.summary;
+  const summary={ok:0,warn:0,error:0};
+  for(const it of (Array.isArray(h.items)?h.items:[])){
+    const st=it.status||'error';
+    if(st==='ok')summary.ok++;
+    else if(st==='warn')summary.warn++;
+    else summary.error++;
+  }
+  if(!h.items?.length&&h.error)summary.error=Math.max(summary.error,1);
+  return summary;
+}
+const platformHealthSummaryText=computed(()=>{
+  if(c.platformHealthLoading)return'检测中…';
+  const h=c.platformHealth;
+  if(!h)return'启动检测中…';
+  const s=platformHealthStats(h);
+  const parts=[`${s.ok} 正常`];
+  if(s.warn)parts.push(`${s.warn} 降级`);
+  if(s.error)parts.push(`${s.error} 异常`);
+  let text=parts.join(' · ');
+  const bad=(h.items||[]).filter(i=>i.status==='warn'||i.status==='error');
+  if(bad.length){
+    const names=bad.map(i=>String(i.label||i.id||'').trim()).filter(Boolean);
+    if(names.length)text+=' · '+names.join('、');
+  }else if(!h.ready&&h.error){
+    text='后端不可用 · '+String(h.error).slice(0,48);
+  }
+  return text;
+});
+const platformHealthSummaryClass=computed(()=>{
+  if(c.platformHealthLoading)return'';
+  const h=c.platformHealth;
+  if(!h)return'';
+  const s=platformHealthStats(h);
+  if(!h.ready&&h.error)return'ph-warn';
+  if((s.error||0)>0||(s.warn||0)>0)return'ph-warn';
+  return'ph-ok';
+});
 async function loadPlatformHealth(refresh){
   if(c.platformHealthLoading)return;
   c.platformHealthLoading=true;
@@ -5142,12 +5480,20 @@ async function loadPlatformHealth(refresh){
     if(!r.ok)throw new Error(fmtApiErr(d,r));
     c.platformHealth=d&&typeof d==='object'?d:null;
   }catch(e){
+    const errMsg=String(e&&e.message||e);
     c.platformHealth={
       ready:false,
-      items:[],
+      items:[{
+        id:'backend_api',
+        label:'后端 API (8000)',
+        status:'error',
+        latency_ms:0,
+        error:errMsg,
+        settings_href:'',
+      }],
       summary:{ok:0,warn:0,error:1},
       all_ok:false,
-      error:String(e&&e.message||e),
+      error:errMsg,
     };
   }finally{
     c.platformHealthLoading=false;
@@ -5166,8 +5512,9 @@ function goHealthSettings(href){
 }
 function execSubPlanTitle(plan,epi){
   if(!plan)return`步骤组 #${(epi||0)+1}`;
+  const disp=Number(plan.display_index);
   const n=plan.sub_index;
-  const idx=Number.isFinite(Number(n))&&Number(n)>0?Number(n):(epi||0)+1;
+  const idx=Number.isFinite(disp)&&disp>0?disp:(Number.isFinite(Number(n))&&Number(n)>0?Number(n):(epi||0)+1);
   const steps=Array.isArray(plan.steps)?plan.steps:[];
   const lane=String(plan.step_lane||steps[0]?.step_lane||"").toLowerCase();
   if(lane==="prefetch"){
@@ -5233,6 +5580,15 @@ function summarizeOrchJsonCn(j,phase){
 function formatOrchThinkDisplay(s){
   if(!s)return"";
   if(String(s.result||"").trim())return String(s.result).trim();
+  const ph=String(stepUi(s).phase||s.phase||"").toLowerCase();
+  if(ph==="intent"){
+    const io=getStepIoFields(s);
+    const j=parseStepJson(io.output_text);
+    const brief=String(j&&j.result_brief_cn||s.result_brief||"").trim();
+    if(brief)return brief;
+    const mode=String(j&&j.mode||j&&j.task_action||"").toLowerCase();
+    if(mode==="continue_main")return"延续主任务";
+  }
   const raw=String(getStepIoFields(s).think_text||"").trim();
   if(!raw)return"";
   const j=parseStepJson(raw);
@@ -5449,6 +5805,80 @@ function closeRagSliceDetail(){
   ragSliceModal.show=false;
   ragSliceModal.slice=null;
 }
+function sortedRagSlicesForMsg(m,extra){
+  const raw=(m&&Array.isArray(m.ragPrefetchSlices)&&m.ragPrefetchSlices.length)
+    ?m.ragPrefetchSlices
+    :(Array.isArray(extra)?extra:[]);
+  return [...raw].sort((a,b)=>Number(b.score||0)-Number(a.score||0));
+}
+function ragCapsuleScoreLabel(sl){
+  if(!sl||sl.score==null||sl.score==="")return"—";
+  const n=Number(sl.score);
+  return Number.isFinite(n)?n.toFixed(3):"—";
+}
+function toggleRagCapsule(m,sl){
+  if(!m||!sl)return;
+  const id=sl.ref_id;
+  if(m._activeRagCapsule===id){
+    m._activeRagCapsule=null;
+    m._activeRagSlice=null;
+  }else{
+    m._activeRagCapsule=id;
+    m._activeRagSlice=sl;
+  }
+}
+function activeRagSliceForMsg(m){
+  return m&&m._activeRagSlice?m._activeRagSlice:null;
+}
+function jumpToRagCapsule(m,refId){
+  if(!m)return;
+  const slices=ragCitationSlicesForMsg(m);
+  let sl=slices.find(s=>String(s.ref_id)===String(refId));
+  if(!sl){
+    const prefetch=(m.ragPrefetchSlices||[]).find(s=>String(s.ref_id)===String(refId));
+    if(prefetch)sl=prefetchSliceToCitation(prefetch);
+  }
+  if(!sl)return;
+  const raw=sl._raw||{
+    ref_id:sl.ref_id,
+    content:sl.slice_content||sl.content,
+    source_file:sl.source_file,
+    parent_document:sl.parent_name,
+    title:sl.parent_name,
+    score:sl.score,
+  };
+  toggleRagCapsule(m,raw);
+  nextTick(()=>{
+    const el=document.querySelector('[data-rag-capsule="'+refId+'"]');
+    if(!el)return;
+    el.scrollIntoView({behavior:'smooth',block:'nearest'});
+    el.classList.remove('rag-capsule-flash');
+    void el.offsetWidth;
+    el.classList.add('rag-capsule-flash');
+  });
+}
+function onAnswerCitationClick(ev,m){
+  if(window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.handleKbPictureClick==="function"){
+    if(window.SBA_RICH_CONTENT.handleKbPictureClick(ev,(src)=>{mm.lightboxSrc=src}))return;
+  }
+  const t=ev&&ev.target;
+  if(!t||!t.classList||!t.classList.contains('rag-cite-sup'))return;
+  ev.preventDefault();
+  const ref=t.getAttribute('data-ref');
+  if(ref)jumpToRagCapsule(m,ref);
+}
+function injectAnswerCitationSuperscripts(html,slices){
+  if(!html||!slices||!slices.length)return html;
+  const valid=new Set(slices.map(s=>String(s.ref_id)));
+  const mk=(nums)=>String(nums||"").split(/[,，]/).map(x=>x.trim()).filter(Boolean)
+    .filter(n=>valid.has(n))
+    .map(n=>'<sup class="rag-cite-sup" data-ref="'+n+'" title="查看文献切片 '+n+'">'+n+'</sup>')
+    .join("");
+  let out=html;
+  out=out.replace(/【(\d+(?:[，,]\d+)*)】/g,(_,g)=>mk(g));
+  out=out.replace(/([\u4e00-\u9fff])(\d+(?:[，,]\d+)*)(?=[。！？；<\s])/g,(full,ch,nums)=>ch+mk(nums));
+  return out;
+}
 async function openRagParentInKb(sl){
   const path=String(sl&&sl.source_file||"").trim();
   if(!path){showToastMsg("无父文档路径");return;}
@@ -5533,6 +5963,13 @@ const chatGroupedSubPlans=computed(()=>{
   const steps=(c.curTask&&Array.isArray(c.curTask.steps))?c.curTask.steps:[];
   return groupStepsBySubPlan(steps);
 });
+const chatActiveCurTask=computed(()=>isActiveCurTask(c.curTask)?c.curTask:null);
+const chatSubPlanGroupCount=computed(()=>chatGroupedSubPlans.value.length);
+function stepHasCompletedOutput(s){
+  if(s&&String(s.result||"").trim())return true;
+  const io=getStepIoFields(s);
+  return !!(String(io.output_text||"").trim());
+}
 function stepSuccessLabel(s){
   if(stepIsSkipped(s))return"跳过";
   const ui=stepUi(s);
@@ -5541,8 +5978,12 @@ function stepSuccessLabel(s){
   const st=String(ui.status||s.status||"").toLowerCase();
   if(["failed","abnormal"].includes(st))return"失败";
   if(["done","completed","resolved"].includes(st))return"成功";
-  if(["running","thinking","started","executing"].includes(st))return"进行中";
+  if(["running","thinking","started","executing"].includes(st)){
+    if(stepHasCompletedOutput(s)&&!s._thinkStreaming)return"成功";
+    return"进行中";
+  }
   if(s&&s.result)return"成功";
+  if(stepHasCompletedOutput(s))return"成功";
   if(stepIsToolCall(s))return"—";
   return"编排";
 }
@@ -5666,7 +6107,15 @@ function formatTaskIdFull(id,fallback){
   const s=String(id||fallback||"").trim();
   return s||"—";
 }
-function taskKindLabel(taskKind,taskId,subPlanId){
+function taskKindLabel(taskKind,taskId,subPlanId,querySummary){
+  const cont=String(taskKind||"").toLowerCase();
+  if(cont==="continue_main"||cont==="continue"){
+    const tid=formatTaskIdFull(taskId);
+    const title=String(querySummary||"").trim().slice(0,48);
+    if(tid&&title)return`延续复杂任务 · ${tid} ·【${title}】`;
+    if(tid)return`延续复杂任务 · ${tid}`;
+    return"延续复杂任务";
+  }
   if(taskKind==="simple")return"简单任务";
   if(taskKind==="main"&&taskId){
     const tid=formatTaskIdFull(taskId);
@@ -5681,7 +6130,30 @@ function execCardLabel(m){
   if(!m||m.role!=="assistant")return"执行过程";
   const tid=m.task_id||(c.curTask&&c.curTask.task_id);
   const sub=m.execSubPlanId||(c.curTask&&c.curTask.sub_plan_id);
-  return taskKindLabel(m.execTaskKind||(c.curTask&&c.curTask.task_kind),tid,sub);
+  const qs=execCardQueryLine(m);
+  const kind=m.execContinueMain?"continue_main":(m.execTaskKind||(c.curTask&&c.curTask.task_kind));
+  return taskKindLabel(kind,tid,sub,qs);
+}
+function execCardQueryLine(m){
+  if(!m)return"";
+  const kind=String(m.execContinueMain?"continue_main":(m.execTaskKind||(c.curTask&&c.curTask.task_kind)||"")).toLowerCase();
+  if(kind==="simple"||kind==="pending")return"";
+  // 延续复杂任务摘要已写入 execCardLabel 蓝色标签，不再重复展示
+  if(kind==="continue_main"||kind==="continue")return"";
+  const fromMsg=String(m.query_summary||m.user_query||"").trim();
+  if(fromMsg)return fromMsg;
+  const ta=m.task_audit;
+  if(ta){
+    const taQs=String(ta.query_summary||ta.user_query||"").trim();
+    if(taQs)return taQs;
+  }
+  const tid=String(m.task_id||"").trim();
+  const cur=isActiveCurTask(c.curTask)?c.curTask:null;
+  if(tid&&cur&&String(cur.task_id||"")===tid){
+    const cqs=String(cur.query_summary||cur.user_query||"").trim();
+    if(cqs)return cqs;
+  }
+  return"";
 }
 function mapResultJudgment(st){
   const s=String(st||"").toLowerCase();
@@ -5717,6 +6189,7 @@ function isMainTaskFollowUpQuery(text){
     "好了吗","好了没","什么情况","啥情况","怎么回事","进度","结果呢","现在呢",
     "继续当前","链接分析好了","分析好了","搞定了吗","出来了吗","完成了吗",
     "继续","接着","然后","那个任务","上面的任务","要你分析",
+    "当前任务","当前的任务","任务是啥","执行到哪","进行到哪","做到哪","忘了","忘记了","啥来着",
   ];
   if(hints.some(h=>t.includes(h)||low.includes(h)))return true;
   if(/^[?？!！。…\s]{0,6}(好|行|嗯|ok)+[?？!！。…\s]*$/i.test(t))return true;
@@ -5773,18 +6246,20 @@ function upsertMainTaskHistory(entry){
     delete patch.user_query;
     delete patch.query_summary;
   }
-  const i=(c.mainTaskHistory||[]).findIndex(t=>t.task_id===tid);
+  const tw=chatTaskWriteCtx();
+  const hist=Array.isArray(tw.mainTaskHistory)?tw.mainTaskHistory:[];
+  const i=hist.findIndex(t=>t.task_id===tid);
   if(i>=0){
-    const prev=c.mainTaskHistory[i]||{};
+    const prev=hist[i]||{};
     const merged={...prev,...patch};
     const prevUq=String(prev.user_query||"").trim();
     if(prevUq&&!isMainTaskFollowUpQuery(prevUq)){
       merged.user_query=prevUq;
       if(prev.query_summary)merged.query_summary=prev.query_summary;
     }
-    c.mainTaskHistory[i]=merged;
-  }else c.mainTaskHistory.push(patch);
-  c.mainTaskHistory=dedupeMainTaskHistoryList(c.mainTaskHistory);
+    hist[i]=merged;
+  }else hist.push(patch);
+  tw.mainTaskHistory=dedupeMainTaskHistoryList(hist);
 }
 const TASK_NAME_SEARCH_SYNONYMS={
   "小红书":["xhs","红书","xiaohongshu","薯","笔记"],
@@ -5852,7 +6327,8 @@ function sortTaskHistList(rows,sortKey){
 }
 function syncMainTaskResultIndex(aiMsg){
   if(!aiMsg||!aiMsg.task_id)return;
-  const idx=c.msgs.indexOf(aiMsg);
+  const msgs=chatStreamMsgsForAi(aiMsg);
+  const idx=Array.isArray(msgs)?msgs.indexOf(aiMsg):-1;
   if(idx<0)return;
   const judgment=mapResultJudgment(aiMsg.result_status||(aiMsg.span&&aiMsg.span.status));
   aiMsg.result_status=judgment;
@@ -5864,9 +6340,10 @@ function syncMainTaskResultIndex(aiMsg){
     total_token_count:aiMsg.span&&aiMsg.span.total_token_count,
     total_duration_ms:aiMsg.span&&aiMsg.span.total_duration_ms,
   });
-  if(c.curTask&&c.curTask.task_id===aiMsg.task_id){
-    c.curTask.result_msg_index=idx;
-    c.curTask.result_status=judgment;
+  const tw=chatTaskWriteCtx();
+  if(tw.curTask&&tw.curTask.task_id===aiMsg.task_id){
+    tw.curTask.result_msg_index=idx;
+    tw.curTask.result_status=judgment;
   }
 }
 function rebuildMainTaskHistoryFromMsgs(){
@@ -6489,6 +6966,8 @@ async function submitIntentFeedback(m,msgIdx){
 
 const chatExpandOpen=ref(false);
 const cs=ref([]);
+const csBatchSel=reactive({});
+const csBatchMode=ref(false);
 const chatModels=ref([{id:"",label:"auto（节点池）"}]);
 async function ldChatModels(){
   try{
@@ -6696,7 +7175,7 @@ function startWarmupPoll(){
   },700);
 }
 const CHAT_CONNECT_STEPS=[
-  {phase:'langgraph',label:'编排引擎',needsRag:false},
+  {phase:'langgraph',label:'任务编排',needsRag:false},
   {phase:'tools_mcp',label:'MCP',needsRag:false},
   {phase:'rag_milvus',label:'RAG',needsRag:true},
   {phase:'rag_embedder',label:'RAG 嵌入',needsRag:true,after:'rag_milvus'},
@@ -6836,15 +7315,27 @@ async function persistChatSession(){
 }
 async function loadChatSession(sid){
   if(!sid||sid===c.sid)return;
-  if(c.chatStreaming){showToastMsg("正在生成回答，请完成或暂停后再切换会话");return}
+  const bgStreaming=c.chatStreaming;
+  if(bgStreaming){
+    parkChatStreamForLeave();
+    await persistChatSession();
+    showToastMsg("生成在后台继续，可随时返回该会话查看");
+  }
   c.sid=sid;c.mode="normal";c._stepIoCache={};
   try{
     const r=await fetch("/api/chat/sessions/"+encodeURIComponent(sid));
     if(!r.ok){c.msgs=[];c.curTask=null;return}
     const d=await r.json();
-    c.msgs=(d.messages||[]).map(normalizeChatMsg);
-    c.curTask=normalizeCurTask(d.cur_task);
-    c.mainTaskHistory=filterChatSessionMainHistory(Array.isArray(d.main_task_history)?d.main_task_history:[]);
+    if(_chatStreamPark&&_chatStreamPark.sid===sid){
+      c.msgs=_chatStreamPark.msgs;
+      c.curTask=_chatStreamPark.curTask;
+      c.mainTaskHistory=filterChatSessionMainHistory(Array.isArray(_chatStreamPark.mainTaskHistory)?_chatStreamPark.mainTaskHistory:[]);
+      clearChatStreamPark();
+    }else{
+      c.msgs=(d.messages||[]).map(normalizeChatMsg);
+      c.curTask=normalizeCurTask(d.cur_task);
+      c.mainTaskHistory=filterChatSessionMainHistory(Array.isArray(d.main_task_history)?d.main_task_history:[]);
+    }
     c.memoryMeta=d.memory_meta&&typeof d.memory_meta==='object'?d.memory_meta:null;
     if(!c.mainTaskHistory.length)c.msgs.length&&rebuildMainTaskHistoryFromMsgs();
     else if(c.msgs.length)rebuildMainTaskHistoryFromMsgs();
@@ -6863,7 +7354,7 @@ async function loadChatSession(sid){
     }
     if(!c.mainTaskHistory.length)c.msgs.length&&rebuildMainTaskHistoryFromMsgs();
     await loadSessionFeedback(sid);
-    nextTick(()=>{const el=document.querySelector(".chat-msgs");if(el)el.scrollTop=el.scrollHeight});
+    chatScrollBottom(true);
   }catch(_){c.msgs=[];c.curTask=null}
 }
 async function ldCs(){try{const r=await fetch('/api/chat/sessions');const d=await r.json();cs.value=d.sessions||[]}catch(e){}}
@@ -6887,6 +7378,71 @@ async function delCs(sid){
   await fetch('/api/chat/sessions/'+encodeURIComponent(sid),{method:'DELETE'});
   if(c.sid===sid){await newChatSess()}
   ldCs();
+}
+function clearCsBatchSel(){
+  for(const k of Object.keys(csBatchSel))delete csBatchSel[k];
+}
+function exitCsBatchMode(){
+  csBatchMode.value=false;
+  clearCsBatchSel();
+  c.sessionMenuId="";
+}
+function toggleCsBatchMode(){
+  if(csBatchMode.value)exitCsBatchMode();
+  else{
+    c.sessionMenuId="";
+    csBatchMode.value=true;
+  }
+}
+function onCsItemClick(s){
+  if(!s||!s.id)return;
+  if(csBatchMode.value)toggleCsBatchSel(s.id);
+  else{loadChatSession(s.id);c.sessionMenuId=""}
+}
+function isCsBatchSelected(sid){return !!csBatchSel[sid]}
+function toggleCsBatchSel(sid,ev){
+  if(ev)ev.stopPropagation();
+  if(!sid||!csBatchMode.value)return;
+  if(csBatchSel[sid])delete csBatchSel[sid];
+  else csBatchSel[sid]=true;
+}
+function csBatchSelCount(){return Object.keys(csBatchSel).filter(k=>csBatchSel[k]).length}
+function csBatchSelAllChecked(){
+  const rows=filteredCs.value||[];
+  if(!rows.length)return false;
+  return rows.every(s=>csBatchSel[s.id]);
+}
+function toggleCsBatchSelAll(){
+  const rows=filteredCs.value||[];
+  if(!rows.length)return;
+  const allOn=csBatchSelAllChecked();
+  for(const s of rows){
+    if(allOn)delete csBatchSel[s.id];
+    else csBatchSel[s.id]=true;
+  }
+}
+async function batchDeleteCs(){
+  const ids=Object.keys(csBatchSel).filter(k=>csBatchSel[k]);
+  if(!ids.length){showToastMsg("请先勾选要删除的对话");return}
+  if(c.chatStreaming&&ids.includes(c.sid)){
+    showToastMsg("当前会话正在生成，请先暂停或等待完成后再删除");
+    return;
+  }
+  if(!confirm("确定批量删除 "+ids.length+" 个对话？此操作不可恢复。"))return;
+  let ok=0,fail=0;
+  for(const sid of ids){
+    try{
+      const r=await fetch("/api/chat/sessions/"+encodeURIComponent(sid),{method:"DELETE"});
+      if(r.ok){
+        ok++;
+        if(c.sid===sid)await newChatSess();
+      }else fail++;
+    }catch(_){fail++}
+  }
+  ldCs();
+  exitCsBatchMode();
+  if(fail)showToastMsg("已删除 "+ok+" 个，"+fail+" 个失败");
+  else showToastMsg("已批量删除 "+ok+" 个对话");
 }
 async function renameCs(s){
   const t=prompt("重命名对话",s.title||"新对话");
@@ -6965,7 +7521,7 @@ function pickSlash(it){
   c.inp=lines.join("\n");
   slashOpen.value=false;
 }
-function renderMsg(m){
+function renderMsg(m,msgIndex){
   if(!m||!m.content)return'';
   const raw=answerBodyForMsg(m);
   if(!raw&&!m._answerStreaming)return'';
@@ -6974,27 +7530,32 @@ function renderMsg(m){
     t=t.replace(/\n/g,'<br>');
     return t+'<span class="stream-cursor" aria-hidden="true">▊</span>';
   }
+  const slices=ragCitationSlicesForMsg(m);
+  let html="";
   if(window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.renderRichContentHtml==='function'){
     try{
-      return window.SBA_RICH_CONTENT.renderRichContentHtml(raw);
-    }catch(_){}
+      html=window.SBA_RICH_CONTENT.renderRichContentHtml(raw);
+    }catch(_){html=""}
   }
-  if(typeof marked!=='undefined'){
+  if(!html&&typeof marked!=='undefined'){
     try{
       const src=window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.normalizeMarkdownSource==='function'
         ?window.SBA_RICH_CONTENT.normalizeMarkdownSource(raw):raw;
       if(typeof marked.setOptions==='function')marked.setOptions({breaks:false,gfm:true,headerIds:false,mangle:false});
-      let html=marked.parse(src,{breaks:false,gfm:true});
-      if(typeof DOMPurify!=='undefined')html=DOMPurify.sanitize(html);
-      return html;
-    }catch(_){}
+      html=marked.parse(src,{breaks:false,gfm:true});
+      if(typeof DOMPurify!=='undefined')html=DOMPurify.sanitize(html,{ADD_ATTR:['data-ref']});
+    }catch(_){html=""}
   }
-  let t=raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  t=t.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');
-  t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
-  t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  t=t.replace(/\n/g,'<br>');
-  return t;
+  if(!html){
+    let t=raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    t=t.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');
+    t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
+    t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+    t=t.replace(/\n/g,'<br>');
+    html=t;
+  }
+  if(slices.length)html=injectAnswerCitationSuperscripts(html,slices);
+  return html;
 }
 function renderWebSearchPanel(span){
   const s=span||{};
@@ -7039,7 +7600,9 @@ function bindChatMsgsScrollState(el){
   });
   updateChatScrollState();
 }
-function chatScrollBottom(){
+/** 流式生成时仅当用户仍在底部附近才自动滚底，避免强制拉回「准备中…」占位区 */
+function chatScrollBottom(force){
+  if(!force&&chatScrollAwayFromBottom.value)return;
   nextTick(()=>{
     const el=_chatMsgsEl();
     if(!el)return;
@@ -7047,7 +7610,58 @@ function chatScrollBottom(){
     updateChatScrollState();
   });
 }
-function chatScrollBottomClick(){chatScrollBottom()}
+function chatScrollBottomClick(){chatScrollBottom(true)}
+/** 用户切走会话时，后台流式仍写入 park 槽，避免污染当前可见会话任务态 */
+let _chatStreamPark=null;
+function chatTaskWriteCtx(){
+  if(_chatStreamPark&&c.sid!==_chatStreamPark.sid)return _chatStreamPark;
+  return c;
+}
+function parkChatStreamForLeave(){
+  if(!c.chatStreaming||!c.sid||c.sid==="temp")return;
+  _chatStreamPark={
+    sid:c.sid,
+    msgs:c.msgs,
+    curTask:c.curTask,
+    mainTaskHistory:c.mainTaskHistory,
+  };
+}
+function clearChatStreamPark(){_chatStreamPark=null}
+function chatStreamMsgsForAi(aiMsg){
+  const ctx=chatTaskWriteCtx();
+  const msgs=ctx===c?c.msgs:(ctx.msgs||[]);
+  if(Array.isArray(msgs)&&msgs.includes(aiMsg))return msgs;
+  if(_chatStreamPark&&Array.isArray(_chatStreamPark.msgs)&&_chatStreamPark.msgs.includes(aiMsg))return _chatStreamPark.msgs;
+  return c.msgs;
+}
+async function persistChatSessionSnapshot(sid,msgs,curTask,mainTaskHistory){
+  if(!sid||sid==="temp")return;
+  const payload={
+    messages:msgs||[],
+    cur_task:curTask,
+    main_task_history:filterChatSessionMainHistory(mainTaskHistory||[]),
+    prefs:{model:c.model,agentId:c.agentId,deepThink:c.deepThink,webSearch:c.webSearch,ragPrefetch:c.ragPrefetch,readComments:c.readComments,includeRss:c.includeRss,chatPrefs:c.chatPrefs},
+  };
+  try{
+    await fetch("/api/chat/sessions/"+encodeURIComponent(sid)+"/state",{
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(slimPayloadForServer(payload)),
+    });
+    ldCs();
+  }catch(_){}
+}
+async function flushParkedChatStreamIfAny(aiMsg){
+  const park=_chatStreamPark;
+  if(!park||!park.sid)return;
+  if(aiMsg)syncMainTaskResultIndex(aiMsg);
+  await persistChatSessionSnapshot(park.sid,park.msgs,park.curTask,park.mainTaskHistory);
+  if(c.sid===park.sid){
+    c.curTask=park.curTask;
+    c.mainTaskHistory=park.mainTaskHistory;
+  }
+  clearChatStreamPark();
+}
 watch(()=>c.msgs.length,()=>nextTick(updateChatScrollState));
 watch(()=>c.th,()=>nextTick(updateChatScrollState));
 watch(()=>c.msgs.map(m=>String(m.content||"")+(m._answerStreaming?"s":"")).join("|"),()=>scheduleChatRichHydrate(),{flush:"post"});
@@ -7072,15 +7686,58 @@ function _clearAnswerPlaceholder(aiMsg){
   if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
     aiMsg.content='';
 }
+/** 将 SSE 阶段/技术文案转为用户可读的进度提示（禁止「编排引擎」等内部术语） */
+function formatUserChatProgressText(raw){
+  let s=String(raw||'').trim();
+  if(!s)return'';
+  if(/编排引擎|LangGraph|编排启动|运行时|MCP 已在|checkpoint|handoff|graph/i.test(s))
+    return'正在处理您的请求';
+  const exact={
+    '意图识别':'正在识别意图',
+    '改写':'正在理解您的问题',
+    '改写确认':'正在确认问题表述',
+    '槽位确认':'正在确认任务信息',
+    '槽位填充':'正在确认任务信息',
+    '任务拆解':'正在规划执行步骤',
+    '上下文增强':'正在补充上下文',
+    'RAG决策':'正在判断是否需要检索',
+    '知识库检索':'正在检索知识库',
+    '知识库预检索中…':'正在检索知识库',
+    '绑定执行工具':'正在准备工具能力',
+    '简单任务直答':'正在生成最终回答',
+    '正在处理您的请求':'正在处理您的请求',
+    '正在处理…':'正在处理您的请求',
+    '正在准备…':'正在处理您的请求',
+  };
+  if(exact[s])return exact[s];
+  for(const[k,v] of Object.entries(exact)){
+    if(s.includes(k))return v;
+  }
+  const execM=s.match(/^正在执行[:：]\s*(.+)$/);
+  if(execM){
+    const step=String(execM[1]||'').trim();
+    return step?`正在执行下一步：${step}`:'正在执行下一步';
+  }
+  if(/^正在编排[:：]/.test(s)){
+    const step=s.replace(/^正在编排[:：]\s*/,'').trim();
+    return step?`正在执行下一步：${step}`:'正在执行下一步';
+  }
+  if(/^正在生成/.test(s))return s.replace(/…+$/,'')+'…';
+  if(/^正在/.test(s)&&!/…$/.test(s))return s.slice(0,48)+'…';
+  return s.endsWith('…')?s:s.slice(0,48)+'…';
+}
 /** 流式占位文案：可被 pipeline_progress / orchestration_node_start 等真实 SSE 覆盖 */
 function isChatLoadingPlaceholder(text){
-  return /^(正在处理|正在准备|正在分析任务|正在生成回答|正在识别意图|正在延续|正在检索|正在编排)/.test(String(text||''));
+  const t=String(text||'').trim();
+  if(!t)return false;
+  if(/…$/.test(t)&&/^正在/.test(t))return true;
+  return /^(正在处理|正在准备|正在分析|正在生成|正在识别|正在延续|正在检索|正在执行|正在理解|正在确认|正在规划|正在补充|正在判断|正在绑定)/.test(t);
 }
 function setChatProgressText(aiMsg,stage,fallback){
-  const st=String(stage||fallback||'').trim();
+  const st=formatUserChatProgressText(stage||fallback);
   if(!st)return;
   if(isChatLoadingPlaceholder(aiMsg.content)||!aiMsg.content)
-    aiMsg.content=st.slice(0,48)+'…';
+    aiMsg.content=st.endsWith('…')?st:st+'…';
 }
 function hasActiveMainTaskInHistory(){
   const hist=Array.isArray(c.mainTaskHistory)?c.mainTaskHistory:[];
@@ -7091,12 +7748,7 @@ function hasActiveMainTaskInHistory(){
   });
 }
 function shouldKeepCurTaskOnSimpleIntent(){
-  if(c.curTask&&String(c.curTask.task_id||'').trim()){
-    const st=String(c.curTask.status||'').toLowerCase();
-    if(!['closed','resolved'].includes(st))return true;
-  }
-  if((c.mainTaskHistory||[]).some(t=>t&&String(t.task_id||'').startsWith('task_')&&String(t.task_kind||'main')!=='simple'))
-    return true;
+  if(isActiveCurTask(c.curTask))return true;
   return hasActiveMainTaskInHistory();
 }
 function _splitGraphemes(text){
@@ -7128,7 +7780,7 @@ function _takeOneGrapheme(pending){
 }
 function _ensureAnswerStreamState(aiMsg){
   if(!_answerStreamState.has(aiMsg)){
-    _answerStreamState.set(aiMsg,{pending:'',mode:'token',pumpTimer:0});
+    _answerStreamState.set(aiMsg,{pending:'',mode:'token',pumpTimer:0,flushRequested:false,onDrainDone:null});
   }
   return _answerStreamState.get(aiMsg);
 }
@@ -7138,10 +7790,26 @@ function resetAnswerStream(aiMsg){
   _answerStreamState.delete(aiMsg);
   if(aiMsg){aiMsg._answerStreamBuf='';aiMsg._answerStreamMode='token'}
 }
+function _finalizeAnswerStream(aiMsg){
+  const st=_answerStreamState.get(aiMsg);
+  const done=st&&st.onDrainDone;
+  if(st&&st.pumpTimer){clearTimeout(st.pumpTimer);st.pumpTimer=0}
+  _answerStreamState.delete(aiMsg);
+  if(aiMsg){
+    aiMsg._answerStreamBuf='';
+    aiMsg._answerStreaming=false;
+    hydrateMsgCitations(aiMsg);
+  }
+  chatScrollBottom();
+  if(typeof done==='function')done();
+}
 function _pumpAnswerStreamTick(aiMsg){
   const st=_ensureAnswerStreamState(aiMsg);
   st.pumpTimer=0;
-  if(!st.pending)return;
+  if(!st.pending){
+    if(st.flushRequested)_finalizeAnswerStream(aiMsg);
+    return;
+  }
   const {piece,rest}=_takeOneGrapheme(st.pending);
   st.pending=rest;
   if(piece){
@@ -7152,6 +7820,8 @@ function _pumpAnswerStreamTick(aiMsg){
   }
   if(st.pending){
     st.pumpTimer=setTimeout(()=>_pumpAnswerStreamTick(aiMsg),_streamIntervalMs(st.pending.length));
+  }else if(st.flushRequested){
+    _finalizeAnswerStream(aiMsg);
   }
 }
 function _scheduleAnswerPump(aiMsg){
@@ -7170,17 +7840,31 @@ function enqueueAnswerStream(aiMsg,chunk,opts){
   aiMsg._answerStreaming=true;
   _scheduleAnswerPump(aiMsg);
 }
-function flushAnswerStream(aiMsg){
+/** 正常结束：按打字机速率排空 pending，禁止 answer_end 一次性贴全文 */
+function flushAnswerStream(aiMsg,opts){
+  const force=!!(opts&&opts.force);
   const st=_answerStreamState.get(aiMsg);
-  if(st&&st.pumpTimer){clearTimeout(st.pumpTimer);st.pumpTimer=0}
-  if(st&&st.pending){
-    _clearAnswerPlaceholder(aiMsg);
-    aiMsg.content=(aiMsg.content||'')+st.pending;
-    st.pending='';
-    chatScrollBottom();
+  if(!st){
+    if(aiMsg)aiMsg._answerStreaming=false;
+    return Promise.resolve();
   }
-  resetAnswerStream(aiMsg);
-  if(aiMsg)aiMsg._answerStreaming=false;
+  if(force){
+    if(st.pumpTimer){clearTimeout(st.pumpTimer);st.pumpTimer=0}
+    if(st.pending){
+      _clearAnswerPlaceholder(aiMsg);
+      aiMsg.content=(aiMsg.content||'')+st.pending;
+      st.pending='';
+    }
+    _finalizeAnswerStream(aiMsg);
+    return Promise.resolve();
+  }
+  st.flushRequested=true;
+  if(!st.pending&&!st.pumpTimer){
+    _finalizeAnswerStream(aiMsg);
+    return Promise.resolve();
+  }
+  if(!st.pumpTimer)_pumpAnswerStreamTick(aiMsg);
+  return new Promise(resolve=>{st.onDrainDone=resolve});
 }
 function mergeThinkingStep(arr,d){
   if(!Array.isArray(arr))return;
@@ -7205,16 +7889,60 @@ function mergeThinkingStep(arr,d){
     Object.assign(arr[i],st);
     if(keepIo&&arr[i]._ui)arr[i]._ui.io_expanded=keepIo;
   }else arr.push(st);
-  if(c.curTask&&Array.isArray(c.curTask.steps)){
-    const ti=c.curTask.steps.findIndex(x=>x&&x.step_id===d.step_id);
+  const tw=chatTaskWriteCtx();
+  if(tw.curTask&&Array.isArray(tw.curTask.steps)){
+    const ti=tw.curTask.steps.findIndex(x=>x&&x.step_id===d.step_id);
     const ct=slimThinkingStepForStorage(st)||{...st};
     ct._ui=st._ui;
     if(ti>=0){
-      Object.assign(c.curTask.steps[ti],ct);
-    }else c.curTask.steps.push(ct);
+      Object.assign(tw.curTask.steps[ti],ct);
+    }else tw.curTask.steps.push(ct);
   }
 }
 let _thinkDeltaRaf=0;
+const _thinkStreamState=new WeakMap();
+function _ensureThinkStreamState(step){
+  if(!_thinkStreamState.has(step)){
+    _thinkStreamState.set(step,{pending:'',pumpTimer:0});
+  }
+  return _thinkStreamState.get(step);
+}
+function enqueueThinkStream(step,chunk,stepId){
+  if(!step||!chunk)return;
+  const st=_ensureThinkStreamState(step);
+  st.pending+=String(chunk);
+  appendStepThinkDeltaToCache(stepId,chunk);
+  _scheduleThinkStreamPump(step);
+}
+function _scheduleThinkStreamPump(step){
+  const st=_ensureThinkStreamState(step);
+  if(st.pumpTimer)return;
+  _pumpThinkStreamTick(step);
+}
+function _pumpThinkStreamTick(step){
+  const st=_ensureThinkStreamState(step);
+  st.pumpTimer=0;
+  if(!st.pending){
+    step._thinkStreaming=false;
+    return;
+  }
+  const {piece,rest}=_takeOneGrapheme(st.pending);
+  st.pending=rest;
+  if(piece){
+    step._thinkStreaming=true;
+    step.think_text=stripReactDisplayMarkers((step.think_text||'')+piece);
+    if(tw.curTask&&Array.isArray(tw.curTask.steps)){
+      const ts=tw.curTask.steps.find(x=>x&&x.step_id===step.step_id);
+      if(ts)ts.think_text=step.think_text;
+    }
+    chatScrollBottom();
+  }
+  if(st.pending){
+    st.pumpTimer=setTimeout(()=>_pumpThinkStreamTick(step),_streamIntervalMs(st.pending.length));
+  }else{
+    step._thinkStreaming=false;
+  }
+}
 function scheduleThinkDeltaFlush(){
   if(_thinkDeltaRaf)return;
   _thinkDeltaRaf=requestAnimationFrame(()=>{_thinkDeltaRaf=0;chatScrollBottom()});
@@ -7307,7 +8035,7 @@ function applyChatHitlFromSse(d,aiMsg){
       ?aiMsg.content
       :("⏸ "+h.title+"："+h.message);
     aiMsg._answerStreaming=false;
-    flushAnswerStream(aiMsg);
+    flushAnswerStream(aiMsg,{force:true});
   }
   if(c.curTask)c.curTask.status="paused";
   if(kind==="rewrite_confirm"&&c.chatHitl.editText){
@@ -7376,15 +8104,22 @@ function buildHitlResumeBody(action,extra){
 function chatPauseStreaming(){
   if(c.chatAbort){try{c.chatAbort.abort()}catch(_){}}
   c.chatStreaming=false;
-  const m=c.chatHitlResumeMsg||c.msgs[c.msgs.length-1];
+  const parkAi=_chatStreamPark&&Array.isArray(_chatStreamPark.msgs)
+    ? _chatStreamPark.msgs.slice().reverse().find(x=>x&&x.role==="assistant")
+    : null;
+  const m=parkAi||c.chatHitlResumeMsg||c.msgs[c.msgs.length-1];
   if(m&&m.role==="assistant"){
     m._answerStreaming=false;
-    flushAnswerStream(m);
+    flushAnswerStream(m,{force:true});
     if(!m.content||isChatLoadingPlaceholder(m.content))
       m.content="[已暂停] 流式输出已中断，可调整输入后重新发送";
   }
-  if(c.curTask)c.curTask.status="paused";
-  scheduleChatPersist();
+  const tw=chatTaskWriteCtx();
+  if(tw.curTask)tw.curTask.status="paused";
+  if(_chatStreamPark){
+    persistChatSessionSnapshot(_chatStreamPark.sid,_chatStreamPark.msgs,_chatStreamPark.curTask,_chatStreamPark.mainTaskHistory);
+    clearChatStreamPark();
+  }else scheduleChatPersist();
   showToastMsg("已暂停当前流式请求");
 }
 function _snapshotChatHitl(){
@@ -7431,15 +8166,48 @@ async function chatResumeHitl(action,extra){
       showToastMsg(String(e.message||e));
     }
   }finally{
+    await flushAnswerStream(aiMsg);
     c.chatStreaming=false;
     c.chatAbort=null;
-    syncMainTaskResultIndex(aiMsg);
-    scheduleChatPersist();
+    c.th='';
+    if(_chatStreamPark){
+      await flushParkedChatStreamIfAny(aiMsg);
+    }else{
+      syncMainTaskResultIndex(aiMsg);
+      scheduleChatPersist();
+    }
   }
 }
 function chatHitlConfirm(){
   const kind=c.chatHitl.kind||"";
-  if(kind==="task_switch_confirm"){chatResumeHitl("switch_new",{});return}
+  if(kind==="task_switch_confirm"){
+    const p=(c.chatHitl.payload&&typeof c.chatHitl.payload==="object")?c.chatHitl.payload:{};
+    const pending=String(p.pending_query||c.chatHitl.message||"").trim();
+    const qs=pending.slice(0,80);
+    if(pending){
+      c.curTask=normalizeCurTask({
+        task_id:"pending_new",
+        user_query:pending,
+        query_summary:qs,
+        status:"planning",
+        task_kind:"main",
+        sub_plan_id:"",
+        steps:[],
+        result_msg_index:null,
+        result_status:"pending",
+      });
+      const aiMsg=c.chatHitlResumeMsg;
+      if(aiMsg&&aiMsg.role==="assistant"){
+        aiMsg.task_id="pending_new";
+        aiMsg.execTaskKind="main";
+        aiMsg.thinkingExpanded=true;
+        if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
+          setChatProgressText(aiMsg,"分析任务中","正在创建新主任务…");
+      }
+    }
+    chatResumeHitl("switch_new",{});
+    return;
+  }
   chatResumeHitl("confirm",{});
 }
 function chatHitlContinueCurrentTask(){
@@ -7469,13 +8237,14 @@ function chatPrimaryActionDisabled(){
 }
 
 function ingestChatSseEvent(curEvent,d,aiMsg){
+  const tw=chatTaskWriteCtx();
   if(curEvent==='stream_error'){
     // 禁止直出原始报错；后端应已改走 answer 事件，此处仅兜底等待分析结果
     aiMsg._errorAnalyzing=true;
-    if(!aiMsg.content||/^(正在处理|正在准备)/.test(String(aiMsg.content||'')))
+    if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
       aiMsg.content='正在分析错误原因，请稍候…';
     aiMsg._answerStreaming=false;
-    flushAnswerStream(aiMsg);
+    flushAnswerStream(aiMsg,{force:true});
     clearChatHitl();
     return;
   }
@@ -7487,11 +8256,11 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     const stage=String(d.stage||'').trim();
     if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content)){
       if(d.orchestration_engine==='langgraph')
-        setChatProgressText(aiMsg,stage?'正在编排：'+stage:'','正在编排：启动');
+        setChatProgressText(aiMsg,stage||'意图识别','正在处理您的请求');
       else if(d.orchestration_engine==='pending'||stage.indexOf('会话')>=0)
         aiMsg.content='正在准备会话上下文…';
-      else if(stage)setChatProgressText(aiMsg,stage,'正在准备');
-      else aiMsg.content='正在准备…';
+      else if(stage)setChatProgressText(aiMsg,stage,'正在处理您的请求');
+      else aiMsg.content='正在处理您的请求…';
     }
     aiMsg.orchestrationEngine=d.orchestration_engine||'';
     if(d.orchestration_engine==='langgraph'&&Array.isArray(d.expected_orchestration_phases))
@@ -7501,9 +8270,9 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     setChatProgressText(aiMsg,d.stage||d.detail,'');
     const tidPg=String(d.task_id||aiMsg.task_id||'').trim();
     if(tidPg){
-      if(!c.curTask||String(c.curTask.task_id||'')!==tidPg){
-        const histRow=(c.mainTaskHistory||[]).find(t=>t.task_id===tidPg);
-        c.curTask={
+      if(!tw.curTask||String(tw.curTask.task_id||'')!==tidPg){
+        const histRow=(tw.mainTaskHistory||[]).find(t=>t.task_id===tidPg);
+        tw.curTask={
           task_id:tidPg,
           user_query:String(histRow&&histRow.user_query||'').trim(),
           query_summary:String(histRow&&histRow.query_summary||'').slice(0,80),
@@ -7512,51 +8281,54 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
         };
       }
       aiMsg.task_id=tidPg;
-      c.taskExpanded=true;
       aiMsg.thinkingExpanded=true;
     }
   }else if(curEvent==='orchestration_node_start'){
     aiMsg.pipelineStage=d.progress_hint||d.step_name||'';
     if(!Array.isArray(aiMsg.thinking))aiMsg.thinking=[];
+    const ph0=String(d.phase||'orchestration').toLowerCase();
+    const nm0=String(d.step_name||d.stage||'编排节点').trim();
+    const arr=aiMsg.thinking;
+    const dupOrch=arr.find(x=>x&&String(x.step_name||'').trim()===nm0&&String(x.phase||stepUi(x).phase||'').toLowerCase()===ph0&&(x.status==='running'||!String(x.result||getStepIoFields(x).think_text||'').trim()));
     const orchStub={
-      step_id:d.step_id||('orch_'+Date.now()),
+      step_id:dupOrch&&dupOrch.step_id||(d.step_id||('orch_'+Date.now())),
       step_name:d.step_name||d.stage||'编排节点',
       status:'running',phase:d.phase||'orchestration',step_lane:'orchestration',
       node_kind:'orchestration',sub_plan_id:d.sub_plan_id||'',sub_index:d.sub_index||0,
-      think_text:'',description:d.progress_hint||'',duration_ms:0,io_expanded:false,expanded:false,
+      think_text:'',description:d.progress_hint||'',      duration_ms:0,io_expanded:false,expanded:false,
     };
-    aiMsg.thinking.push(orchStub);
+    if(dupOrch)Object.assign(dupOrch,orchStub);else arr.push(orchStub);
+    aiMsg.thinking=arr;
     const tid=String(d.task_id||aiMsg.task_id||'').trim();
     if(tid){
-      if(!c.curTask||String(c.curTask.task_id||'')!==tid){
-        c.curTask={
+      if(!tw.curTask||String(tw.curTask.task_id||'')!==tid){
+        tw.curTask={
           task_id:tid,user_query:'',query_summary:'',status:'executing',task_kind:'main',
           sub_plan_id:d.sub_plan_id||'',steps:[],result_msg_index:null,result_status:'pending',
         };
       }
-      c.curTask.steps=c.curTask.steps||[];
-      const dup=c.curTask.steps.find(x=>x.step_id===orchStub.step_id);
-      if(!dup)c.curTask.steps.push({...orchStub});
+      tw.curTask.steps=tw.curTask.steps||[];
+      const dup=tw.curTask.steps.find(x=>x.step_id===orchStub.step_id);
+      if(!dup)tw.curTask.steps.push({...orchStub});
       aiMsg.task_id=tid;
-      c.taskExpanded=true;
       aiMsg.thinkingExpanded=true;
     }
-    setChatProgressText(aiMsg,'正在编排：'+(d.step_name||d.stage||'节点'),'');
+    setChatProgressText(aiMsg,d.progress_hint||d.step_name||d.stage,'正在执行下一步');
   }else if(curEvent==='thinking_start'){
     if(d.ephemeral){
-      if(!aiMsg.content||aiMsg.content==='正在处理…')aiMsg.content='正在识别意图…';
-    }else if(c.curTask&&(!d.task_id||c.curTask.task_id===d.task_id)){
-      c.curTask.status='executing';
-      upsertMainTaskHistory({task_id:c.curTask.task_id,status:'executing'});
+      if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))aiMsg.content='正在识别意图…';
+    }else if(tw.curTask&&(!d.task_id||tw.curTask.task_id===d.task_id)){
+      tw.curTask.status='executing';
+      upsertMainTaskHistory({task_id:tw.curTask.task_id,status:'executing'});
     }
   }else if(curEvent==='task_created'){
     const uq=String(d.user_query||'').trim();
     const qs=String(d.query_summary||uq||'').slice(0,80);
     const tid=String(d.task_id||'').trim();
-    const keepSteps=(c.curTask&&c.curTask.task_id===tid&&Array.isArray(c.curTask.steps))?c.curTask.steps.slice():[];
+    const keepSteps=(tw.curTask&&tw.curTask.task_id===tid&&Array.isArray(tw.curTask.steps))?tw.curTask.steps.slice():[];
     const keepFromMsg=Array.isArray(aiMsg.thinking)?aiMsg.thinking.filter(Boolean).slice():[];
     const mergedSteps=keepSteps.length?keepSteps:keepFromMsg;
-    c.curTask={
+    tw.curTask={
       task_id:d.task_id,user_query:uq,query_summary:qs,
       status:normalizeParentTaskStatus(d.status||'planning','planning'),
       task_kind:d.task_kind||'main',sub_plan_id:'',steps:mergedSteps,
@@ -7567,19 +8339,18 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     aiMsg.result_status='pending';
     aiMsg.execTaskKind=d.task_kind||'main';
     if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
-      aiMsg.content='正在分析任务…';
+      aiMsg.content='正在规划任务…';
     upsertMainTaskHistory({
       task_id:d.task_id,
       user_query:uq,
       query_summary:qs,
-      status:c.curTask.status,
-      task_kind:c.curTask.task_kind,
+      status:tw.curTask.status,
+      task_kind:tw.curTask.task_kind,
       result_msg_index:null,
       result_status:'pending',
     });
-    if(d.rewrite_snapshot&&c.curTask)c.curTask.rewrite_snapshot=d.rewrite_snapshot;
+    if(d.rewrite_snapshot&&tw.curTask)tw.curTask.rewrite_snapshot=d.rewrite_snapshot;
     if((d.task_kind||'main')!=='simple'&&d.persist_main_task!==false){
-      c.taskExpanded=true;
       aiMsg.thinkingExpanded=true;
       if(tid&&(!aiMsg.thinking||!aiMsg.thinking.length)){
         aiMsg.thinking=[{
@@ -7597,9 +8368,9 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
           io_expanded:true,
           expanded:true,
         }];
-        if(c.curTask){
-          c.curTask.steps=Array.isArray(c.curTask.steps)?c.curTask.steps.slice():[];
-          if(!c.curTask.steps.length)c.curTask.steps=aiMsg.thinking.slice();
+        if(tw.curTask){
+          tw.curTask.steps=Array.isArray(tw.curTask.steps)?tw.curTask.steps.slice():[];
+          if(!tw.curTask.steps.length)tw.curTask.steps=aiMsg.thinking.slice();
         }
       }
     }
@@ -7617,13 +8388,15 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     if(d.rewrite_snapshot)aiMsg._rewriteSnapshot=d.rewrite_snapshot;
     const kind=d.task_kind||'main';
     const isContinue=!!d.continue_main_task||d.task_action==='continue_main';
-    aiMsg.execTaskKind=kind;
+    aiMsg.execContinueMain=!!isContinue;
+    aiMsg.execTaskKind=isContinue?'continue_main':kind;
     aiMsg.execSubPlanId=d.sub_plan_id||'';
     if(d.is_simple||kind==='simple'||d.persist_main_task===false){
-      if(!shouldKeepCurTaskOnSimpleIntent())c.curTask=null;
-      if(!d.task_id&&!shouldKeepCurTaskOnSimpleIntent())aiMsg.task_id='';
+      aiMsg.execTaskKind='simple';
+      if(!shouldKeepCurTaskOnSimpleIntent())tw.curTask=null;
+      aiMsg.task_id='';
       if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
-        aiMsg.content='正在生成回答…';
+        aiMsg.content='正在生成最终回答…';
     }else{
       const tid=String(d.task_id||'').trim();
       if(tid){
@@ -7634,8 +8407,8 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
         let userQ=uq||(lastUser&&lastUser.content)||'';
         let qs=String(d.query_summary||userQ||'').slice(0,80);
         if(preserve){
-          const prev=c.curTask&&c.curTask.task_id===tid?c.curTask:null;
-          const histRow=(c.mainTaskHistory||[]).find(t=>t.task_id===tid);
+          const prev=tw.curTask&&tw.curTask.task_id===tid?tw.curTask:null;
+          const histRow=(tw.mainTaskHistory||[]).find(t=>t.task_id===tid);
           if(prev&&prev.user_query&&!isMainTaskFollowUpQuery(prev.user_query)){
             userQ=String(prev.user_query).trim();
             qs=String(prev.query_summary||userQ).slice(0,80);
@@ -7649,44 +8422,44 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
             qs=String(histRow&&histRow.query_summary||prev&&prev.query_summary||userQ).slice(0,80);
           }
         }
-        const prevSteps=(c.curTask&&c.curTask.task_id===tid&&Array.isArray(c.curTask.steps))?c.curTask.steps.slice():[];
+        const prevSteps=(tw.curTask&&tw.curTask.task_id===tid&&Array.isArray(tw.curTask.steps))?tw.curTask.steps.slice():[];
         const msgSteps=Array.isArray(aiMsg.thinking)?aiMsg.thinking.filter(Boolean).slice():[];
         const mergedSteps=prevSteps.length?prevSteps:msgSteps;
-        if(!c.curTask||c.curTask.task_id!==tid){
-          c.curTask={
+        if(!tw.curTask||tw.curTask.task_id!==tid){
+          tw.curTask={
             task_id:tid,user_query:userQ,query_summary:qs,
             status:isContinue?'executing':'planning',task_kind:kind,sub_plan_id:d.sub_plan_id||'',steps:mergedSteps,
             result_msg_index:null,result_status:'pending',
             rewrite_snapshot:d.rewrite_snapshot||null,
           };
         }else{
-          if(!c.curTask.steps||!c.curTask.steps.length)c.curTask.steps=mergedSteps;
-          c.curTask.task_kind=kind;
-          c.curTask.sub_plan_id=d.sub_plan_id||c.curTask.sub_plan_id||'';
-          if(isContinue)c.curTask.status='executing';
+          if(!tw.curTask.steps||!tw.curTask.steps.length)tw.curTask.steps=mergedSteps;
+          tw.curTask.task_kind=kind;
+          tw.curTask.sub_plan_id=d.sub_plan_id||tw.curTask.sub_plan_id||'';
+          if(isContinue)tw.curTask.status='executing';
           if(!preserve){
-            if(userQ&&!c.curTask.user_query)c.curTask.user_query=userQ;
-            if(qs)c.curTask.query_summary=qs;
+            if(userQ&&!tw.curTask.user_query)tw.curTask.user_query=userQ;
+            if(qs)tw.curTask.query_summary=qs;
           }else{
             if(userQ&&!isMainTaskFollowUpQuery(userQ)){
-              if(!c.curTask.user_query||isMainTaskFollowUpQuery(c.curTask.user_query))c.curTask.user_query=userQ;
-              if(!c.curTask.query_summary||isMainTaskFollowUpQuery(c.curTask.query_summary))c.curTask.query_summary=qs;
+              if(!tw.curTask.user_query||isMainTaskFollowUpQuery(tw.curTask.user_query))tw.curTask.user_query=userQ;
+              if(!tw.curTask.query_summary||isMainTaskFollowUpQuery(tw.curTask.query_summary))tw.curTask.query_summary=qs;
             }
           }
-          if(d.rewrite_snapshot)c.curTask.rewrite_snapshot=d.rewrite_snapshot;
+          if(d.rewrite_snapshot)tw.curTask.rewrite_snapshot=d.rewrite_snapshot;
         }
         upsertMainTaskHistory({
           task_id:tid,
-          user_query:c.curTask.user_query,
-          query_summary:c.curTask.query_summary,
-          status:c.curTask.status,
+          user_query:tw.curTask.user_query,
+          query_summary:tw.curTask.query_summary,
+          status:tw.curTask.status,
           task_kind:kind,
         });
       }
-      if(d.rewrite_snapshot&&c.curTask)c.curTask.rewrite_snapshot=d.rewrite_snapshot;
+      if(d.rewrite_snapshot&&tw.curTask)tw.curTask.rewrite_snapshot=d.rewrite_snapshot;
       if(isContinue)setChatProgressText(aiMsg,(d.needs_rag||c.ragPrefetch)?'正在检索知识库':'正在延续主任务','');
       if(kind==='main'&&!d.is_simple){
-        c.taskExpanded=true;
+        maybeExpandTaskChain(true);
         aiMsg.thinkingExpanded=true;
       }
     }
@@ -7703,18 +8476,34 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     const ex=arr.find(x=>x.step_id===d.step_id);
     if(ex)Object.assign(ex,stub);else arr.push(stub);
     aiMsg.thinking=arr;
-    if(c.curTask){
-      c.curTask.steps=c.curTask.steps||[];
-      const ex2=c.curTask.steps.find(x=>x.step_id===d.step_id);
-      if(ex2)Object.assign(ex2,stub);else c.curTask.steps.push({...stub});
+    if(tw.curTask){
+      tw.curTask.steps=tw.curTask.steps||[];
+      const ex2=tw.curTask.steps.find(x=>x.step_id===d.step_id);
+      if(ex2)Object.assign(ex2,stub);else tw.curTask.steps.push({...stub});
     }
   }else if(curEvent==='step_think_delta'){
     if(!Array.isArray(aiMsg.thinking))return;
     const st=aiMsg.thinking.find(x=>x.step_id===d.step_id);
     if(st){
-      st.think_text=stripReactDisplayMarkers((st.think_text||'')+(d.content||''));
       st.llm_powered=!!(st.llm_powered||d.llm_powered);
       if(d.think_kind)st.think_kind=d.think_kind;
+      enqueueThinkStream(st,d.content||'',d.step_id);
+      scheduleThinkDeltaFlush();
+    }
+  }else if(curEvent==='step_output_delta'){
+    if(!Array.isArray(aiMsg.thinking))return;
+    const st=aiMsg.thinking.find(x=>x.step_id===d.step_id);
+    if(st){
+      st.output_text=(st.output_text||'')+(d.content||'');
+      const cache=ensureStepIoCache();
+      const id=String(d.step_id);
+      const prev=cache[id]||{input_text:'',output_text:'',think_text:''};
+      prev.output_text=(prev.output_text||'')+(d.content||'');
+      cache[id]=prev;
+      if(tw.curTask&&Array.isArray(tw.curTask.steps)){
+        const ts=tw.curTask.steps.find(x=>x&&x.step_id===d.step_id);
+        if(ts)ts.output_text=st.output_text;
+      }
       scheduleThinkDeltaFlush();
     }
   }else if(curEvent==='thought_step_start'){
@@ -7735,12 +8524,12 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     const ex=arr.find(x=>x.step_id===d.step_id);
     if(ex)Object.assign(ex,stub);else arr.push(stub);
     aiMsg.thinking=arr;
-    const tid=String(d.task_id||aiMsg.task_id||(c.curTask&&c.curTask.task_id)||'').trim();
-    if(tid){
+    const tid=String(d.task_id||aiMsg.task_id||'').trim();
+    if(tid&&shouldAttachStepToCurTask(tid,aiMsg)){
       aiMsg.task_id=tid;
-      if(!c.curTask||String(c.curTask.task_id||'')!==tid){
-        const histRow=(c.mainTaskHistory||[]).find(t=>t.task_id===tid);
-        c.curTask={
+      if(!tw.curTask||String(tw.curTask.task_id||'')!==tid){
+        const histRow=(tw.mainTaskHistory||[]).find(t=>t.task_id===tid);
+        tw.curTask={
           task_id:tid,
           user_query:String(histRow&&histRow.user_query||'').trim(),
           query_summary:String(histRow&&histRow.query_summary||'').slice(0,80),
@@ -7748,24 +8537,34 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
           result_msg_index:null,result_status:'pending',
         };
       }
-      c.curTask.steps=c.curTask.steps||[];
-      const ex2=c.curTask.steps.find(x=>x.step_id===stub.step_id);
-      if(ex2)Object.assign(ex2,stub);else c.curTask.steps.push({...stub});
-      c.taskExpanded=true;
+      tw.curTask.steps=tw.curTask.steps||[];
+      const ex2=tw.curTask.steps.find(x=>x.step_id===stub.step_id);
+      if(ex2)Object.assign(ex2,stub);else tw.curTask.steps.push({...stub});
+      maybeExpandTaskChain(true);
       aiMsg.thinkingExpanded=true;
     }
   }else if(curEvent==='thought_step_end'){
     if(!Array.isArray(aiMsg.thinking))aiMsg.thinking=[];
     mergeThinkingStep(aiMsg.thinking,d);
-    if(c.curTask){
-      c.curTask.steps=Array.isArray(c.curTask.steps)?c.curTask.steps:[];
-      mergeThinkingStep(c.curTask.steps,d);
+    if(tw.curTask){
+      tw.curTask.steps=Array.isArray(tw.curTask.steps)?tw.curTask.steps:[];
+      mergeThinkingStep(tw.curTask.steps,d);
     }
     if(d.phase==='intent'||(d.step_name||'').includes('意图')){
       const j=parseStepJson(d.output_text);
-      const kind=(j&&j.task_kind)||(j&&j.is_simple?'simple':'main');
-      aiMsg.execTaskKind=kind;
-      if(c.curTask){c.curTask.task_kind=kind;if(d.sub_plan_id)c.curTask.sub_plan_id=d.sub_plan_id}
+      const isCont=!!(j&&(j.continue_main_task||['continue_main','continue'].includes(String(j.task_action||j.mode||''))));
+      aiMsg.execContinueMain=!!isCont;
+      if(isCont){
+        aiMsg.execTaskKind='continue_main';
+      }else{
+        const kind=(j&&j.task_kind)||(j&&j.is_simple?'simple':'main');
+        aiMsg.execTaskKind=kind;
+        if(kind==='simple'){
+          if(!shouldKeepCurTaskOnSimpleIntent())tw.curTask=null;
+          aiMsg.task_id='';
+        }
+      }
+      if(tw.curTask&&aiMsg.execTaskKind!=='simple'){tw.curTask.task_kind=aiMsg.execTaskKind;if(d.sub_plan_id)tw.curTask.sub_plan_id=d.sub_plan_id}
       const snap={
         query:String(d.input_text||''),
         rewritten_query:(j&&j.rewritten_query)||String(d.input_text||''),
@@ -7775,26 +8574,26 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
         rewrite_state:(j&&j.rewrite_state)||'rewrite_confirm',
         confidence:(j&&j.confidence)||0,
       };
-      if(c.curTask)c.curTask.rewrite_snapshot=snap;
+      if(tw.curTask)tw.curTask.rewrite_snapshot=snap;
       aiMsg.rewriteSnapshot=snap;
     }
   }else if(curEvent==='thinking_delta'){
     c.th=(c.th||'')+(d.content||'');
   }else if(curEvent==='thinking_end'){
     c.th='';
-    if(c.curTask)c.curTask.bundle=d.bundle;
+    if(tw.curTask)tw.curTask.bundle=d.bundle;
   }else if(curEvent==='answer_preface'){
     if(d.content){
-      if(!aiMsg.content||/^(正在处理|正在准备|正在分析任务)/.test(String(aiMsg.content||'')))aiMsg.content='';
+      if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))aiMsg.content='';
       aiMsg.content=String(d.content||'');
       chatScrollBottom();
     }
-    if(c.curTask)c.curTask.status='executing';
+    if(tw.curTask)tw.curTask.status='executing';
   }else if(curEvent==='rag_prefetch_slices'){
     const slices=Array.isArray(d.slices)?d.slices:[];
     if(slices.length){
       aiMsg.ragPrefetchSlices=slices;
-      if(c.curTask)c.curTask.rag_prefetch_slices=slices;
+      if(tw.curTask)tw.curTask.rag_prefetch_slices=slices;
       const arr=Array.isArray(aiMsg.thinking)?aiMsg.thinking:[];
       const hit=arr.find(x=>x&&String(x.phase||"").toLowerCase()==="rag_decision");
       if(hit){
@@ -7811,33 +8610,34 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     }
   }else if(curEvent==='prefetch_segment_start'){
     aiMsg.prefetchSegmentLabel=d.label||'检索预取';
-    if(c.curTask)c.curTask.status='executing';
+    if(tw.curTask)tw.curTask.status='executing';
   }else if(curEvent==='execution_segment_start'){
     aiMsg.executionSegmentLabel=d.label||'ReAct 执行';
-    if(c.curTask)c.curTask.status='executing';
+    if(tw.curTask)tw.curTask.status='executing';
   }else if(curEvent==='pipeline_wait_start'){
     aiMsg.pipelineWaitLabel=d.label||'等待后台流水线';
     aiMsg.pipelineWaitIds=Array.isArray(d.pipeline_task_ids)?d.pipeline_task_ids:[];
-    if(c.curTask){
-      c.curTask.status='executing';
-      c.curTask.pipeline_wait=true;
+    if(tw.curTask){
+      tw.curTask.status='executing';
+      tw.curTask.pipeline_wait=true;
     }
   }else if(curEvent==='pipeline_wait_progress'){
     const st=d.statuses||{};
     const parts=Object.keys(st).map(k=>k+':'+st[k]);
     aiMsg.pipelineWaitLabel='流水线 '+parts.join(' · ');
-    if(c.curTask)c.curTask.pipeline_statuses=st;
+    if(tw.curTask)tw.curTask.pipeline_statuses=st;
   }else if(curEvent==='pipeline_wait_end'){
     aiMsg.pipelineWaitLabel=d.ok?'流水线已完成':(d.timeout?'流水线等待超时':'流水线结束');
-    if(c.curTask){
-      c.curTask.pipeline_wait=false;
-      if(d.ok)c.curTask.status='executing';
+    if(tw.curTask){
+      tw.curTask.pipeline_wait=false;
+      if(d.ok)tw.curTask.status='executing';
     }
   }else if(curEvent==='answer_generating'){
-    aiMsg.answerStageLabel=d.label||'生成回答';
-    if(!aiMsg.content||/^(正在处理|正在准备|正在分析任务|正在识别意图)/.test(String(aiMsg.content||'')))
-      aiMsg.content='正在生成回答…';
+    aiMsg.answerStageLabel=formatUserChatProgressText(d.label||'正在生成最终回答');
+    if(!aiMsg.content||isChatLoadingPlaceholder(aiMsg.content))
+      setChatProgressText(aiMsg,d.label||'正在生成最终回答','正在生成最终回答');
   }else if(curEvent==='answer_start'){
+    _clearAnswerPlaceholder(aiMsg);
     aiMsg._answerStreaming=true;
     if(d.error_analyzed){
       aiMsg._errorAnalyzing=false;
@@ -7851,7 +8651,6 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     }
   }else if(curEvent==='answer_end'){
     flushAnswerStream(aiMsg);
-    aiMsg._answerStreaming=false;
     aiMsg.span={
       ...aiMsg.span,
       total_token_count:d.token_usage?d.token_usage.prompt+d.token_usage.completion:0,
@@ -7867,24 +8666,28 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     if(persist){
       aiMsg.task_audit={task_id:d.task_id,status:d.status,snapshot_json:d.snapshot_json,tool_outputs:d.tool_outputs};
       aiMsg.result_status=mapResultJudgment(d.status||'resolved');
-      if(c.curTask){
-        c.curTask.status=normalizeParentTaskStatus(d.status||'resolved','resolved');
-        c.curTask.total_duration_ms=d.total_duration_ms;
-        c.curTask.total_token_count=d.total_token_count;
-        c.curTask.result_status=aiMsg.result_status;
-        if(d.pause_reason)c.curTask.pause_reason=d.pause_reason;
-        if(Array.isArray(d.tool_outputs))c.curTask.tool_outputs=d.tool_outputs;
-        if(d.snapshot_json)c.curTask.snapshot_json=d.snapshot_json;
+      if(tw.curTask){
+        tw.curTask.status=normalizeParentTaskStatus(d.status||'resolved','resolved');
+        tw.curTask.total_duration_ms=d.total_duration_ms;
+        tw.curTask.total_token_count=d.total_token_count;
+        tw.curTask.result_status=aiMsg.result_status;
+        if(d.pause_reason)tw.curTask.pause_reason=d.pause_reason;
+        if(Array.isArray(d.tool_outputs))tw.curTask.tool_outputs=d.tool_outputs;
+        if(d.snapshot_json)tw.curTask.snapshot_json=d.snapshot_json;
         upsertMainTaskHistory({
-          task_id:c.curTask.task_id,
-          status:c.curTask.status,
+          task_id:tw.curTask.task_id,
+          status:tw.curTask.status,
           result_status:aiMsg.result_status,
           total_duration_ms:d.total_duration_ms,
         });
       }
       syncMainTaskResultIndex(aiMsg);
+      if(tw.curTask&&isParentTaskTerminal(tw.curTask.status)){
+        c.taskExpanded=false;
+        tw.curTask=null;
+      }
     }else if(!shouldKeepCurTaskOnSimpleIntent()){
-      c.curTask=null;
+      tw.curTask=null;
       aiMsg.task_id='';
       aiMsg.execTaskKind='simple';
     }else{
@@ -7907,14 +8710,14 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     const {status:_stepSt,...spanRest}=d;
     aiMsg.span={...aiMsg.span,...spanRest};
     if(d.search_results)aiMsg.span.search_results=d.search_results;
-    if(c.curTask&&d.parent_status&&isParentTaskStatusRaw(d.parent_status)){
-      c.curTask.status=normalizeParentTaskStatus(d.parent_status,c.curTask.status);
+    if(tw.curTask&&d.parent_status&&isParentTaskStatusRaw(d.parent_status)){
+      tw.curTask.status=normalizeParentTaskStatus(d.parent_status,tw.curTask.status);
     }
     const patch={duration_ms:d.elapsed_ms,token_count:d.token_count,success:d.success,confidence:d.confidence};
     const st=aiMsg.thinking.find(x=>x.step_id===d.step_id);
     if(st)Object.assign(st,patch);
-    if(c.curTask){
-      const ts=(c.curTask.steps||[]).find(x=>x.step_id===d.step_id);
+    if(tw.curTask){
+      const ts=(tw.curTask.steps||[]).find(x=>x.step_id===d.step_id);
       if(ts)Object.assign(ts,patch);
     }
   }
@@ -8154,8 +8957,12 @@ async function chatSend(){
   c.rewriteConfirmOpen=false;
   await ensureChatSessionForSend(msg);
   await ensureChatWarmupBeforeSend();
+  if(c.curTask&&!isActiveCurTask(c.curTask)){
+    c.curTask=null;
+    c.taskExpanded=false;
+  }
   c.inp='';
-  const aiMsg={role:'assistant',content:'正在处理…',thinking:[],span:{},thinkingExpanded:true,execTaskKind:'pending',execSubPlanId:'',task_id:'',result_status:'pending',_answerStreamBuf:'',rewriteSnapshot:null};
+  const aiMsg={role:'assistant',content:'正在处理您的请求…',thinking:[],span:{},thinkingExpanded:true,execTaskKind:'pending',execSubPlanId:'',task_id:'',result_status:'pending',_answerStreamBuf:'',rewriteSnapshot:null};
   resetAnswerStream(aiMsg);
   c.msgs.push({role:'user',content:msg});c.msgs.push(aiMsg);c.summaryPatches=[];c.th='';
   c.chatHitlResumeMsg=aiMsg;
@@ -8183,7 +8990,18 @@ async function chatSend(){
         c.curTask.status='abnormal';
     }
   }
-  finally{c.chatStreaming=false;c.chatAbort=null;c.th='';syncMainTaskResultIndex(aiMsg);scheduleChatPersist()}
+  finally{
+    await flushAnswerStream(aiMsg);
+    c.chatStreaming=false;
+    c.chatAbort=null;
+    c.th='';
+    if(_chatStreamPark){
+      await flushParkedChatStreamIfAny(aiMsg);
+    }else{
+      syncMainTaskResultIndex(aiMsg);
+      scheduleChatPersist();
+    }
+  }
 }
 function chatKeydown(e){
   if(slashOpen.value){
@@ -8875,7 +9693,51 @@ const mm=reactive({
   columnBandSplit:true,
   skipArrows:true,
   fcResult:null,
+  previewHtml:"",
+  previewMdPath:"",
+  previewMeta:null,
+  lightboxSrc:"",
 });
+function mmCloseLightbox(){mm.lightboxSrc=""}
+function mmOnPreviewClick(e){
+  if(window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.handleKbPictureClick==="function"){
+    window.SBA_RICH_CONTENT.handleKbPictureClick(e,(src)=>{mm.lightboxSrc=src});
+  }
+}
+function mmRenderPreviewHtml(raw){
+  if(window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.renderRichContentHtml==="function"){
+    return window.SBA_RICH_CONTENT.renderRichContentHtml(raw);
+  }
+  return "";
+}
+async function mmLoadPreview(res){
+  const mdPath=(res&&res.md_path||"").trim();
+  mm.previewMdPath=mdPath;
+  mm.previewMeta={
+    image_count_exported:res&&res.image_count_exported,
+    image_count:res&&res.image_count,
+    assets_bundle_dir:res&&res.assets_bundle_dir,
+    manifest_export_path:res&&res.manifest_export_path,
+    export_url_prefix:res&&res.export_url_prefix,
+  };
+  if(!mdPath){mm.previewHtml="";return}
+  try{
+    const r=await fetch("/api/doc/export-md?path="+encodeURIComponent(mdPath));
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok){mm.previewHtml="";return}
+    mm.previewHtml=mmRenderPreviewHtml(d.content||"");
+    nextTick(()=>{
+      if(window.SBA_RICH_CONTENT&&typeof window.SBA_RICH_CONTENT.scheduleMermaidHydrate==="function"){
+        const el=document.querySelector(".mm-preview-body");
+        if(el)window.SBA_RICH_CONTENT.scheduleMermaidHydrate(el);
+      }
+    });
+  }catch(_){mm.previewHtml=""}
+}
+function mmOpenPreviewMd(){
+  if(!mm.previewMdPath){showToastMsg("暂无导出 MD");return}
+  openOutputMdByPath(mm.previewMdPath,"split",{from:"multimodal"});
+}
 function persistMmPrefs(){
   try{
     localStorage.setItem("sba_mm_export_txt",mm.exportTxt?"1":"0");
@@ -9044,7 +9906,9 @@ async function docProc(){
         const mdPath=(res.md_path||"").trim();
         const txtPath=(res.txt_path||"").trim();
         const sumNote=res.summarized?" 已摘要":(res.summarize_requested&&res.summarize_error?" 摘要失败:"+String(res.summarize_error).slice(0,120):"");
-        docLogLine("      → "+(ok?"OK":"FAIL")+" 类型:"+dt+" 文本长度:"+ntxt+(mdPath?" MD:"+mdPath:"")+(txtPath?" TXT:"+txtPath:"")+sumNote+(err?" 错误:"+err.slice(0,400):""));
+        const imgNote=res.image_count_exported?" 图片:"+res.image_count_exported:"";
+        docLogLine("      → "+(ok?"OK":"FAIL")+" 类型:"+dt+" 文本长度:"+ntxt+(mdPath?" MD:"+mdPath:"")+(txtPath?" TXT:"+txtPath:"")+imgNote+sumNote+(err?" 错误:"+err.slice(0,400):""));
+        if(ok&&mdPath)await mmLoadPreview(res);
       }catch(e){docLogLine("      → 请求异常: "+(e.message||String(e)))}
     }
     docLogLine("["+stamp()+"] 全部完成");
@@ -9786,7 +10650,54 @@ async function saveIag(){
 }
 
 /* ══ 定时任务管理 ══ */
-const sched=reactive({jobs:[],runs:[],presets:[],loading:false,err:"",busyKey:"",st:{scheduler_running:false,job_count:0}});
+const sched=reactive({jobs:[],runs:[],activeCards:[],runningCount:0,presets:[],loading:false,err:"",busyKey:"",busyRunId:"",st:{scheduler_running:false,job_count:0}});
+const SCHED_STATUS_LABEL={running:"运行中",started:"已启动",in_progress:"处理中",completed:"已完成",failed:"失败",cancelled:"已取消",partial:"部分完成"};
+function schedStatusLabel(c){const s=(c&&c.status)||"running";return SCHED_STATUS_LABEL[s]||s}
+function schedCardStatusColor(c){
+  const s=(c&&c.status)||"running";
+  if(s==="running"||s==="started"||s==="in_progress")return"var(--a1)";
+  if(s==="failed"||s==="cancelled")return"var(--err)";
+  if(s==="completed"||s==="partial")return"var(--ok)";
+  return"var(--t2)";
+}
+function schedCardBorderStyle(c){
+  const s=String((c&&c.status)||"running");
+  let color="var(--a1)";
+  if(s==="completed"||s==="partial")color="var(--ok)";
+  else if(s==="failed"||s==="cancelled")color="var(--err)";
+  else if(s==="pending")color="var(--warn)";
+  return{borderLeft:"3px solid "+color};
+}
+function schedCardMetricsLine(c){
+  if(!c)return"";
+  const parts=[];
+  if(c.duration_ms>0)parts.push("耗时 "+(c.duration_ms/1000).toFixed(1)+"s");
+  if(c.retry_count>0)parts.push("重试 "+c.retry_count);
+  if(c.trigger)parts.push(c.trigger==="scheduled"?"周期触发":c.trigger==="manual_test"?"测试执行":c.trigger==="retry"?"手动重试":c.trigger);
+  return parts.join(" · ");
+}
+function schedFmtTime(iso){
+  if(!iso)return"";
+  return String(iso).slice(0,19).split("T").join(" ");
+}
+function schedDescPreview(c,maxLen=48){
+  const t=String((c&&c.description)||"");
+  return t.length>maxLen?t.slice(0,maxLen)+"…":t;
+}
+function schedErrPreview(c,maxLen=120){
+  const t=String((c&&c.error_message)||"");
+  return t.length>maxLen?t.slice(0,maxLen)+"…":t;
+}
+function schedShowProgress(c){return ["running","started","in_progress"].includes(String((c&&c.status)||""))}
+async function pollSchedActive(){
+  try{
+    const r=await fetch("/api/scheduled-jobs/active");
+    const d=await r.json();
+    if(!r.ok)return;
+    sched.activeCards=Array.isArray(d.cards)?d.cards:[];
+    sched.runningCount=Number(d.running_count)||0;
+  }catch(_){}
+}
 async function ldSchedJobs(){
   sched.loading=true;sched.err="";
   try{
@@ -9801,8 +10712,34 @@ async function ldSchedJobs(){
     sched.jobs=(dj.jobs||[]).map(j=>({...j,_preset:j.frequency_preset,_enabled:!!j.enabled}));
     sched.st=ds||{};
     sched.runs=dr.runs||[];
+    await pollSchedActive();
   }catch(e){sched.err=e.message||String(e);}
   finally{sched.loading=false;}
+}
+async function cancelSchedRun(c){
+  if(!c||!c.run_id)return;
+  if(!confirm("确定取消该定时任务执行？\n将在当前步骤结束后停止。"))return;
+  sched.busyRunId=c.run_id;
+  try{
+    const r=await fetch("/api/scheduled-jobs/runs/"+encodeURIComponent(c.run_id)+"/cancel",{method:"POST"});
+    const d=await r.json();
+    if(!r.ok)throw new Error((d.detail&&d.detail.message)||d.error||"取消失败");
+    showToastMsg(d.message||"已请求取消");
+    await pollSchedActive();
+  }catch(e){showToastMsg(e.message||String(e));}
+  finally{sched.busyRunId="";}
+}
+async function retrySchedRun(c){
+  if(!c||!c.run_id)return;
+  sched.busyRunId=c.run_id;
+  try{
+    const r=await fetch("/api/scheduled-jobs/runs/"+encodeURIComponent(c.run_id)+"/retry",{method:"POST"});
+    const d=await r.json();
+    if(!r.ok)throw new Error((d.detail&&d.detail.message)||d.error||"重试失败");
+    showToastMsg(d.summary||"已重新执行");
+    await ldSchedJobs();
+  }catch(e){showToastMsg(e.message||String(e));}
+  finally{sched.busyRunId="";}
 }
 function schedPresetChange(j){j.frequency_preset=j._preset;}
 async function schedSaveJob(j){
@@ -9830,6 +10767,7 @@ async function schedTestRun(j){
     if(!r.ok)throw new Error((d.detail&&d.detail.message)||d.error||"执行失败");
     showToastMsg((d.summary||d.status||"已触发")+" ("+((d.duration_ms||0)/1000).toFixed(1)+"s)");
     await ldSchedJobs();
+    await pollSchedActive();
   }catch(e){showToastMsg(e.message||String(e));}
   finally{sched.busyKey="";}
 }
@@ -10238,7 +11176,10 @@ watch(page,(p)=>{
           authUser.value=AuthManager.state.user;
         }
       }
-      if(!isAuthenticated.value)return;
+      if(!isAuthenticated.value){
+        redirectToLogin('/'+p);
+        return;
+      }
     }
     if(p==='orch'){
       try{
@@ -10354,11 +11295,7 @@ onMounted(async()=>{
   if(!AuthManager.checkAuth()){
     const hydrated=await hydrateAuthFromServer();
     if(!hydrated){
-      showAuthRequiredMask(true);
-      if(wantPage&&wantPage!=='video'){
-        page.value='video';
-        if(history.replaceState)history.replaceState({page:'video'},'','/video');
-      }
+      redirectToLogin(currentPath+window.location.search);
       return;
     }
   }else{
@@ -10388,12 +11325,14 @@ onMounted(async()=>{
   await ldAuthUser();
   
   // 加载各项数据
-  ldWfs();ldVec();pollQueue();
+  ldWfs();ldVec();await pollQueue();pollSchedActive();
   queueTimer=setInterval(pollQueue,2000);
+  schedTimer=setInterval(pollSchedActive,2000);
   vecTimer=setInterval(ldVec,30000);
   ldCs();kbLoadImportHistory();ldKbS();ldKbF();ldKbMetaOpts();caQ();ldOp();ldOpAg();
   if(isAdmin.value){ldGw().catch(()=>{});}
   ldHist();histTimer=setInterval(ldHist,5000);
+  restoreMdReturnContext();
   ldSkills();ldKbLibs();ldAgentProfiles();
   ldApzCatalog().catch(()=>{});
   try{
@@ -10458,9 +11397,10 @@ onMounted(async()=>{
       closeSidePanelFs();
       return;
     }
-    if(skillImport.show||kbImportMeta.show||kbBrowse.show||mmBrowse.show||modalOut.show||modalArtifact.show||queueBatchMode.value||showHist.value||chatExpandOpen.value||c.taskHistModalOpen||opsSpanModal.open){
+    if(skillImport.show||kbImportMeta.show||kbBrowse.show||mmBrowse.show||modalOut.show||modalDupLink.show||modalArtifact.show||queueBatchMode.value||csBatchMode.value||showHist.value||chatExpandOpen.value||c.taskHistModalOpen||opsSpanModal.open){
       ev.preventDefault();
       if(queueBatchMode.value)exitQueueBatchMode();
+      else if(csBatchMode.value)exitCsBatchMode();
       else closeAllPageOverlays();
     }
   });
@@ -10472,20 +11412,20 @@ onMounted(async()=>{
     bindNavIslandScroll(document.querySelector('.chat-config-scroll'));
   });
 });
-return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,schedOpen,onSchedNavClick,onSchedSubNavClick,openSchedSec,sched,ldSchedJobs,schedSaveJob,schedTestRun,schedPresetChange,subscribeOpen,schedSubOpen:subscribeOpen,subscribeXhsOpen,onSubscribeNavClick,onSubscribeXhsNavClick,openSubscribeSec,sub,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,wrStepShotUrl,ldWrCdpStatus,wrCdpStartRecord,wrCdpStopRecord,wrReplayCdp,wrReplayExt,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,sidePanelFs,isSidePanelFs,toggleSidePanelFs,closeSidePanelFs,
-  v,vec,videoSubTab,subForm,subList,subSelId,subSelRow,subFmtTime,selectSubscription,subDigest,subProfile,subBlogNotes,subProfileViewMode,subViewTab,subProfileRunLabel,subProfileRunClass,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,loadSubProfile,loadSubBlogNotes,seedSubCatalog,repairSubCatalogLinks,subLinkCards,subLinkPaging,loadSubLinkCards,openSubscriptionLinkTask,subLinkArtifactClass,subLinkArtifactLabel,setSubLinkPageSize,setSubLinkViewMode,subLinkPagePrev,subLinkPageNext,runCreatorProfile,pauseSubscription,resumeSubscription,deleteSubscription,favForm,favProgress,favSub,favSession,favCards,favSyncReport,favDigest,favHabit,favUpForm,favUpList,favUpSelId,favUpSelRow,upUnifiedList,upSelId,selectUpCard,ldUpPage,ldXhsBinding,ldFavorites,loadFavBoard,syncFavorites,refreshFavoritesCookies,favCardClass,favCardStatusText,favCardStatusColor,favCardSeqTitle,favCardSeqText,pullFollowUps,loadFollowUps,subscribeFollowUp,profileFollowUp,removeFollowUp,renderSubDigestMd,pathBasename,outputMdPreviewUrl,taskQueue,taskQueueFilter,filteredTaskQueue,displayedTaskQueue,taskQueuePaging,taskQueueViewMode,taskQueuePageCount,setTaskQueuePageSize,taskQueuePagePrev,taskQueuePageNext,toggleTaskQueueViewMode,taskQueueViewModeLabel,taskQueueViewModeTitle,filteredHistTasks,taskQueueAuthorFacets,taskSourceLabel,taskAuthorName,linkCardSourceLine,onTaskQueueFilterQueryInput,pickTaskQueueAuthor,toggleTaskQueueReadFilter,resetTaskQueueFilter,taskQueueFilterActive,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,logHighlightIdx,jumpToTaskErrorLog,outDirInp,toast,modalOut,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,taskShowProgress,taskCardLinkUrl,taskCardStatusText,taskCardStatusColor,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,taskHtmlClickTitle,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,taskQueueFmtTime,clampImportance,taskImportancePct,taskImportanceColor,taskImportanceBg,queueCardBorderStyle,updateQueueImportance,saveQueueTaskMeta,queueTaskHasNote,isQueueTaskNoteOpen,toggleQueueTaskNote,queueTaskNoteBtnClass,queueTaskNoteBtnTitle,taskCardExtractedKeywordsLine,taskShowReadBadge,taskIsUnread,taskReadLabel,markQueueTaskRead,deleteQueueTask,queueBatchMode,toggleQueueBatchMode,exitQueueBatchMode,onQueueCardClick,isQueueBatchSelected,toggleQueueBatchSel,queueBatchSelCount,queueBatchSelAllChecked,toggleQueueBatchSelAll,batchDeleteQueueTasks,onTaskHtmlClick,
+return{page,menuMain,isAdmin,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,schedOpen,onSchedNavClick,onSchedSubNavClick,openSchedSec,sched,ldSchedJobs,pollSchedActive,schedStatusLabel,schedCardStatusColor,schedCardBorderStyle,schedCardMetricsLine,schedFmtTime,schedDescPreview,schedErrPreview,schedShowProgress,cancelSchedRun,retrySchedRun,schedSaveJob,schedTestRun,schedPresetChange,subscribeOpen,schedSubOpen:subscribeOpen,subscribeXhsOpen,onSubscribeNavClick,onSubscribeXhsNavClick,openSubscribeSec,sub,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,wrStepShotUrl,ldWrCdpStatus,wrCdpStartRecord,wrCdpStopRecord,wrReplayCdp,wrReplayExt,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,sidePanelFs,isSidePanelFs,toggleSidePanelFs,closeSidePanelFs,
+  v,vec,videoSubTab,subForm,subList,subSelId,subSelRow,subFmtTime,selectSubscription,subDigest,subProfile,subBlogNotes,subProfileViewMode,subViewTab,subProfileRunLabel,subProfileRunClass,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,loadSubProfile,loadSubBlogNotes,seedSubCatalog,repairSubCatalogLinks,subLinkCards,subLinkPaging,loadSubLinkCards,openSubscriptionLinkTask,subLinkArtifactClass,subLinkArtifactLabel,setSubLinkPageSize,setSubLinkViewMode,subLinkPagePrev,subLinkPageNext,runCreatorProfile,pauseSubscription,resumeSubscription,deleteSubscription,favForm,favProgress,favSub,favSession,favCards,favSyncReport,favDigest,favHabit,favUpForm,favUpList,favUpSelId,favUpSelRow,upUnifiedList,upSelId,selectUpCard,ldUpPage,ldXhsBinding,ldFavorites,loadFavBoard,syncFavorites,refreshFavoritesCookies,favCardClass,favCardStatusText,favCardStatusColor,favCardSeqTitle,favCardSeqText,pullFollowUps,loadFollowUps,subscribeFollowUp,profileFollowUp,removeFollowUp,renderSubDigestMd,pathBasename,outputMdPreviewUrl,openOutputMdByPath,taskQueue,taskQueueFilter,filteredTaskQueue,displayedTaskQueue,taskQueuePaging,taskQueueViewMode,taskQueuePageCount,setTaskQueuePageSize,taskQueuePagePrev,taskQueuePageNext,jumpTaskQueuePage,toggleTaskQueueViewMode,taskQueueViewModeLabel,taskQueueViewModeTitle,filteredHistTasks,taskQueueAuthorFacets,taskSourceLabel,taskAuthorName,linkCardSourceLine,linkCardPublishedLine,linkCardAsTask,linkCardHasMd,linkCardHasHtml,openLinkCardMd,onLinkCardHtmlClick,openLinkCardFeishu,onTaskQueueFilterQueryInput,pickTaskQueueAuthor,toggleTaskQueueReadFilter,resetTaskQueueFilter,taskQueueFilterActive,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,logHighlightIdx,jumpToTaskErrorLog,outDirInp,toast,modalOut,modalDupLink,resubmitDupLink,startProcInternal,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,taskShowProgress,taskCardLinkUrl,taskCardStatusText,taskCardStatusColor,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,taskHtmlClickTitle,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,taskQueueFmtTime,clampImportance,taskImportancePct,taskImportanceColor,taskImportanceBg,queueCardBorderStyle,updateQueueImportance,saveQueueTaskMeta,queueTaskHasNote,isQueueTaskNoteOpen,toggleQueueTaskNote,closeQueueTaskNoteEdit,getQueueNoteDraft,setQueueNoteDraft,queueTaskNoteBtnClass,queueTaskNoteBtnTitle,taskCardExtractedKeywordsLine,taskShowReadBadge,taskIsUnread,taskReadLabel,markQueueTaskRead,deleteQueueTask,queueBatchMode,toggleQueueBatchMode,exitQueueBatchMode,onQueueCardClick,isQueueBatchSelected,toggleQueueBatchSel,queueBatchSelCount,queueBatchSelAllChecked,toggleQueueBatchSelAll,batchDeleteQueueTasks,onTaskHtmlClick,
   showHist,openHistPanel,ht,hs,ldHist,filteredHistTasks,restartTask,stopTask,moveTask,deleteTask,clearCompleted,regenerateHtml,
   histTaskId,histShowReadBadge,histTaskIsUnread,histTaskReadLabel,markHistTaskRead,
   histLogPanel,openHistLogs,closeHistLogPanel,histLogSourceLabel,
   opsSpanModal,openOpsSpanModal,closeOpsSpanModal,opOpenSpanModalFromTask,opPickSpanStepInModal,opFormatLogLine,opLoadSpanException,opTriggerSpanOpsAnalysis,
   ldOpSpans,ldOpSpanExceptions,ldOpSpansAll,opLoadSpanTask,opSpanStatusClass,opSpanMaxMs,opSpanBarPct,opFmtJson,opPickSpanStep,opPickApiEvent,opSpanTypeLabel,
-  o,ldNodes,skills,skillsFiltered,skillCmdDraft,saveSkillCommand,saveAllSkillCommands,importProjectSkillsBatch,retagAllSkillsBoard,sk,skillImport,openSkillImport,closeSkillImport,orchSkillAttachActive,skillAttachKindLabel,selectSkillAttachment,orchToolSearch,orchBoardTab,orchBoardByCategory,orchBoardFilteredItems,orchBoardTotalCount,orchBoardOpenItem,orchBoardItemTitle,builtinTools,mcpDiscovered,mcpDiscoveredFiltered,mcpEnabledListFiltered,mcpByServer,mcpVendors,mcpMarketOpen,mcpEnabledList,mcpServerKeys,ldMcpVendors,insertMcpVendorMerge,addMcpFromMarket,openMcpServerConfig,saveMcpServerConfigFromRail,removeMcpServer,orchStage,orchRail,orchFlowDisplay,orchFlowPanStart,orchFlowPanMove,orchFlowPanEnd,resetOrchRailView,fitOrchFlowToViewport,Math,closeOrchRail,openOrchFullscreen,dockOrchFromFullscreen,selectOrchBuiltin,selectOrchMcpServer,selectOrchMcpTool,selectOrchSkill,openSkillDiff,onSkillVersionClick,clearSkillDiff,refreshSkillFlow,onOrchRailTabChange,onOrchDetailTabChange,orchRailTabIsFlow,diagramStyleFields,ldDiagramStyles,iagDiagramStyleKeys,iagDiagramStyleLabel,iagDiagramStyleHint,resetIagDiagramStyle,mcpConfigEditText,mcpFeishuForm,mcpDiscKey,orchToggle,isOrchOn,setOrchOn,orchTocActive,scrollOrchTo,orchDetailToc,orchDetailTocActive,scrollOrchDetailTo,orchDiffStats,orchDiffDisplay,skillAliasCn,mcpAliasCn,skillDescParts,skillCardSummary,skillCardTags,mcpSyncMsg,mcpJsonText,mcpPlaceholder,ldBuiltinTools,ldMcpCfg,saveMcpCfg,mcpSyncPull,ldSkills,importSkillForm,onSkillFile,onSkillFolder,delSkill,orchSubTabs,switchOrchSubTab,
+  o,ldNodes,skills,skillsFiltered,skillCmdDraft,saveSkillCommand,saveAllSkillCommands,importProjectSkillsBatch,retagAllSkillsBoard,sk,skillImport,openSkillImport,closeSkillImport,orchSkillAttachActive,skillAttachKindLabel,selectSkillAttachment,orchToolSearch,orchBoardTab,orchBoardJoinRange,orchBoardSort,orchBoardByCategory,orchBoardFilteredItems,orchBoardTotalCount,orchBoardOpenItem,orchBoardItemTitle,builtinTools,mcpDiscovered,mcpDiscoveredFiltered,mcpEnabledListFiltered,mcpByServer,mcpVendors,mcpMarketOpen,mcpEnabledList,mcpServerKeys,ldMcpVendors,insertMcpVendorMerge,addMcpFromMarket,openMcpServerConfig,saveMcpServerConfigFromRail,removeMcpServer,orchStage,orchRail,orchFlowDisplay,orchFlowPanStart,orchFlowPanMove,orchFlowPanEnd,resetOrchRailView,fitOrchFlowToViewport,Math,closeOrchRail,openOrchFullscreen,dockOrchFromFullscreen,selectOrchBuiltin,selectOrchMcpServer,selectOrchMcpTool,selectOrchSkill,openSkillDiff,onSkillVersionClick,clearSkillDiff,refreshSkillFlow,onOrchRailTabChange,onOrchDetailTabChange,orchRailTabIsFlow,diagramStyleFields,ldDiagramStyles,iagDiagramStyleKeys,iagDiagramStyleLabel,iagDiagramStyleHint,resetIagDiagramStyle,mcpConfigEditText,mcpFeishuForm,mcpDiscKey,orchToggle,isOrchOn,setOrchOn,orchTocActive,scrollOrchTo,orchDetailToc,orchDetailTocActive,scrollOrchDetailTo,orchDiffStats,orchDiffDisplay,skillAliasCn,mcpAliasCn,skillDescParts,skillCardSummary,skillCardTags,mcpSyncMsg,mcpJsonText,mcpPlaceholder,ldBuiltinTools,ldMcpCfg,saveMcpCfg,mcpSyncPull,ldSkills,importSkillForm,onSkillFile,onSkillFolder,delSkill,orchSubTabs,switchOrchSubTab,
   chatSbCollapsed,toggleChatSb,
-  c,cs,filteredCs,chatSessionTitle,chatTopKpi,chatMainTaskHistory,taskHistDisplayCount,refreshChatSessionTaskHistory,chatConnectVisible,chatConnectClass,chatConnectLabel,taskRegistryKindLabel:taskRegistryKindLabel,taskRegistryKindClass:taskRegistryKindClass,openRegistryTask,openTaskDetailFromChat,openTaskHistModal,closeTaskHistModal,closeTaskHistModalBack,taskHistModalDetail,taskHistModalLoading,loadTaskHistDetail,taskHistDetailOf,taskHistDetailCounts,taskHistSubPlanGroups,taskFieldLabel,taskFieldDisplayValue,taskStepTypeLabel,taskMetaLabel,taskHistDetailKey,preloadTaskHistDetails,chatCurrentSubtask,chatGroupedSubPlans,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,isRagDecisionStep,ragSliceParentName,ragSliceModal,openRagSliceDetail,closeRagSliceDetail,openRagParentInKb,extractRagSlicesFromStep,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,formatToolPillAction,formatInvokeModeLabel,stepInvokeMode,stepInvokePurpose,stepUi,stepIsToolCall,stepIsReactThink,stepIsOrchExecPill,stepDisplayName,mainTaskCardLabel,execCardLabel,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepStatusIcoClass,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,toggleTaskStatusMenu,setCurrentMainTaskFromHistory,loadTaskRegistry,scheduleTaskRegistryReload,setTaskHistKindFilter,setTaskHistSort,syncTaskToMysql,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderRagSliceContent,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,regenerateAt,collectMsg,readMsg,ragCitationSlicesForMsg,ragCitationAnnotationsForMsg,hasRagCitationCards,onRagCiteParentToggle,ragParentBodyText,ragParentBodyLoading,answerBodyForMsg,rh,initReaderPage,readerPickLocalFile,onReaderLocalFile,readerOpenRecent,readerOpenOutputFile,fmtRecentTime,refreshReaderRecent,slashOpen,slashItems,slashIdx,slashTotal,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,openTaskSubPlanDetail,closeTaskSubPlanDetail,taskSubPlanStatusLabel,taskSubPlanStatusClass,taskSubPlanInvokeTags,taskSubPlanInvokeTagLabel,taskSubPlanDetailStepName,taskSubPlanDetailPayload,
+  c,cs,filteredCs,csBatchMode,chatSessionTitle,chatTopKpi,chatMainTaskHistory,taskHistDisplayCount,refreshChatSessionTaskHistory,chatConnectVisible,chatConnectClass,chatConnectLabel,taskRegistryKindLabel:taskRegistryKindLabel,taskRegistryKindClass:taskRegistryKindClass,openRegistryTask,openTaskDetailFromChat,openTaskHistModal,closeTaskHistModal,closeTaskHistModalBack,taskHistModalDetail,taskHistModalLoading,loadTaskHistDetail,taskHistDetailOf,taskHistDetailCounts,taskHistSubPlanGroups,taskFieldLabel,taskFieldDisplayValue,taskStepTypeLabel,taskMetaLabel,taskHistDetailKey,preloadTaskHistDetails,chatCurrentSubtask,chatGroupedSubPlans,chatActiveCurTask,chatSubPlanGroupCount,groupExecPlans,filterExecThinking,hasVisibleExecChain,execThinkingForMsg,showOrchestrationThink,formatOrchThinkDisplay,stripReactDisplayMarkers,hasStepIo,isRagDecisionStep,ragSliceParentName,ragSliceModal,openRagSliceDetail,closeRagSliceDetail,openRagParentInKb,sortedRagSlicesForMsg,ragCapsuleScoreLabel,toggleRagCapsule,activeRagSliceForMsg,jumpToRagCapsule,onAnswerCitationClick,extractRagSlicesFromStep,formatOrchStepInputDisplay,formatOrchStepOutputDisplay,ORCH_IO_PHASES,stepIsSkipped,pillStatusClass,execPillClass,execSubPlanTitle,formatToolPillPrimary,formatToolPillResult,formatToolPillAction,formatInvokeModeLabel,stepInvokeMode,stepInvokePurpose,stepUi,stepIsToolCall,stepIsReactThink,stepIsOrchExecPill,stepDisplayName,mainTaskCardLabel,execCardLabel,execCardQueryLine,activeTaskHistoryEntry,jumpToTaskResult,jumpToCurTaskResult,jumpToMsgIndex,resultJudgmentLabel,resultJudgmentClass,msgErrLabel,msgErrClass,parentStatusLabel,parentStatusClass,parentStatusTransitions,formatStepBrief,formatDuration,stepSuccessLabel,stepStatusIcoClass,stepConfidencePct,formatStepInputDisplay,formatStepOutputDisplay,isDocStepOutput,chatCtxPct,chatCtxPctLabel,switchChatPanel,orchPipelineNodes:ORCH_PIPELINE_NODE_DEFS,chatApplyTaskStatus,onTaskHistPick,toggleTaskHistMenu,toggleTaskStatusMenu,setCurrentMainTaskFromHistory,loadTaskRegistry,scheduleTaskRegistryReload,setTaskHistKindFilter,setTaskHistSort,syncTaskToMysql,chatCloseTask,chatTogglePause,hitlKindTitle,chatHitlConfirm,chatHitlPause,chatHitlReintent,chatHitlToolOption,chatPrimaryActionLabel,chatPrimaryActionDisabled,chatModels,chatAgents,customAgents,goAgentPersonalization,persistChatPrefs,newChatSess,delCs,renameCs,closeCs,exportCsMd,exportMsgMd,loadChatSession,toggleCsMenu,onCsItemClick,toggleCsBatchMode,exitCsBatchMode,isCsBatchSelected,toggleCsBatchSel,csBatchSelCount,csBatchSelAllChecked,toggleCsBatchSelAll,batchDeleteCs,upImg,upFile,autoResize,onChatInput,chatKeydown,chatSend,toggleVoice,chatExpandOpen,renderMsg,renderRagSliceContent,renderWebSearchPanel,copyMsg,copyQueryToInput,loadPlatformHealth,goHealthSettings,platformHealthSummaryText,platformHealthSummaryClass,regenerateAt,collectMsg,readMsg,ragCitationSlicesForMsg,ragCitationAnnotationsForMsg,hasRagCitationCards,onRagCiteParentToggle,ragParentBodyText,ragParentBodyLoading,answerBodyForMsg,rh,initReaderPage,readerPickLocalFile,onReaderLocalFile,readerOpenRecent,readerOpenOutputFile,fmtRecentTime,refreshReaderRecent,slashOpen,slashItems,slashIdx,slashTotal,pickSlash,chatScrollAwayFromBottom,chatScrollBottomClick,openTaskSubPlanDetail,closeTaskSubPlanDetail,taskSubPlanStatusLabel,taskSubPlanStatusClass,taskSubPlanInvokeTags,taskSubPlanInvokeTagLabel,taskSubPlanDetailStepName,taskSubPlanDetailPayload,
   apz,ldApzCatalog,selectApzTemplate,ldApzCurrent,ldApzHist,loadApzRevision,saveApzTemplate,newApzCustom,useApzInChat,deactivateApzCustom,
   kb,kbImportMeta,kbImportBtnLabel,kbMilvusStatusText,kbMilvusStatusColor,ldKbS,ldKbF,kbRefreshAll,ldKbMetaOpts,ldKbConn,kbSetConnectionParams,kbProbeConnection,kbRetryConnection,kbConnFmtTs,kbResetConnection,kbToggleConnDetail,kbSyncChunkCounts,kbRestoreCatalog,kbRm,ldKbLibs,onKbLibChange,promptCreateKbLib,deleteKbLib,saveKbLibCfg,kbLoadRecallVocab,kbImportInterviewFolder,kbFolderInp,kbPickLocalFolder,onKbLocalFolderPick,openKbBrowse,kbBrowse,kbBrowseEnter,kbBrowseUp,kbImportSelectedFiles,kbImportFolderHere,kbConfirmImportWithMeta,kbOpenImportMeta,openKbFileDetail,closeKbFileDetail,kbAutoFillMeta,kbSaveFileMeta,kbRowPv,
    rss,rssFmtTime,rssFeedTitle,rssArticleTitle,rssSyncStepClass,rssSyncActionLabel,ldRssAll,rssSelectFeed,rssSelectItem,rssOpenDoc,rssEnqueueDoc,rssAddFeed,rssDeleteFeed,rssSyncOne,rssSyncAll,rssToggleFilter,rssToggleRead,rssToggleStar,rssExportOpml,rssImportOpmlFile,rssTriggerOpmlImport,
-  d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,persistMmPrefs,ldMmPrefs,
+  d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,persistMmPrefs,ldMmPrefs,mmLoadPreview,mmOnPreviewClick,mmCloseLightbox,mmOpenPreviewMd,
   ca,caQ,caSel,caPickRow,caSv,caEx,
   st,agtKeys,ldGw,ldAr,ldNf,testConn,ndUpSert,ndPoolSv,ndUp,ndDn,ndDel,rtSv,ldWf,svWf,ldMd,svMd,svFs,ldFsCfg,aicf,ldAiCfg,svAiCfg,thcf,ldThCfg,svThCfg,ldTpl,svTpl,ldHtmlCfg,svHtmlCfg,ldImPlatforms,openImPlatform,closeImDetail,imPlatformIcon,imPlatformBadge,imDetailTitle,ldImFeishu,ldImFeishuMsgs,imFsSave,imFsTime,imFsWebhookUrl,imFsCopyWebhook,
   INTERNAL_IAG_TABS,IAG_KEY_ORDER,IAG_SUMMARY_PREVIEW_VARS,IAG_SUMMARY_BODY_TOKENS,IAG_COMMENTS_SECTION_VARS,iag,iagRawMode,ldIag,saveIag,iagLabel,iagHelpText,iagIsLongText,iagIsGuidedTab,iagFieldKeys,iagGenericFieldKeys,iagTplPreviewMd,iagTplPreviewFn,iagCommentsSectionPreview,iagMetaExtractFieldsJson,iagApplyKbMetaSchema,iagResetMetaExtractFields,insertIagToken,iagToggleRawMode,iagDiagramStyleKeys,resetIagDiagramStyle,
@@ -10518,7 +11458,7 @@ document.addEventListener('click',function(ev){
   const name=decodeURIComponent((href.split('/').pop()||'').split('?')[0]);
   if(!/\.(md|txt|markdown|mdx)$/i.test(name))return;
   ev.preventDefault();
-  window.open('/preview/md.html?file='+encodeURIComponent(name),'sba_md_'+Date.now(),'noopener,noreferrer');
+  openOutputMdByPath(name,'split',{from:page.value});
 },true);
 try{
   _sbaApp.mount('#app');

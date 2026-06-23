@@ -732,7 +732,8 @@ async def process_video_pipeline(task_id: str):
     if not task.get("link_title"):
         import time as _time
 
-        from .file_naming import resolve_link_title, preview_from_analyzer_result
+        from .file_naming import resolve_link_title, preview_from_analyzer_result, extract_author_from_link
+        from .task_source_meta import apply_task_source_meta
 
         add_log(task_id, "[首层标题] 开始从链接解析展示标题…")
         t_title = _time.perf_counter()
@@ -751,6 +752,32 @@ async def process_video_pipeline(task_id: str):
         if lt:
             update_task(task_id, link_title=lt)
             add_log(task_id, f"首层标题（链接）: {lt}")
+        # 提取作者信息（静态HTML → CDP渲染DOM 双层回退）
+        if not task.get("author_name"):
+            try:
+                an, ai = await loop.run_in_executor(
+                    _io_executor(),
+                    lambda: extract_author_from_link(link),
+                )
+                if an:
+                    apply_task_source_meta(task, author_name=an, author_id=ai)
+                    update_task(task_id, author_name=an, author_id=ai)
+                    add_log(task_id, f"作者信息: {an}" + (f" (id={ai})" if ai else ""))
+            except Exception:
+                pass
+            if not task.get("author_name"):
+                try:
+                    from .chrome_cdp_open import cdp_extract_note_author
+                    an2, ai2 = await loop.run_in_executor(
+                        _io_executor(),
+                        lambda: cdp_extract_note_author(link),
+                    )
+                    if an2:
+                        apply_task_source_meta(task, author_name=an2, author_id=ai2)
+                        update_task(task_id, author_name=an2, author_id=ai2)
+                        add_log(task_id, f"作者信息(CDP): {an2}" + (f" (id={ai2})" if ai2 else ""))
+                except Exception:
+                    pass
 
     # 存储评论数据
     comments_data = None
@@ -854,7 +881,16 @@ async def process_video_pipeline(task_id: str):
                     "status": "running",
                 }
                 if analyzer_prefetch:
-                    patch["link_analyzer_prefetch"] = analyzer_prefetch
+                    from .pipeline_output_quality import assess_xhs_extractor_result
+
+                    if assess_xhs_extractor_result(analyzer_prefetch, after_ocr=False).ok:
+                        patch["link_analyzer_prefetch"] = analyzer_prefetch
+                    else:
+                        add_log(
+                            task_id,
+                            "[路由] prefetch 抓取为空，不写入任务（图文阶段将重新 analyze_link）",
+                            "WARNING",
+                        )
                 if mapped_rf and mapped_rf != rf:
                     patch["resume_from"] = mapped_rf
                     if (task.get("failed_stage") or "") == rf:
@@ -1030,6 +1066,14 @@ async def process_video_pipeline(task_id: str):
             extracted_metadata = consolidation.get("extracted_metadata") or {}
             if extracted_metadata:
                 update_task(task_id, extracted_metadata=extracted_metadata)
+                # LLM 提取的作者回填到任务卡片
+                em_author = str(extracted_metadata.get("author_name") or "").strip()
+                if em_author and not (get_task(task_id) or {}).get("author_name"):
+                    from .task_source_meta import apply_task_source_meta
+                    t = get_task(task_id)
+                    if t:
+                        apply_task_source_meta(t, author_name=em_author)
+                        update_task(task_id, author_name=em_author)
             transcript["comments_viewpoint"] = (consolidation.get("comments_viewpoint") or "").strip()
             if not _article_only and not ai_summary:
                 tracker.fail("ai_analysis", "摘要生成失败")

@@ -247,7 +247,15 @@
     localStorage.setItem('sba_token', token);
     localStorage.setItem('sba_user', JSON.stringify(user));
   }
-  function goHome(){ window.location.href = '/'; }
+  function goHome(){
+    var params = new URLSearchParams(window.location.search);
+    var next = params.get('next');
+    if (next && next.startsWith('/') && !next.startsWith('//') && next !== '/login.html') {
+      window.location.href = next;
+    } else {
+      window.location.href = '/';
+    }
+  }
 
   // ── Tab 切换 ──
   var tabNames = ['sms','pwd','reg'];
