@@ -1,258 +1,6 @@
 [
   {
     "action": "monitor_task_completion",
-    "task_id": "c3eb840f6b71",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c3eb840f6b71_20260621_081345.md",
-    "timestamp": "2026-06-21T08:13:57.092569"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "c773b7199cbd",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c773b7199cbd_20260621_081516.md",
-    "timestamp": "2026-06-21T08:15:30.436178"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "355239f38a1d",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_355239f38a1d_20260621_081531.md",
-    "timestamp": "2026-06-21T08:15:48.118367"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "1e3c63c494cc",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_1e3c63c494cc_20260621_081617.md",
-    "timestamp": "2026-06-21T08:16:26.840156"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "1432910eda0f",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_1432910eda0f_20260621_081750.md",
-    "timestamp": "2026-06-21T08:18:00.157334"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "90bb14c06d32",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_90bb14c06d32_20260621_081832.md",
-    "timestamp": "2026-06-21T08:18:45.207480"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "cd363198ce6a",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_cd363198ce6a_20260621_081938.md",
-    "timestamp": "2026-06-21T08:19:50.864955"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "a06ad5560a71",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_a06ad5560a71_20260621_082101.md",
-    "timestamp": "2026-06-21T08:21:12.192686"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "532d56033ee3",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_532d56033ee3_20260621_082148.md",
-    "timestamp": "2026-06-21T08:22:02.128875"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "a39e19d42545",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_a39e19d42545_20260621_082256.md",
-    "timestamp": "2026-06-21T08:23:05.055908"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "7709316cecba",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_7709316cecba_20260621_082350.md",
-    "timestamp": "2026-06-21T08:24:03.022599"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "a995fb590801",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_a995fb590801_20260621_082502.md",
-    "timestamp": "2026-06-21T08:25:10.604603"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "736a0746c12e",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_736a0746c12e_20260621_082611.md",
-    "timestamp": "2026-06-21T08:26:22.172485"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "a086430178a2",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_a086430178a2_20260621_082622.md",
-    "timestamp": "2026-06-21T08:26:30.071142"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "f09c04e0ddb6",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f09c04e0ddb6_20260621_082655.md",
-    "timestamp": "2026-06-21T08:27:03.428623"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "1dde4f939744",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_1dde4f939744_20260621_082803.md",
-    "timestamp": "2026-06-21T08:28:12.401784"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "c20aad014144",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c20aad014144_20260621_082852.md",
-    "timestamp": "2026-06-21T08:28:59.151775"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "f572088d6c60",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f572088d6c60_20260621_082944.md",
-    "timestamp": "2026-06-21T08:29:49.726721"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "2dae2b05686d",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_2dae2b05686d_20260621_083034.md",
-    "timestamp": "2026-06-21T08:30:44.193864"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "c50cd49f2f1b",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c50cd49f2f1b_20260621_083129.md",
-    "timestamp": "2026-06-21T08:31:37.618844"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "f1eb84db399a",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f1eb84db399a_20260621_083246.md",
-    "timestamp": "2026-06-21T08:32:55.594733"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "0be5907e4c6e",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0be5907e4c6e_20260621_083356.md",
-    "timestamp": "2026-06-21T08:34:06.315970"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "439acdf09c24",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_439acdf09c24_20260621_083512.md",
-    "timestamp": "2026-06-21T08:35:23.668731"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "768ea6bc5c7d",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_768ea6bc5c7d_20260621_083707.md",
-    "timestamp": "2026-06-21T08:37:14.149878"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "950a6e395c2a",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_950a6e395c2a_20260621_121602.md",
-    "timestamp": "2026-06-21T12:16:26.312021"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "63af720aed24",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_63af720aed24_20260621_122109.md",
-    "timestamp": "2026-06-21T12:21:29.430781"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "0c004c9f2931",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0c004c9f2931_20260621_122407.md",
-    "timestamp": "2026-06-21T12:24:24.532586"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "4b78080fcda1",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_4b78080fcda1_20260621_122758.md",
-    "timestamp": "2026-06-21T12:28:17.527118"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "ffea5fbd6b3a",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_ffea5fbd6b3a_20260621_122940.md",
-    "timestamp": "2026-06-21T12:29:59.390567"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "2c350610db30",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_2c350610db30_20260621_123144.md",
-    "timestamp": "2026-06-21T12:31:58.217825"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "59e2c75a326c",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_59e2c75a326c_20260621_123416.md",
-    "timestamp": "2026-06-21T12:34:40.900192"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "de4c9e2d87d6",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_de4c9e2d87d6_20260621_123624.md",
-    "timestamp": "2026-06-21T12:36:37.273603"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "62860f74a5c4",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_62860f74a5c4_20260621_123832.md",
-    "timestamp": "2026-06-21T12:38:47.447113"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "47e34642fdfe",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_47e34642fdfe_20260621_123903.md",
-    "timestamp": "2026-06-21T12:39:15.724330"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "9315663b4157",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_9315663b4157_20260621_124043.md",
-    "timestamp": "2026-06-21T12:40:52.136990"
-  },
-  {
-    "action": "monitor_task_completion",
-    "task_id": "f7f59aec691b",
-    "status": "failed",
-    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f7f59aec691b_20260621_124200.md",
-    "timestamp": "2026-06-21T12:42:18.630745"
-  },
-  {
-    "action": "monitor_task_completion",
     "task_id": "71de1ded18f8",
     "status": "failed",
     "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_71de1ded18f8_20260621_130040.md",
@@ -698,5 +446,257 @@
     "status": "failed",
     "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_task_700913841b94_20260623_010749.md",
     "timestamp": "2026-06-23T01:08:07.187955"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "f22d63b337e5",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f22d63b337e5_20260623_202113.md",
+    "timestamp": "2026-06-23T20:21:33.349732"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "task_161df262ff30",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_task_161df262ff30_20260623_202115.md",
+    "timestamp": "2026-06-23T20:21:42.924439"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "task_161df262ff30",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_task_161df262ff30_20260623_234541.md",
+    "timestamp": "2026-06-23T23:46:05.411734"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "task_161df262ff30",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_task_161df262ff30_20260624_024712.md",
+    "timestamp": "2026-06-24T02:47:34.393363"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_140713.md",
+    "timestamp": "2026-06-24T14:07:25.772172"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_140730.md",
+    "timestamp": "2026-06-24T14:07:50.257262"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_140730.md",
+    "timestamp": "2026-06-24T14:07:59.209896"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_140750.md",
+    "timestamp": "2026-06-24T14:08:20.935972"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_141932.md",
+    "timestamp": "2026-06-24T14:19:47.980130"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_141953.md",
+    "timestamp": "2026-06-24T14:20:04.613064"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_141953.md",
+    "timestamp": "2026-06-24T14:20:17.901199"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "0ff06b06ca5b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_0ff06b06ca5b_20260624_142004.md",
+    "timestamp": "2026-06-24T14:20:39.370215"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "8afa1c33ded9",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_8afa1c33ded9_20260624_175335.md",
+    "timestamp": "2026-06-24T17:53:49.568257"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "f71947d6ac8b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f71947d6ac8b_20260624_175426.md",
+    "timestamp": "2026-06-24T17:54:33.616931"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "d9dc7aea9adb",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_d9dc7aea9adb_20260624_175421.md",
+    "timestamp": "2026-06-24T17:54:35.726489"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "5028f35c2634",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_5028f35c2634_20260624_175433.md",
+    "timestamp": "2026-06-24T17:54:54.144558"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "f4872a6c2d5a",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f4872a6c2d5a_20260624_182038.md",
+    "timestamp": "2026-06-24T18:20:57.032115"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "76d0a0daa1da",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_76d0a0daa1da_20260624_182041.md",
+    "timestamp": "2026-06-24T18:20:58.745466"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "f4872a6c2d5a",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_f4872a6c2d5a_20260624_182038.md",
+    "timestamp": "2026-06-24T18:20:58.755506"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "76d0a0daa1da",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_76d0a0daa1da_20260624_182041.md",
+    "timestamp": "2026-06-24T18:21:00.475951"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "7e5e4b80033e",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_7e5e4b80033e_20260624_182321.md",
+    "timestamp": "2026-06-24T18:23:39.525671"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "5016cfce5983",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_5016cfce5983_20260624_182426.md",
+    "timestamp": "2026-06-24T18:24:47.385063"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "7e5e4b80033e",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_7e5e4b80033e_20260624_182321.md",
+    "timestamp": "2026-06-24T18:25:40.998057"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "5016cfce5983",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_5016cfce5983_20260624_182426.md",
+    "timestamp": "2026-06-24T18:26:53.651667"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "de2df32b5779",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_de2df32b5779_20260625_174824.md",
+    "timestamp": "2026-06-25T17:48:35.726594"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "c155c481f42b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c155c481f42b_20260626_091407.md",
+    "timestamp": "2026-06-26T09:14:22.613935"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "c155c481f42b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c155c481f42b_20260626_091407.md",
+    "timestamp": "2026-06-26T09:14:29.486629"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "c155c481f42b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c155c481f42b_20260626_091407.md",
+    "timestamp": "2026-06-26T09:14:39.639741"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "821bd380831b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_821bd380831b_20260626_091417.md",
+    "timestamp": "2026-06-26T09:14:40.713218"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "821bd380831b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_821bd380831b_20260626_091439.md",
+    "timestamp": "2026-06-26T09:14:54.550824"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "c155c481f42b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_c155c481f42b_20260626_091428.md",
+    "timestamp": "2026-06-26T09:15:00.259504"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "10437eab312b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_10437eab312b_20260626_091432.md",
+    "timestamp": "2026-06-26T09:15:00.691639"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "10437eab312b",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_10437eab312b_20260626_091452.md",
+    "timestamp": "2026-06-26T09:15:16.697462"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "67fe826f06ee",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_67fe826f06ee_20260626_151911.md",
+    "timestamp": "2026-06-26T15:19:22.242777"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "67fe826f06ee",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_67fe826f06ee_20260626_151945.md",
+    "timestamp": "2026-06-26T15:20:12.240620"
+  },
+  {
+    "action": "monitor_task_completion",
+    "task_id": "67fe826f06ee",
+    "status": "failed",
+    "report": "F:\\java\\AIOPS\\SuperBizAgent-release-2026-01-02\\demo_wendanghua\\SuperBizAgent-AgentFramework\\web_rebuild_v2\\src\\agent\\output\\ops_reports\\ops_67fe826f06ee_20260626_151945.md",
+    "timestamp": "2026-06-26T15:20:15.629909"
   }
 ]

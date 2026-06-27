@@ -84,8 +84,19 @@ async def run_article_only_for_note(
 ) -> Dict[str, Any]:
     link = str(note.get("pipeline_url") or note.get("canonical_url") or "")
     note_id = str(note.get("note_id") or "")
+    link_source = str(note.get("link_source") or "")
+    link_resolved = bool(note.get("link_resolved"))
     if not link:
         return {"ok": False, "note_id": note_id, "error": "missing_url"}
+    if link_source == "bare_explore" or not link_resolved or "xsec_token" not in link:
+        return {
+            "ok": False,
+            "note_id": note_id,
+            "error": "link_unresolved",
+            "canonical_url": str(note.get("canonical_url") or ""),
+            "pipeline_url": str(note.get("pipeline_url") or ""),
+            "link_source": link_source or "bare_explore",
+        }
 
     _log.info(
         "[%s|creator_profile_article.run_article_only_for_note|%s|Agent执行|流水线输入] "
@@ -93,7 +104,7 @@ async def run_article_only_for_note(
         _CHAIN,
         note_id,
         link[:160],
-        note.get("link_source") or "",
+        link_source,
         "xsec_token" in link,
     )
 

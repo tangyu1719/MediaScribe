@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -140,6 +141,63 @@ def test_speech_to_text_in_agent_has_strict_param():
 
     vd = importlib.reload(vd)
     assert "strict" in inspect.signature(vd.speech_to_text).parameters
+
+
+def test_agent_speech_to_text_falls_back_after_oserror():
+    from app.services.config import resolve_agent_dir
+    import sys
+    import importlib
+
+    agent = str(resolve_agent_dir())
+    if agent not in sys.path:
+        sys.path.insert(0, agent)
+    import video_downloader as vd
+
+    vd = importlib.reload(vd)
+    with tempfile.TemporaryDirectory(prefix="speech-fallback-") as td:
+        media = MagicMock()
+        from pathlib import Path
+
+        media = Path(td) / "demo.mp4"
+        media.write_bytes(b"0" * 4096)
+
+        class DummyModel:
+            def __init__(self):
+                self.calls = 0
+
+            def transcribe(self, _path, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError(22, "Invalid argument")
+                return {
+                    "text": "真实转写",
+                    "segments": [{"start": 0, "text": "真实转写"}],
+                }
+
+        class DummyPool:
+            core_size = 1
+            max_size = 1
+
+            def __init__(self):
+                self.model = DummyModel()
+
+            def acquire(self):
+                return ("core-1", self.model)
+
+            def release(self, _slot):
+                return None
+
+        with patch.object(vd, "_whisper_pool", DummyPool()), \
+             patch.object(vd, "ensure_ffmpeg_path", return_value=str(td), create=True), \
+             patch.object(vd, "resolve_ffmpeg_bin_dir", return_value=str(td), create=True), \
+             patch.object(vd.shutil, "which", side_effect=lambda name: f"C:/fake/{name}.exe"), \
+             patch("video_downloader.subprocess.run") as mocked_run:
+            mocked_run.return_value = SimpleNamespace(returncode=0, stdout="12.5\n", stderr="")
+            out = vd.speech_to_text(str(media), strict=True)
+
+    assert out is not None
+    assert out.get("full_text") == "真实转写"
+    assert out.get("transcribe_source") == "audio_whisper"
 
 
 def test_strip_whisper_hallucination_tail_keeps_valid_prefix():

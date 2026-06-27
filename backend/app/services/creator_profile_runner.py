@@ -92,6 +92,84 @@ def _enrich_selected_notes(
     return out
 
 
+def _recover_articles_from_pipeline_results(
+    results: List[Any],
+    selected_notes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """流水线已完成但 MD 正文提取失败时，尝试回收 ai_analysis 摘要。"""
+    from .task_manager import get_task
+
+    note_by_id = {str(n.get("note_id") or ""): n for n in selected_notes}
+    recovered: List[Dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        nid = str(r.get("note_id") or "")
+        note = note_by_id.get(nid) or {}
+        tid = str(r.get("task_id") or "")
+        task = get_task(tid) if tid else {}
+        task = task or {}
+        ai = (task.get("resume_context") or {}).get("ai_analysis") or {}
+        body = str(r.get("article") or "").strip()
+        if not body:
+            body = str(ai.get("article") or ai.get("summary") or "").strip()
+        if not article_text_usable(body, min_len=80):
+            continue
+        recovered.append(
+            {
+                "ok": True,
+                "note_id": nid,
+                "task_id": tid,
+                "title": note.get("title") or r.get("title") or task.get("link_title"),
+                "published_at": note.get("published_at"),
+                "content_type": note.get("content_type"),
+                "canonical_url": note.get("canonical_url") or r.get("canonical_url"),
+                "pipeline_url": note.get("pipeline_url") or r.get("pipeline_url"),
+                "link_source": note.get("link_source") or r.get("link_source") or "recovered_ai_analysis",
+                "doc_path": r.get("doc_path") or task.get("doc_path") or "",
+                "article": body,
+            }
+        )
+    return recovered
+
+
+def _render_light_only_profile_md(
+    *,
+    display_name: str,
+    red_id: str,
+    creator_id: str,
+    profile_run_id: str,
+    light_profile: Dict[str, Any],
+    selection: Dict[str, Any],
+    selected_notes: List[Dict[str, Any]],
+    fetch_fail_count: int,
+) -> str:
+    lines = [
+        f"# UP 人物画像（轻量降级）：{display_name}",
+        "",
+        f"- 小红书号：{red_id}",
+        f"- Creator ID：{creator_id}",
+        f"- 画像运行 ID：{profile_run_id}",
+        f"- 说明：深度采样 {fetch_fail_count} 篇均失败，以下为标题轻量画像。",
+        "",
+        "## 轻量画像（标题推断）",
+        "",
+        light_profile.get("markdown_excerpt")
+        or str(light_profile.get("persona_summary") or ""),
+        "",
+        "## 计划采样篇目",
+        "",
+    ]
+    for n in selected_notes:
+        lines.append(
+            f"- [{n.get('title', n.get('note_id'))}]({n.get('canonical_url', '')}) "
+            f"· {n.get('content_type', '')}"
+        )
+    if selection.get("rationale"):
+        lines.extend(["", "## 选篇说明", "", str(selection.get("rationale"))])
+    return "\n".join(lines)
+
+
 async def run_creator_profile(
     subscription_id: str,
     *,
@@ -188,6 +266,18 @@ async def run_creator_profile(
                     catalog=catalog,
                 ),
             )
+            unresolved_notes = [n for n in selected_notes if not n.get("link_resolved")]
+            if unresolved_notes:
+                _log.warning(
+                    "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|链接未补全] unresolved=%s; total=%s",
+                    _CHAIN,
+                    run_id,
+                    len(unresolved_notes),
+                    len(selected_notes),
+                )
+            selected_notes = [n for n in selected_notes if n.get("link_resolved")]
+            if not selected_notes:
+                raise RuntimeError("PROFILE_LINKS_UNRESOLVED: 选篇链接均未补全到可访问 token 链接")
             update_profile_run(run_id, stage="deep_fetch")
             # ── 阶段3：并行原文 MD（用主页采集到的真实链接输入流水线） ──
             per_timeout = int(os.environ.get("PROFILE_ARTICLE_TIMEOUT_SEC", "1800"))
@@ -225,7 +315,86 @@ async def run_creator_profile(
                 stage="deep_profile",
             )
             if not articles:
-                raise RuntimeError("PROFILE_DEEP_FETCH_ALL_FAILED: 深度采样原文全部失败")
+                recovered = _recover_articles_from_pipeline_results(results, selected_notes)
+                if recovered:
+                    articles = recovered
+                    ok_n = len(recovered)
+                    _log.warning(
+                        "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|回收摘要] recovered=%s",
+                        _CHAIN,
+                        run_id,
+                        ok_n,
+                    )
+
+            enriched_notes = _enrich_selected_notes(selected_notes, results)
+
+            if not articles:
+                final_status = "light_only"
+                profile_md = _render_light_only_profile_md(
+                    display_name=display_name,
+                    red_id=red_id,
+                    creator_id=creator_id,
+                    profile_run_id=run_id,
+                    light_profile=light,
+                    selection=selection,
+                    selected_notes=enriched_notes,
+                    fetch_fail_count=fail_n,
+                )
+                safe_name = re.sub(r'[\\/:*?"<>|]', "_", display_name)[:40] or creator_id[:12]
+                out_dir = get_output_dir() / "creator_profiles" / subscription_id
+                out_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                md_path = out_dir / f"{safe_name}_profile_{ts}.md"
+                md_path.write_text(profile_md, encoding="utf-8")
+
+                payload = {
+                    "display_name": display_name,
+                    "red_id": red_id,
+                    "creator_id": creator_id,
+                    "subscription_id": subscription_id,
+                    "profile_run_id": run_id,
+                    "light_profile": light,
+                    "selection": selection,
+                    "selected_notes": enriched_notes,
+                    "sampled_articles": [],
+                    "persona_summary": str(light.get("persona_summary") or ""),
+                    "content_style": str(light.get("content_style") or ""),
+                    "recent_topics": light.get("recent_topics") or [],
+                }
+                doc = save_profile_doc(
+                    subscription_id=subscription_id,
+                    profile_run_id=run_id,
+                    payload=payload,
+                    profile_md=profile_md,
+                    profile_md_path=str(md_path),
+                    llm_model="",
+                )
+                update_profile_run(
+                    run_id,
+                    status=final_status,
+                    stage="done",
+                    profile_md=profile_md,
+                )
+                _log.info(
+                    "[%s|creator_profile_runner.run_creator_profile|%s|Agent执行|完成] status=%s; deep_ok=%s; deep_fail=%s",
+                    _CHAIN,
+                    run_id,
+                    final_status,
+                    ok_n,
+                    fail_n,
+                )
+                return {
+                    "ok": True,
+                    "profile_run_id": run_id,
+                    "status": final_status,
+                    "profile_doc_id": doc.get("profile_doc_id"),
+                    "profile_md_path": str(md_path),
+                    "catalog_count": len(catalog),
+                    "selected_count": len(selected_notes),
+                    "deep_ok_count": ok_n,
+                    "deep_fail_count": fail_n,
+                    "profile_doc": doc,
+                }
 
             # ── 阶段4：深度画像 ──
             deep = await loop.run_in_executor(
@@ -268,7 +437,7 @@ async def run_creator_profile(
                 "profile_run_id": run_id,
                 "light_profile": light,
                 "selection": selection,
-                "selected_notes": _enrich_selected_notes(selected_notes, results),
+                "selected_notes": enriched_notes,
                 "sampled_articles": [
                     {
                         "note_id": a.get("note_id"),
@@ -376,3 +545,277 @@ async def run_creator_profile_by_red_id(
         subscription_id = sub["subscription_id"]
 
     return await run_creator_profile(subscription_id, trigger=trigger)
+
+
+_CHAT_PROFILE_LOCKS: Dict[str, asyncio.Lock] = {}
+_CHAT_CHAIN = "AI对话-小红书人物画像"
+
+
+def _chat_lock_for(red_id: str) -> asyncio.Lock:
+    key = f"xhs:{red_id}"
+    if key not in _CHAT_PROFILE_LOCKS:
+        _CHAT_PROFILE_LOCKS[key] = asyncio.Lock()
+    return _CHAT_PROFILE_LOCKS[key]
+
+
+async def run_xhs_chat_profile(
+    *,
+    red_id: str,
+    display_name: str = "",
+    user_prompt: str = "",
+    creator_id: str = "",
+    profile_url: str = "",
+    min_pick: int = 3,
+    max_pick: int = 5,
+) -> Dict[str, Any]:
+    """AI 对话工具入口：五阶段人物画像（不写订阅库，与订阅画像同链路）。"""
+    import uuid
+
+    rid = (red_id or "").strip()
+    if not rid:
+        return {"ok": False, "error_code": "SUB_RED_ID_INVALID", "error": "请提供小红书号"}
+
+    lock = _chat_lock_for(rid)
+    if lock.locked():
+        return {"ok": False, "error_code": "PROFILE_BUSY", "error": f"小红书号 {rid} 画像任务正在进行"}
+
+    async with lock:
+        run_id = f"chat_profile_{uuid.uuid4().hex[:12]}"
+        up = (user_prompt or "").strip()
+        loop = asyncio.get_event_loop()
+
+        if not creator_id:
+            from .creator_feed_adapter import resolve_xhs_red_id
+
+            try:
+                resolved = await loop.run_in_executor(None, lambda: resolve_xhs_red_id(rid))
+            except Exception as ex:
+                msg = str(ex)
+                code = msg.split(":", 1)[0] if msg.startswith("SUB_") else "SUB_RED_ID_NOT_FOUND"
+                return {"ok": False, "error_code": code, "error": msg}
+
+            creator_id = str(resolved.get("creator_id") or "")
+            profile_url = str(
+                resolved.get("profile_url") or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+            )
+            if not display_name:
+                display_name = str(resolved.get("display_name") or rid)
+        else:
+            profile_url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+            display_name = display_name or rid
+
+        if not creator_id:
+            return {"ok": False, "error_code": "SUB_RED_ID_NOT_FOUND", "error": "未能解析 creator_id"}
+
+        _log.info(
+            "[%s|creator_profile_runner.run_xhs_chat_profile|%s|Agent执行|开始] red_id=%s; creator_id=%s",
+            _CHAT_CHAIN,
+            run_id,
+            rid,
+            creator_id,
+        )
+
+        try:
+            from .xhs_local_browser import ensure_xhs_cookies_synced
+
+            await loop.run_in_executor(None, lambda: ensure_xhs_cookies_synced(force=False))
+
+            adapter = get_feed_adapter("xiaohongshu")
+            catalog_items = await loop.run_in_executor(
+                None,
+                lambda: adapter.fetch_catalog(creator_id, profile_url=profile_url),
+            )
+            catalog = _catalog_to_dicts(catalog_items)
+            if not catalog:
+                raise RuntimeError("PROFILE_CATALOG_EMPTY: 主页未解析到笔记列表，请确认 CDP/Cookie 就绪")
+
+            light = await loop.run_in_executor(
+                None,
+                lambda: build_light_profile(display_name=display_name, red_id=rid, catalog=catalog),
+            )
+            if not light.get("ok"):
+                raise RuntimeError(f"PROFILE_LIGHT_FAILED: {light.get('error')}")
+
+            pick_min = max(1, min(int(min_pick or 3), 10))
+            pick_max = max(pick_min, min(int(max_pick or 5), 10))
+            selection = await loop.run_in_executor(
+                None,
+                lambda: build_note_selection(
+                    display_name=display_name,
+                    light_profile=light,
+                    catalog=catalog,
+                    min_pick=pick_min,
+                    max_pick=pick_max,
+                    user_prompt=up,
+                ),
+            )
+            if not selection.get("ok"):
+                raise RuntimeError(f"PROFILE_SELECT_FAILED: {selection.get('error')}")
+            selected_ids = [str(x) for x in selection.get("selected_note_ids") or []]
+            id_set = set(selected_ids)
+            selected_notes = [it for it in catalog if str(it.get("note_id")) in id_set]
+            if not selected_notes:
+                raise RuntimeError("PROFILE_SELECT_EMPTY: 选篇结果为空")
+
+            from .creator_feed_adapter import resolve_note_links_for_selection
+
+            selected_notes = await loop.run_in_executor(
+                None,
+                lambda: resolve_note_links_for_selection(
+                    selected_notes,
+                    creator_id=creator_id,
+                    profile_url=profile_url,
+                    catalog=catalog,
+                ),
+            )
+
+            per_timeout = int(os.environ.get("PROFILE_ARTICLE_TIMEOUT_SEC", "1800"))
+            results = await asyncio.gather(
+                *[run_article_only_for_note(note=n, timeout_sec=per_timeout) for n in selected_notes],
+                return_exceptions=True,
+            )
+            articles: List[Dict[str, Any]] = []
+            ok_n = 0
+            fail_n = 0
+            for r in results:
+                if isinstance(r, Exception):
+                    fail_n += 1
+                    continue
+                art = str(r.get("article") or "")
+                if r.get("ok") and article_text_usable(art):
+                    articles.append(r)
+                    ok_n += 1
+                else:
+                    fail_n += 1
+
+            if not articles:
+                recovered = _recover_articles_from_pipeline_results(results, selected_notes)
+                if recovered:
+                    articles = recovered
+                    ok_n = len(recovered)
+                    _log.warning(
+                        "[%s|creator_profile_runner.run_xhs_chat_profile|%s|Agent执行|回收摘要] recovered=%s",
+                        _CHAT_CHAIN,
+                        run_id,
+                        ok_n,
+                    )
+
+            enriched_notes = _enrich_selected_notes(selected_notes, results)
+            deep: Dict[str, Any] = {}
+            final_status = "completed"
+
+            if not articles:
+                final_status = "light_only"
+                profile_md = _render_light_only_profile_md(
+                    display_name=display_name,
+                    red_id=rid,
+                    creator_id=creator_id,
+                    profile_run_id=run_id,
+                    light_profile=light,
+                    selection=selection,
+                    selected_notes=enriched_notes,
+                    fetch_fail_count=fail_n,
+                )
+                summary = str(
+                    light.get("markdown_excerpt") or light.get("persona_summary") or ""
+                ).strip()
+            else:
+                deep = await loop.run_in_executor(
+                    None,
+                    lambda: build_deep_profile(
+                        display_name=display_name,
+                        red_id=rid,
+                        light_profile=light,
+                        articles=articles,
+                        user_prompt=up,
+                    ),
+                )
+                if not deep.get("ok"):
+                    raise RuntimeError(f"PROFILE_DEEP_FAILED: {deep.get('error')}")
+                profile_md = render_profile_markdown(
+                    display_name=display_name,
+                    red_id=rid,
+                    creator_id=creator_id,
+                    profile_run_id=run_id,
+                    light_profile=light,
+                    selection=selection,
+                    deep_profile=deep,
+                    selected_notes=enriched_notes,
+                    sampled_articles=articles,
+                )
+                summary = str(deep.get("markdown_body") or deep.get("persona_summary") or "").strip()
+                if not summary:
+                    summary = str(light.get("markdown_excerpt") or light.get("persona_summary") or "")[:2000]
+                final_status = "completed" if fail_n == 0 else "partial"
+
+            safe_name = re.sub(r'[\\/:*?"<>|]', "_", display_name)[:40] or creator_id[:12]
+            out_dir = get_output_dir() / "chat_profiles" / rid
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            md_path = out_dir / f"{safe_name}_profile_{ts}.md"
+            md_path.write_text(profile_md, encoding="utf-8")
+
+            _log.info(
+                "[%s|creator_profile_runner.run_xhs_chat_profile|%s|Agent执行|完成] status=%s; deep_ok=%s; deep_fail=%s",
+                _CHAT_CHAIN,
+                run_id,
+                final_status,
+                ok_n,
+                fail_n,
+            )
+            return {
+                "ok": True,
+                "profile_run_id": run_id,
+                "status": final_status,
+                "red_id": rid,
+                "creator_id": creator_id,
+                "display_name": display_name,
+                "profile_url": profile_url,
+                "profile_md_path": str(md_path),
+                "profile_summary": summary[:6000],
+                "catalog_count": len(catalog),
+                "selected_count": len(selected_notes),
+                "deep_ok_count": ok_n,
+                "deep_fail_count": fail_n,
+                "selected_notes": [
+                    {
+                        "note_id": n.get("note_id"),
+                        "title": n.get("title"),
+                        "canonical_url": n.get("canonical_url"),
+                        "pipeline_url": n.get("pipeline_url"),
+                        "doc_path": n.get("doc_path"),
+                        "fetch_ok": n.get("fetch_ok"),
+                    }
+                    for n in enriched_notes
+                ],
+                "light_profile": {
+                    k: light.get(k)
+                    for k in ("industry", "domain", "niche", "persona_summary", "content_style")
+                },
+                "deep_profile": {
+                    k: deep.get(k)
+                    for k in (
+                        "persona_summary",
+                        "target_audience",
+                        "content_style",
+                        "recent_topics",
+                        "confidence",
+                    )
+                }
+                if deep
+                else {},
+            }
+
+        except Exception as ex:
+            msg = str(ex)
+            code = "PROFILE_FAILED"
+            if "PROFILE_" in msg:
+                code = msg.split(":", 1)[0]
+            _log.error(
+                "[%s|creator_profile_runner.run_xhs_chat_profile|%s|Agent执行|失败] error_code=%s; error=%s",
+                _CHAT_CHAIN,
+                run_id,
+                code,
+                msg,
+            )
+            return {"ok": False, "profile_run_id": run_id, "error_code": code, "error": msg}

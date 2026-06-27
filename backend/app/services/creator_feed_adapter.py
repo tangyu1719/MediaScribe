@@ -191,183 +191,25 @@ def _post_search_usersearch(sess: requests.Session, red_id: str) -> Optional[Dic
 def resolve_xhs_red_id(red_id: str, *, display_name: str = "") -> Dict[str, Any]:
     """
     将「小红书号」解析为内部 user_id 与 profile_url。
-    依赖有效 Cookie（backend/output/.xhs_cookies.json 或 SBA_XHS_COOKIE）。
+    策略：CDP 浏览器优先（不依赖 JSON Cookie）→ HTTP+JSON 缓存 → 本机 Chrome 兜底。
     """
-    red_id = (red_id or "").strip()
-    if not red_id:
-        raise ValueError("SUB_INVALID_URL")
-    # 已是 24 位 hex 主页 id 则直接返回
-    if re.fullmatch(r"[a-f0-9]{24}", red_id, re.I):
-        return {
-            "creator_id": red_id,
-            "display_name": red_id,
-            "profile_url": f"https://www.xiaohongshu.com/user/profile/{red_id}",
-            "red_id": red_id,
-            "source": "direct_hex_id",
-        }
+    from .xhs_local_browser import resolve_red_id_via_local_chrome
+    from .xhs_red_id_resolve import orchestrate_resolve_xhs_red_id
+    from .xhs_stateless import record_cookie_attempt, resolve_red_id_stateless, should_use_stateless
 
-    adapter = XiaohongshuFeedAdapter()
-    sess = adapter._session()
-    from .cookie_manager import load_cookies
-    from .xhs_session import require_xhs_logged_in
-
-    cookies = load_cookies("xiaohongshu") or {}
-    if not cookies:
-        raise RuntimeError(
-            "SUB_FETCH_AUTH_FAILED: 无小红书 Cookie，请配置 backend/output/.xhs_cookies.json"
-        )
-
-    override = (os.environ.get("TEST_XHS_CREATOR_ID") or "").strip()
-    if override and re.fullmatch(r"[a-f0-9]{24}", override, re.I):
-        _log.warning(
-            "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|硬编执行|兜底] "
-            "使用 TEST_XHS_CREATOR_ID; red_id=%s; creator_id=%s",
-            _CHAIN_RESOLVE,
-            red_id,
-            red_id,
-            override,
-        )
-        return {
-            "creator_id": override,
-            "display_name": red_id,
-            "profile_url": f"https://www.xiaohongshu.com/user/profile/{override}",
-            "red_id": red_id,
-            "source": "env_test_creator_id",
-        }
-
-    from .xhs_session import probe_xhs_session
-    from .xhs_stateless import (
-        cookie_attempts,
-        record_cookie_attempt,
-        resolve_red_id_stateless,
-        should_use_stateless,
+    return orchestrate_resolve_xhs_red_id(
+        red_id,
+        display_name=display_name,
+        post_search_usersearch=_post_search_usersearch,
+        find_user_by_red_id_in_obj=_find_user_by_red_id_in_obj,
+        user_dict_to_resolved=_user_dict_to_resolved,
+        parse_init_state=_parse_init_state,
+        is_suspicious_xhs_creator_id=_is_suspicious_xhs_creator_id,
+        resolve_red_id_via_local_chrome=resolve_red_id_via_local_chrome,
+        resolve_red_id_stateless=resolve_red_id_stateless,
+        should_use_stateless=should_use_stateless,
+        record_cookie_attempt=record_cookie_attempt,
     )
-
-    if should_use_stateless():
-        return resolve_red_id_stateless(red_id, display_name=display_name)
-
-    probe = probe_xhs_session(sess)
-    if probe.get("guest") or not probe.get("logged_in"):
-        from .xhs_local_browser import refresh_xhs_cookies_from_system
-
-        refresh_xhs_cookies_from_system()
-        cookies = load_cookies("xiaohongshu") or {}
-        for k, v in cookies.items():
-            sess.cookies.set(k, v, domain=".xiaohongshu.com")
-        probe = probe_xhs_session(sess)
-    if probe.get("guest") or not probe.get("logged_in"):
-        from .xhs_stateless import _MAX_ATTEMPTS as _max_att
-        from .xhs_local_browser import resolve_red_id_via_local_chrome
-
-        _log.info(
-            "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|Agent执行|回退] "
-            "Cookie 非登录态，尝试本机 Chrome（最多 %s 次后无状态）; red_id=%s",
-            _CHAIN_RESOLVE,
-            red_id,
-            _max_att,
-            red_id,
-        )
-        try:
-            got = resolve_red_id_via_local_chrome(red_id)
-            record_cookie_attempt(ok=True)
-            return got
-        except Exception as ex:
-            record_cookie_attempt(ok=False)
-            if should_use_stateless():
-                return resolve_red_id_stateless(red_id, display_name=display_name)
-            raise RuntimeError(
-                f"SUB_XHS_COOKIE_UNAVAILABLE: Chrome Cookie 获取失败（已尝试 {cookie_attempts()} 次）: {ex}"
-            ) from ex
-
-    require_xhs_logged_in(sess)
-
-    # 1) 官方 POST usersearch（与前端 searchUserRequest 一致）
-    api_data = _post_search_usersearch(sess, red_id)
-    if api_data:
-        hit = _find_user_by_red_id_in_obj(api_data, red_id)
-        if hit:
-            _log.info(
-                "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|Agent执行|解析] "
-                "小红书号解析成功; source=usersearch_api; red_id=%s",
-                _CHAIN_RESOLVE,
-                red_id,
-                red_id,
-            )
-            return _user_dict_to_resolved(hit, red_id, "usersearch_api")
-
-    # 2) 搜索页 HTML / INITIAL_STATE（部分环境 SSR 会带上 userLists）
-    r = sess.get(
-        f"https://www.xiaohongshu.com/search_result?keyword={red_id}&type=user",
-        timeout=30,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"SUB_PROFILE_UNREACHABLE: search HTTP {r.status_code}")
-    state = _parse_init_state(r.text)
-    if state:
-        hit = _find_user_by_red_id_in_obj(state, red_id)
-        if hit:
-            return _user_dict_to_resolved(hit, red_id, "search_init_state")
-
-        blob = json.dumps(state, ensure_ascii=False)
-        m = re.search(
-            rf'"redId"\s*:\s*"{re.escape(red_id)}".{{0,1200}}?"id"\s*:\s*"([a-f0-9]{{24}})"',
-            blob,
-            re.S,
-        )
-        if not m:
-            m = re.search(
-                rf'"id"\s*:\s*"([a-f0-9]{{24}})".{{0,1200}}?"redId"\s*:\s*"{re.escape(red_id)}"',
-                blob,
-                re.S,
-            )
-        if m:
-            uid = m.group(1)
-            if _is_suspicious_xhs_creator_id(uid):
-                _log.warning(
-                    "[%s|creator_feed_adapter.resolve_xhs_red_id|%s|硬编执行|拒绝] "
-                    "搜索页正则命中可疑 user_id; uid=%s",
-                    _CHAIN_RESOLVE,
-                    red_id,
-                    uid,
-                )
-            else:
-                return {
-                    "creator_id": uid,
-                    "display_name": red_id,
-                    "profile_url": f"https://www.xiaohongshu.com/user/profile/{uid}",
-                    "red_id": red_id,
-                    "source": "search_init_state_regex",
-                }
-
-    try:
-        from .xhs_local_browser import resolve_red_id_via_local_chrome
-        from .xhs_stateless import record_cookie_attempt, resolve_red_id_stateless, should_use_stateless
-
-        if should_use_stateless():
-            return resolve_red_id_stateless(red_id, display_name=display_name)
-        try:
-            got = resolve_red_id_via_local_chrome(red_id)
-            record_cookie_attempt(ok=True)
-            return got
-        except Exception as ex2:
-            record_cookie_attempt(ok=False)
-            if should_use_stateless():
-                return resolve_red_id_stateless(red_id)
-            raise RuntimeError(
-                f"SUB_RED_ID_NOT_FOUND: 未找到小红书号 {red_id} 对应的用户（{ex2}）。"
-                "请确认号正确；或在 App 打开博主主页复制 profile 链接（含 24 位 user_id）直接订阅。"
-            ) from ex2
-    except RuntimeError:
-        raise
-    except Exception as ex:
-        from .xhs_stateless import resolve_red_id_stateless, should_use_stateless
-
-        if should_use_stateless():
-            return resolve_red_id_stateless(red_id, display_name=display_name)
-        raise RuntimeError(
-            f"SUB_RED_ID_NOT_FOUND: 未找到小红书号 {red_id} 对应的用户（{ex}）。"
-            "请确认号正确；或在 App 打开博主主页复制 profile 链接（含 24 位 user_id）直接订阅。"
-        ) from ex
 
 
 def _note_type_to_content(note: Dict[str, Any]) -> str:
@@ -919,21 +761,25 @@ def resolve_note_links_for_selection(
         note = dict(n)
         old_url = str(note.get("canonical_url") or "")
         resolved = url_map.get(nid) or old_url or _build_note_url(nid, "")
+        has_token = "xsec_token" in resolved
         note["canonical_url"] = resolved
-        note["pipeline_url"] = resolved
+        note["pipeline_url"] = resolved if has_token else ""
         if resolved != old_url:
             note["link_source"] = "profile_page"
-        elif "xsec_token" in resolved:
+        elif has_token:
             note["link_source"] = "catalog_token"
         else:
             note["link_source"] = "bare_explore"
+        note["link_resolved"] = has_token
+        note["link_error"] = "" if has_token else "missing_xsec_token"
         out.append(note)
         _log.info(
             "[社媒订阅-博主Feed|resolve_note_links_for_selection|note:%s|Agent执行|链接] "
-            "source=%s; has_token=%s; url=%s",
+            "source=%s; has_token=%s; link_resolved=%s; url=%s",
             nid[:8],
             note.get("link_source"),
-            "xsec_token" in resolved,
+            has_token,
+            note.get("link_resolved"),
             resolved[:120],
         )
     return out

@@ -247,6 +247,7 @@ def warm_xhs_owner_session_via_cdp(
 def cdp_extract_note_author(link: str, *, timeout_sec: float = 20.0) -> tuple:
     """通过 CDP 打开小红书笔记页面，从渲染后的 DOM 提取作者昵称和 ID。"""
     from .cookie_manager import find_cdp_port, load_cookies
+    from .file_naming import is_generic_author_name
     from .xhs_local_browser import cdp_list_tabs, cdp_tab_get_html
 
     port = find_cdp_port()
@@ -272,6 +273,8 @@ def cdp_extract_note_author(link: str, *, timeout_sec: float = 20.0) -> tuple:
             m = re.search(r'<span[^>]+class="username"[^>]*>([^<]+)</span>', html)
             if m:
                 author_name = m.group(1).strip()
+                if is_generic_author_name(author_name):
+                    author_name = ""
             # userId from link: /user/profile/<userId>
             m2 = re.search(r'/user/profile/([a-f0-9]{24})', html)
             if m2:

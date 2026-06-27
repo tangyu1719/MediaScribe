@@ -597,6 +597,98 @@ def is_cdp_ready(port: Optional[int] = None) -> bool:
         return False
 
 
+def is_sba_cdp_chrome_running() -> bool:
+    """是否有使用 SBA-Chrome-CDP 目录且带 remote-debugging-port 的 Chrome 主进程。"""
+    marker = str(cdp_chrome_user_data_dir()).lower()
+    try:
+        r = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -notmatch '--type=' } | "
+                "ForEach-Object { $_.CommandLine }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        for line in (r.stdout or "").splitlines():
+            cl = line.strip().lower()
+            if marker in cl and "remote-debugging-port" in cl:
+                return True
+    except Exception as ex:
+        _log.debug("is_sba_cdp_chrome_running skip: %s", ex)
+    return False
+
+
+def ensure_sba_cdp_chrome_running(*, wait_sec: float = 45.0) -> int:
+    """
+    确保独立 SBA-Chrome-CDP 在 DEFAULT_CDP_PORT 监听。
+    可与日常 Chrome 并存；attach-only 下也允许（不杀、不碰默认 User Data）。
+    """
+    port = DEFAULT_CDP_PORT
+    if is_cdp_ready(port):
+        _log.info(
+            "[%s|chrome_profile_prep.ensure_sba_cdp_chrome|CDP|硬编执行|已就绪] port=%s",
+            _CHAIN,
+            port,
+        )
+        return port
+
+    cdp_lnk = Path(os.environ.get("USERPROFILE", "")) / "Desktop" / "Google Chrome CDP 9223.lnk"
+    launched = False
+
+    if cdp_lnk.is_file() and not is_sba_cdp_chrome_running():
+        _log.info(
+            "[%s|chrome_profile_prep.ensure_sba_cdp_chrome|Chrome|硬编执行|快捷方式] path=%s",
+            _CHAIN,
+            cdp_lnk,
+        )
+        os.startfile(str(cdp_lnk))
+        launched = True
+    elif not is_sba_cdp_chrome_running():
+        bootstrap = bootstrap_cdp_profile_from_owner()
+        if not bootstrap.get("ok") and bootstrap.get("error_code") == "CHROME_STILL_RUNNING":
+            # Profile 已存在时可忽略；不存在且 Chrome 占用锁则无法复制
+            dest_prof = cdp_chrome_user_data_dir() / "Default"
+            if not dest_prof.is_dir() or not any(dest_prof.iterdir()):
+                raise RuntimeError(
+                    "SUB_XHS_CDP_REQUIRED: 首次需完全退出 Chrome 以复制 Profile 到 SBA-Chrome-CDP，"
+                    "或手动运行 _launch_cdp.ps1"
+                )
+        exe = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        if not Path(exe).is_file():
+            exe = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+        cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+        start_url = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
+        run = _launch_chrome_exe(exe, chrome_cdp_launch_tokens(port=port), initial_url=start_url)
+        if not run.get("ok"):
+            raise RuntimeError(run.get("error") or "SBA-Chrome-CDP 启动失败")
+        launched = True
+        _log.info(
+            "[%s|chrome_profile_prep.ensure_sba_cdp_chrome|Chrome|硬编执行|冷启动] port=%s",
+            _CHAIN,
+            port,
+        )
+
+    if launched or is_sba_cdp_chrome_running():
+        if _wait_cdp_ready(port, wait_sec):
+            dismiss_chrome_restore_prompt(port)
+            _log.info(
+                "[%s|chrome_profile_prep.ensure_sba_cdp_chrome|CDP|硬编执行|完成] port=%s",
+                _CHAIN,
+                port,
+            )
+            return port
+
+    raise RuntimeError(
+        f"SUB_XHS_CDP_REQUIRED: SBA-Chrome-CDP 启动后 {wait_sec}s 内 CDP {port} 未就绪；"
+        "请确认 Chrome 未崩溃，并在 CDP 窗口登录小红书。"
+    )
+
+
 def is_chrome_process_running() -> bool:
     import subprocess
 

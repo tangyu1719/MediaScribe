@@ -125,39 +125,22 @@ def assert_page_not_xhs_login(page, *, action: str = "") -> None:
 
 
 def _start_owner_chrome_via_shortcut() -> bool:
-    """通过桌面 CDP 快捷方式启动 Chrome（仅当 Chrome 未运行时）。"""
-    cfg = _browser_config_chrome()
-    if _browser_running(cfg):
-        _log.warning("[%s|start_cdp_shortcut|硬编执行|跳过] Chrome 已在运行，不重复启动", _CHAIN)
-        return False
+    """拉起 CDP Chrome（SBA-Chrome-CDP 独立实例，可与日常 Chrome 并存）。"""
+    from .chrome_profile_prep import ensure_sba_cdp_chrome_running, is_cdp_ready
 
-    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
-    shortcut = desktop / "Google Chrome CDP 9223.lnk"
-    if shortcut.is_file():
-        _log.info("[%s|start_cdp_shortcut|硬编执行|启动] 打开桌面快捷方式", _CHAIN)
-        os.startfile(str(shortcut))
+    if is_cdp_ready(CDP_PORT):
         return True
-    # 快捷方式不存在 → 仅非 attach-only 时冷启动 CDP Chrome（独立 SBA-Chrome-CDP 目录）
-    if xhs_cdp_attach_only():
-        _log.warning("[%s|start_cdp_shortcut|硬编执行|拒绝] attach-only 禁止冷启动 Chrome", _CHAIN)
+    try:
+        ensure_sba_cdp_chrome_running(wait_sec=45.0)
+        return True
+    except Exception as ex:
+        _log.warning(
+            "[%s|start_cdp_shortcut|硬编执行|失败] error_type=%s; error_message=%s",
+            _CHAIN,
+            type(ex).__name__,
+            str(ex)[:200],
+        )
         return False
-    _log.warning("[%s|start_cdp_shortcut|硬编执行|回退] 关闭 CDP Chrome 后用 SBA-Chrome-CDP 启动", _CHAIN)
-    _close_browser(cfg)
-    time.sleep(3)
-    from .chrome_profile_prep import bootstrap_cdp_profile_from_owner, cdp_chrome_user_data_dir
-
-    bootstrap_cdp_profile_from_owner()
-    profile = str(cdp_chrome_user_data_dir())
-    ps_script = (
-        f"Start-Process -FilePath '{cfg.exe}' -ArgumentList @("
-        f"'--remote-debugging-port={CDP_PORT}',"
-        f"'--remote-allow-origins=*',"
-        f"'--user-data-dir={profile}',"
-        f"'--profile-directory=Default'"
-        f")"
-    )
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, timeout=15)
-    return True
 
 
 def require_cdp_port() -> int:
@@ -703,17 +686,41 @@ def _cookies_from_context(context) -> Dict[str, str]:
     return out
 
 
+def _xhs_user_search_urls(red_id: str) -> List[str]:
+    """小红书用户搜索 URL 变体（type=user / type=51 / 无 type，与前端实际跳转对齐）。"""
+    from urllib.parse import quote
+
+    kw = quote(str(red_id or "").strip(), safe="")
+    return [
+        f"https://www.xiaohongshu.com/search_result?keyword={kw}&type=user",
+        f"https://www.xiaohongshu.com/search_result?keyword={kw}&type=51",
+        f"https://www.xiaohongshu.com/search_result?keyword={kw}",
+    ]
+
+
 def _search_on_page(page, red_id: str, *, attempt: int = 1) -> Tuple[List[Dict], List[str], Optional[Dict]]:
-    """在**当前标签**内搜索用户；直接打开 type=user 搜索页，不再先跳 explore（避免页面来回闪）。"""
-    search_url = f"https://www.xiaohongshu.com/search_result?keyword={red_id}&type=user"
+    """在**当前标签**内搜索用户；依次尝试 type=user / type=51 / 无 type。"""
+    search_urls = _xhs_user_search_urls(red_id)
+    search_url = search_urls[0]
     api_payloads: List[Dict[str, Any]] = []
     profile_ids: List[str] = []
 
     page.bring_to_front()
     cur = page.url or ""
-    if search_url not in cur and red_id not in cur:
-        page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
-        time.sleep(2.5)
+    if red_id not in cur or "search_result" not in cur:
+        navigated = False
+        for candidate in search_urls:
+            try:
+                page.goto(candidate, wait_until="domcontentloaded", timeout=120000)
+                time.sleep(2.5)
+                navigated = True
+                search_url = candidate
+                break
+            except Exception:
+                continue
+        if not navigated:
+            page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
+            time.sleep(2.5)
     _dismiss_xhs_login_modal(page, attempt=attempt)
 
     if "/login" in (page.url or ""):
@@ -803,6 +810,42 @@ def _search_on_page(page, red_id: str, *, attempt: int = 1) -> Tuple[List[Dict],
             state = _parse_init_state(page.content())
     except Exception:
         pass
+
+    # 首屏未命中时，依次尝试 type=51 / 无 type（与用户浏览器实际 URL 对齐）
+    if not profile_ids and not api_payloads:
+        for alt_url in search_urls[1:]:
+            if alt_url == search_url:
+                continue
+            try:
+                if page.is_closed():
+                    break
+                page.goto(alt_url, wait_until="domcontentloaded", timeout=90000)
+                time.sleep(2.0)
+                _dismiss_xhs_login_modal(page, attempt=attempt)
+                try:
+                    page.wait_for_selector("a[href*='/user/profile/']", timeout=20000)
+                except Exception:
+                    pass
+                hrefs = page.eval_on_selector_all(
+                    "a[href*='/user/profile/']",
+                    "els => els.map(e => e.getAttribute('href')).filter(Boolean)",
+                )
+                for h in hrefs or []:
+                    m = re.search(r"/user/profile/([a-f0-9]{24})", h or "", re.I)
+                    if m:
+                        profile_ids.append(m.group(1))
+                if profile_ids:
+                    break
+                st2 = _parse_init_state(page.content())
+                if st2:
+                    state = st2
+                    from .creator_feed_adapter import _find_user_by_red_id_in_obj
+
+                    if _find_user_by_red_id_in_obj(st2, red_id):
+                        break
+            except Exception as ex:
+                _log.debug("[%s|search|Agent执行|alt_url] %s", _CHAIN, ex)
+
     return api_payloads, profile_ids, state
 
 
@@ -1047,7 +1090,7 @@ def _resolve_with_persistent_chrome(red_id: str) -> Dict[str, Any]:
 
 
 def _resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
-    """CDP attach（connect_over_cdp）— 附着本机 Edge/Chrome，单次导航，无自动化横幅。"""
+    """CDP attach（connect_over_cdp）— 附着本机 Edge/Chrome，优先复用已有搜索标签。"""
     from playwright.sync_api import sync_playwright
 
     last_err: Optional[Exception] = None
@@ -1057,6 +1100,27 @@ def _resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
                 context = browser.contexts[0] if browser.contexts else browser.new_context()
+
+                # 优先：用户已打开的搜索页（含 keyword=red_id）
+                for pg in context.pages:
+                    url = pg.url or ""
+                    if red_id in url and "search_result" in url and not pg.is_closed():
+                        try:
+                            api_payloads, profile_ids, state = _search_on_page(
+                                pg, red_id, attempt=attempt
+                            )
+                            got = _pick_result(api_payloads, profile_ids, state, red_id)
+                            if got:
+                                _log.info(
+                                    "[%s|resolve|Agent执行|复用标签] creator_id=%s; url=%s",
+                                    _CHAIN,
+                                    got["creator_id"],
+                                    url[:100],
+                                )
+                                return got
+                        except Exception as ex:
+                            _log.debug("[%s|resolve|Agent执行|复用标签失败] %s", _CHAIN, ex)
+
                 page = context.new_page()
                 page.bring_to_front()
 
@@ -1102,8 +1166,40 @@ def _resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
                     pass
 
     if last_err:
-        raise last_err
+        from .tool_chat_resilience import extract_error_code
+
+        code = extract_error_code(str(last_err))
+        if code == "SUB_RED_ID_NOT_FOUND":
+            raise last_err
+        raise RuntimeError(
+            f"SUB_XHS_CDP_SEARCH_FAILED: CDP 搜索小红书号 {red_id} 失败: {last_err}"
+        ) from last_err
     raise RuntimeError(f"SUB_RED_ID_NOT_FOUND: 本机浏览器中未找到小红书号 {red_id}")
+
+
+def _run_sync_off_asyncio_loop(fn, /, *args, **kwargs):
+    """Playwright sync_api 不能在 asyncio 事件循环线程内调用，必要时切到独立线程。"""
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+        in_async = True
+    except RuntimeError:
+        in_async = False
+
+    if not in_async:
+        return fn(*args, **kwargs)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="xhs_pw_sync"
+    ) as pool:
+        return pool.submit(lambda: fn(*args, **kwargs)).result()
+
+
+def resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
+    """CDP attach 解析 red_id；在 asyncio 协程链路内自动线程隔离。"""
+    return _run_sync_off_asyncio_loop(_resolve_with_cdp_playwright, red_id, port)
 
 
 def refresh_xhs_cookies_cdp_only() -> Dict[str, Any]:
@@ -1166,6 +1262,41 @@ def refresh_xhs_cookies_cdp_only() -> Dict[str, Any]:
         "cdp_port": port,
         "xhs_live": live,
     }
+
+
+def ensure_xhs_cookies_synced(*, force: bool = False) -> Dict[str, Any]:
+    """
+    与 UI「从 Chrome 同步 Cookie」对齐：优先 CDP 附着同步，再回退 from_system。
+    浏览器已登录 ≠ 磁盘 .xhs_cookies.json 已就绪，小红书工具调用前应走本函数。
+    """
+    existing = load_cookies("xiaohongshu") or {}
+    probe = probe_xhs_cookies_logged_in(existing)
+    if probe.get("logged_in") and not force:
+        return {
+            "ok": True,
+            "logged_in": True,
+            "source": "file_cache",
+            "count": len(existing),
+            "nickname": probe.get("nickname") or "",
+        }
+
+    cdp_result = refresh_xhs_cookies_cdp_only()
+    if cdp_result.get("logged_in"):
+        return cdp_result
+
+    after = load_cookies("xiaohongshu") or {}
+    probe_after = probe_xhs_cookies_logged_in(after)
+    if probe_after.get("logged_in"):
+        return {
+            "ok": True,
+            "logged_in": True,
+            "source": "file_after_cdp_sync",
+            "count": len(after),
+            "nickname": probe_after.get("nickname") or "",
+            "cdp_attempt": cdp_result,
+        }
+
+    return refresh_xhs_cookies_from_system()
 
 
 def refresh_xhs_cookies_from_system() -> Dict[str, Any]:
@@ -1298,17 +1429,13 @@ def refresh_xhs_cookies_from_system() -> Dict[str, Any]:
 
 
 def _resolve_red_id_via_local_chrome_sync(red_id: str, *, port: int = CDP_PORT) -> Dict[str, Any]:
-    """本机 Chrome 解析：CDP / Cookie 同步 / Playwright 持久化配置。"""
+    """本机 Chrome 解析：CDP 优先（不依赖 JSON）→ HTTP session → Playwright 持久化。"""
+    from .cookie_manager import load_cookies
+    from .tool_chat_resilience import extract_error_code
+
     red_id = (red_id or "").strip()
     if not red_id:
         raise ValueError("SUB_INVALID_URL")
-
-    refresh_xhs_cookies_from_system()
-    fresh = load_cookies("xiaohongshu") or {}
-    if fresh:
-        got = _resolve_red_id_with_session(red_id, fresh)
-        if got:
-            return got
 
     cdp_port = find_cdp_port()
     if not cdp_port:
@@ -1317,12 +1444,44 @@ def _resolve_red_id_via_local_chrome_sync(red_id: str, *, port: int = CDP_PORT) 
                 cdp_port = _ensure_cdp_port(cfg, port)
                 if cdp_port:
                     break
+    if not cdp_port or not _cdp_ready(cdp_port or port):
+        if _start_owner_chrome_via_shortcut():
+            for _ in range(20):
+                time.sleep(2)
+                cdp_port = find_cdp_port()
+                if cdp_port and _cdp_ready(cdp_port):
+                    break
     cdp_port = cdp_port or port
+
+    cdp_tried = False
+    cdp_last_err: Optional[Exception] = None
+
     if _cdp_ready(cdp_port):
+        cdp_tried = True
         try:
             return _resolve_with_cdp_playwright(red_id, cdp_port)
         except ImportError as ex:
             raise RuntimeError("SUB_XHS_BROWSER_UNAVAILABLE: 未安装 playwright") from ex
+        except RuntimeError as ex:
+            code = extract_error_code(str(ex))
+            if code == "SUB_RED_ID_NOT_FOUND":
+                raise
+            cdp_last_err = ex
+        except Exception as ex:
+            cdp_last_err = ex
+
+    # HTTP session（JSON Cookie 缓存，可选）
+    fresh = load_cookies("xiaohongshu") or {}
+    if fresh:
+        got = _resolve_red_id_with_session(red_id, fresh)
+        if got:
+            return got
+    sync_res = ensure_xhs_cookies_synced()
+    fresh = load_cookies("xiaohongshu") or {}
+    if fresh and sync_res.get("logged_in"):
+        got = _resolve_red_id_with_session(red_id, fresh)
+        if got:
+            return got
 
     if not _skip_chrome_ui():
         try:
@@ -1333,31 +1492,37 @@ def _resolve_red_id_via_local_chrome_sync(red_id: str, *, port: int = CDP_PORT) 
             _log.warning("[%s|resolve|Agent执行|持久化Chrome失败] %s", _CHAIN, ex)
 
     if _chrome_running():
-        search_url = f"https://www.xiaohongshu.com/search_result?keyword={red_id}&type=user"
-        _open_tab_in_user_chrome(search_url)
+        for _su in _xhs_user_search_urls(red_id)[:2]:
+            _open_tab_in_user_chrome(_su)
+            break
+
+    if not _cdp_ready(cdp_port):
+        raise RuntimeError(
+            f"SUB_XHS_CDP_REQUIRED: CDP 未就绪。请用「Google Chrome CDP 9223」打开已登录的小红书页面"
+            f"（--remote-debugging-port={cdp_port}）。"
+        )
+    if cdp_tried:
+        if cdp_last_err:
+            code = extract_error_code(str(cdp_last_err))
+            if code:
+                raise RuntimeError(str(cdp_last_err)) from cdp_last_err
+            raise RuntimeError(
+                f"SUB_XHS_CDP_SEARCH_FAILED: CDP 已连接但未解析到小红书号 {red_id}: {cdp_last_err}"
+            ) from cdp_last_err
+        raise RuntimeError(
+            f"SUB_RED_ID_NOT_FOUND: 本机 CDP Chrome 中未找到小红书号 {red_id}。"
+            "请确认号正确，或在浏览器打开该号的搜索结果页后重试。"
+        )
 
     raise RuntimeError(
-        "SUB_XHS_COOKIE_UNAVAILABLE: 本机 Chrome Cookie 读取失败。"
-        "请在本机 Chrome 登录小红书，或设置 Chrome 启动参数 --remote-debugging-port=9223"
+        f"SUB_XHS_CDP_REQUIRED: 无法附着 CDP Chrome（port={cdp_port}）。"
+        "请打开 CDP Chrome 并登录小红书。"
     )
 
 
 def resolve_red_id_via_local_chrome(red_id: str, *, port: int = CDP_PORT) -> Dict[str, Any]:
     """本机 Chrome 解析小红书号；若在 asyncio 循环内则切到线程池执行。"""
-    import asyncio
-    import concurrent.futures
-
-    try:
-        asyncio.get_running_loop()
-        in_async = True
-    except RuntimeError:
-        in_async = False
-
-    if not in_async:
-        return _resolve_red_id_via_local_chrome_sync(red_id, port=port)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_resolve_red_id_via_local_chrome_sync, red_id, port=port).result()
+    return _run_sync_off_asyncio_loop(_resolve_red_id_via_local_chrome_sync, red_id, port=port)
 
 
 def _sync_cookies_from_browser_sync(cfg: BrowserConfig, *, port: int = CDP_PORT) -> Dict[str, str]:
@@ -3893,17 +4058,4 @@ def fetch_catalog_via_browser(
 
 
 def sync_cookies_from_local_chrome(*, port: int = CDP_PORT) -> Dict[str, str]:
-    import asyncio
-    import concurrent.futures
-
-    try:
-        asyncio.get_running_loop()
-        in_async = True
-    except RuntimeError:
-        in_async = False
-
-    if not in_async:
-        return _sync_cookies_from_local_chrome_sync(port=port)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_sync_cookies_from_local_chrome_sync, port=port).result()
+    return _run_sync_off_asyncio_loop(_sync_cookies_from_local_chrome_sync, port=port)

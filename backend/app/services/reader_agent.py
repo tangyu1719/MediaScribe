@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -42,6 +43,112 @@ _COLOR_MARKER_FOOTER_RE = re.compile(
 )
 
 
+def _doc_content_fingerprint(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_doc_text_for_chat(
+    *,
+    doc_name: str,
+    doc_text: str,
+    doc_version: Optional[int] = None,
+    local_revision: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    文档预读：按磁盘 mtime 版本决定是否重读 output 文件。
+
+    - doc_version：客户端已知的磁盘 mtime（毫秒）
+    - local_revision：编辑器未保存修订计数；>0 时优先使用客户端 doc_text
+    """
+    client_text = _strip_color_marker_footer(doc_text or "")
+    name = (doc_name or "").strip()
+    out: Dict[str, Any] = {
+        "text": client_text,
+        "version": int(doc_version or 0),
+        "refreshed": False,
+        "source": "client",
+    }
+    if not name:
+        return out
+    try:
+        from .output_file_io import output_file_mtime_ms, read_output_file, safe_output_basename
+
+        base = safe_output_basename(name)
+    except ValueError:
+        return out
+
+    disk_mtime = output_file_mtime_ms(base)
+    if disk_mtime is None:
+        return out
+
+    has_unsaved = int(local_revision or 0) > 0
+
+    def _load_disk_body() -> str:
+        payload = read_output_file(base)
+        return _strip_color_marker_footer(str(payload.get("content") or ""))
+
+    try:
+        if disk_mtime > int(doc_version or 0):
+            if has_unsaved:
+                # 磁盘已更新但编辑器有未保存内容：仍用客户端正文，仅同步版本号供下次比对
+                out["version"] = disk_mtime
+                out["source"] = "client_unsaved_over_disk"
+                _LOG.info(
+                    "[辅助阅读-文档预读|reader_agent.resolve_doc_text_for_chat|%s|硬编执行|跳过磁盘] "
+                    "local_revision=%s; disk_mtime=%s; client_version=%s",
+                    base,
+                    local_revision,
+                    disk_mtime,
+                    doc_version,
+                )
+                return out
+            disk_body = _load_disk_body()
+            out.update(
+                text=disk_body,
+                version=disk_mtime,
+                refreshed=True,
+                source="disk_mtime",
+            )
+            _LOG.info(
+                "[辅助阅读-文档预读|reader_agent.resolve_doc_text_for_chat|%s|硬编执行|重读磁盘] "
+                "disk_mtime=%s; client_version=%s; chars=%s",
+                base,
+                disk_mtime,
+                doc_version,
+                len(disk_body),
+            )
+            return out
+
+        if not has_unsaved:
+            disk_body = _load_disk_body()
+            if _doc_content_fingerprint(disk_body) != _doc_content_fingerprint(client_text):
+                out.update(
+                    text=disk_body,
+                    version=disk_mtime,
+                    refreshed=True,
+                    source="disk_hash",
+                )
+                _LOG.info(
+                    "[辅助阅读-文档预读|reader_agent.resolve_doc_text_for_chat|%s|硬编执行|哈希不一致重读] "
+                    "chars=%s",
+                    base,
+                    len(disk_body),
+                )
+                return out
+
+        out["version"] = disk_mtime
+    except Exception as ex:
+        _LOG.warning(
+            "[辅助阅读-文档预读|reader_agent.resolve_doc_text_for_chat|%s|硬编执行|重读失败] "
+            "error_type=%s; error_message=%s",
+            base,
+            type(ex).__name__,
+            ex,
+        )
+        out["version"] = disk_mtime
+    return out
+
+
 def _default_agent_layers() -> Dict[str, str]:
     return {
         "reader_system_prompt": (
@@ -62,6 +169,7 @@ def _default_agent_layers() -> Dict[str, str]:
             "用户粘贴段落+追问时，只答该段与追问，勿复述无关章节；"
             "能从段落逻辑推出的就直说，勿用「文档未直接解答」敷衍；"
             "若文档未涉及则一句点明；开启 RAG/联网时区分「文档」与「外部资料」。"
+            "【当前文档】在每次提问前会按磁盘版本自动同步，以最新正文为准，勿声称只能看到旧快照。"
         ),
         "reader_output_template": (
             "默认口语直答：2~6 句或短条目，像同事讲解。"
@@ -377,6 +485,8 @@ async def stream_reader_chat(
     web_search: bool = False,
     deep_think: bool = False,
     model: Optional[str] = None,
+    doc_version: Optional[int] = None,
+    local_revision: Optional[int] = None,
 ) -> AsyncIterator[str]:
     """SSE：即时反馈 + 预取/思考并行，首字尽快输出（与 AI 对话 RAG/联网同源）。"""
     trace_id = uuid.uuid4().hex[:12]
@@ -403,6 +513,29 @@ async def stream_reader_chat(
             "error": "未配置 LLM：请在 config.json 填写 volcengine_api_key 与 ai_chat_model",
         })
         return
+
+    doc_res = resolve_doc_text_for_chat(
+        doc_name=doc_name,
+        doc_text=doc_text,
+        doc_version=doc_version,
+        local_revision=local_revision,
+    )
+    doc_text = str(doc_res.get("text") or "")
+    if not doc_text.strip():
+        yield _sse("error", {"trace_id": trace_id, "error": "文档正文为空，请先打开或保存文档"})
+        return
+    if doc_res.get("refreshed"):
+        yield _sse(
+            "doc_snapshot_refreshed",
+            {
+                "trace_id": trace_id,
+                "doc_name": doc_name,
+                "doc_version": doc_res.get("version"),
+                "source": doc_res.get("source"),
+                "label": "已从磁盘同步最新文档",
+                "llm_powered": False,
+            },
+        )
 
     session = get_session(doc_id, doc_name=doc_name)
     history: List[Dict[str, str]] = []

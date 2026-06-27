@@ -143,6 +143,7 @@ def build_note_selection(
     catalog: List[Dict[str, Any]],
     min_pick: int = 5,
     max_pick: int = 10,
+    user_prompt: str = "",
 ) -> Dict[str, Any]:
     """阶段2：选取 5-10 篇深度采样笔记（时间+类型分散）。"""
     videos = [it for it in catalog if (it.get("content_type") or "") == "video"]
@@ -166,25 +167,29 @@ def build_note_selection(
         "4) 禁止选重复 note_id。\n"
         "输出 ```json```：{selected_note_ids:[], selected:[{note_id,title,published_at,content_type,reason}], rationale}。"
     )
-    user = json.dumps(
-        {
-            "display_name": display_name,
-            "light_profile": {
-                k: light_profile.get(k)
-                for k in (
-                    "industry",
-                    "domain",
-                    "niche",
-                    "content_type_distribution",
-                    "title_topic_buckets",
-                )
-            },
-            "candidates": items,
-            "min_pick": min_pick,
-            "max_pick": max_pick,
+    payload: Dict[str, Any] = {
+        "display_name": display_name,
+        "light_profile": {
+            k: light_profile.get(k)
+            for k in (
+                "industry",
+                "domain",
+                "niche",
+                "content_type_distribution",
+                "title_topic_buckets",
+            )
         },
-        ensure_ascii=False,
-    )[:28000]
+        "candidates": items,
+        "min_pick": min_pick,
+        "max_pick": max_pick,
+    }
+    up = (user_prompt or "").strip()
+    if up:
+        payload["user_analysis_goal"] = up
+        system += (
+            "\n5) 若提供 user_analysis_goal，优先选取最能支撑该分析目标的笔记（仍须满足时间/类型分散）。"
+        )
+    user = json.dumps(payload, ensure_ascii=False)[:28000]
     llm = invoke_profile_llm(system, user, max_tokens=2000)
     if not llm.get("ok"):
         return {"ok": False, "error": llm.get("error")}
@@ -232,6 +237,7 @@ def build_deep_profile(
     red_id: str,
     light_profile: Dict[str, Any],
     articles: List[Dict[str, Any]],
+    user_prompt: str = "",
 ) -> Dict[str, Any]:
     """阶段4：基于原文全文的深度人物画像。"""
     system = (
@@ -246,7 +252,7 @@ def build_deep_profile(
         "evidence_notes:[{note_id,title,key_points:[]}],collaboration_scenarios:[],"
         "confidence,open_questions:[]}。"
     )
-    payload = {
+    payload: Dict[str, Any] = {
         "display_name": display_name,
         "red_id": red_id,
         "light_profile": light_profile,
@@ -261,6 +267,10 @@ def build_deep_profile(
             for a in articles
         ],
     }
+    up = (user_prompt or "").strip()
+    if up:
+        payload["user_analysis_goal"] = up
+        system += " 若提供 user_analysis_goal，请在画像中显式回应该分析诉求。"
     user = json.dumps(payload, ensure_ascii=False)[:48000]
     llm = invoke_profile_llm(system, user, max_tokens=4500)
     if not llm.get("ok"):

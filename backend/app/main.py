@@ -5517,6 +5517,16 @@ async def route_reader_chat_stream(request: Request):
     doc_name = str(body.get("doc_name") or "").strip()
     doc_text = str(body.get("doc_text") or "")
     message = str(body.get("message") or "").strip()
+    doc_version_raw = body.get("doc_version")
+    local_revision_raw = body.get("local_revision")
+    try:
+        doc_version = int(doc_version_raw) if doc_version_raw is not None else None
+    except (TypeError, ValueError):
+        doc_version = None
+    try:
+        local_revision = int(local_revision_raw) if local_revision_raw is not None else None
+    except (TypeError, ValueError):
+        local_revision = None
     if not doc_id:
         raise HTTPException(400, "缺少 doc_id")
     if not message:
@@ -5535,6 +5545,8 @@ async def route_reader_chat_stream(request: Request):
                 web_search=bool(body.get("web_search", False)),
                 deep_think=bool(body.get("deep_think", False)),
                 model=str(body.get("model") or "").strip() or None,
+                doc_version=doc_version,
+                local_revision=local_revision,
             ):
                 yield chunk
         except Exception as ex:

@@ -1545,6 +1545,20 @@ async def chat_stream_v2(
         )
         use_main_task = bool(boot.get("use_main_task"))
         continue_main_task = bool(boot.get("continue_main_task"))
+        if continue_main_task and not task_id:
+            from .chat_context_memory import _resolve_continue_task_id
+
+            _ct = client_cur_task if isinstance(client_cur_task, dict) else mem_ctx.get("cur_task")
+            _hist = (
+                client_main_task_history
+                if isinstance(client_main_task_history, list)
+                else mem_ctx.get("main_task_history")
+            )
+            task_id = str(
+                boot.get("task_id")
+                or _resolve_continue_task_id(_ct if isinstance(_ct, dict) else None, _hist)
+                or ""
+            ).strip() or None
         framework = str(boot.get("framework") or "react")
         intent_rewrite_snapshot = dict(boot.get("intent_rewrite_snapshot") or {})
         slot_snapshot_exec = dict(boot.get("slot_snapshot") or {})
@@ -2345,6 +2359,7 @@ async def chat_stream_v2(
 
     # ── Phase 2: 执行段 ReAct（工具循环）→ 最终回答 ──
     answer_started = False
+    task_marked_abnormal = False
     llm_sub_plan_id: Optional[str] = None
     llm_sub_index = 0
     llm_step: Dict[str, Any] = {"step_id": _new_id("step_")}
@@ -2617,6 +2632,8 @@ async def chat_stream_v2(
                 react_round_idx = 0
                 react_tools_seen: set[str] = set()
                 failed_tool_names: set[str] = set()
+                tool_fail_counts: Dict[str, int] = {}
+                tool_failure_log: List[Dict[str, Any]] = []
                 pipeline_poll_sec = float(cfg.get("chat_pipeline_poll_sec") or 4.0)
                 pipeline_wait_sec = float(cfg.get("chat_pipeline_wait_sec") or 0) or max(
                     float(cfg.get("chat_tool_timeout_sec", 60) or 60) * 5,
@@ -2876,15 +2893,26 @@ async def chat_stream_v2(
                                         _tg.get("reason") or _tg.get("error") or ""
                                     )
                             if raw_out is None:
+                                from .tool_chat_resilience import (
+                                    classify_tool_failure,
+                                    maybe_dispatch_ops_for_tool,
+                                    plan_tool_retry,
+                                    resolve_chat_tool_timeout_sec,
+                                    run_pre_retry_hook,
+                                    should_invoke_ops_agent,
+                                )
+
+                                _retry_args = dict(args)
                                 for _try in range(max_retry_per_tool):
                                     try:
                                         if tool_obj is None:
                                             raw_out = {"ok": False, "error": f"未知工具: {fn}"}
                                             tool_err = raw_out["error"]
                                             break
+                                        _round_timeout = resolve_chat_tool_timeout_sec(fn, tool_timeout_sec)
                                         raw_out = await asyncio.wait_for(
-                                            _invoke_langchain_tool(tool_obj, args),
-                                            timeout=tool_timeout_sec,
+                                            _invoke_langchain_tool(tool_obj, _retry_args),
+                                            timeout=_round_timeout,
                                         )
                                         tool_err = None
                                         if isinstance(raw_out, dict) and raw_out.get("error"):
@@ -2892,16 +2920,91 @@ async def chat_stream_v2(
                                         if not tool_err:
                                             break
                                     except asyncio.TimeoutError:
-                                        raw_out = {"ok": False, "error": f"工具超时（>{int(tool_timeout_sec)}s）"}
+                                        _to = resolve_chat_tool_timeout_sec(fn, tool_timeout_sec)
+                                        raw_out = {"ok": False, "error": f"工具超时（>{int(_to)}s）"}
                                         tool_err = raw_out["error"]
                                     except Exception as ex:
                                         raw_out = {"ok": False, "error": f"工具执行异常: {ex}"}
                                         tool_err = str(ex)
                                     if _try < max_retry_per_tool - 1 and tool_err:
-                                        await asyncio.sleep(0.15)
+                                        _fail_info = classify_tool_failure(
+                                            tool_name=fn,
+                                            error_message=tool_err,
+                                            raw_out=raw_out,
+                                        )
+                                        _retry_args, _hook = plan_tool_retry(
+                                            tool_name=fn,
+                                            tool_args=_retry_args,
+                                            error_message=tool_err,
+                                            attempt=_try,
+                                            raw_out=raw_out,
+                                        )
+                                        if _hook:
+                                            await run_pre_retry_hook(
+                                                _hook, tool_name=fn, tool_args=_retry_args
+                                            )
+                                        if should_invoke_ops_agent(
+                                            error_code=_fail_info.get("error_code") or "",
+                                            attempt=_try,
+                                            max_retry=max_retry_per_tool,
+                                        ):
+                                            maybe_dispatch_ops_for_tool(
+                                                tool_name=fn,
+                                                tool_args=_retry_args,
+                                                error_message=tool_err,
+                                                task_id=str(task_id or ""),
+                                                session_id=session_id,
+                                            )
+                                        await asyncio.sleep(0.25)
+                                args = _retry_args
                             if tool_err and fn:
+                                from .tool_chat_resilience import (
+                                    build_react_rethink_hint,
+                                    build_tool_failure_summary_block,
+                                    classify_tool_failure,
+                                    should_mark_task_abnormal,
+                                )
+
                                 failed_tool_names.add(fn)
-                                if len(failed_tool_names) >= distinct_fail_limit and task_id:
+                                tool_fail_counts[fn] = tool_fail_counts.get(fn, 0) + 1
+                                _fi = classify_tool_failure(
+                                    tool_name=fn,
+                                    error_message=tool_err,
+                                    raw_out=raw_out,
+                                )
+                                tool_failure_log.append(_fi)
+                                _LOG.warning(
+                                    "[AI问答-工具链|ai_chat.chat_stream_v2|tool:%s|工具执行|失败] "
+                                    "fail_count=%s; error_code=%s; error_message=%s",
+                                    fn,
+                                    tool_fail_counts[fn],
+                                    _fi.get("error_code") or "",
+                                    str(tool_err)[:200],
+                                )
+                                yield _sse("tool_call_failed", {
+                                    "trace_id": trace_id,
+                                    "task_id": task_id or "",
+                                    "tool_name": fn,
+                                    "fail_count": tool_fail_counts[fn],
+                                    "error_code": _fi.get("error_code") or "",
+                                    "error_message": str(tool_err)[:300],
+                                    "retry_hint": _fi.get("retry_hint") or "",
+                                })
+                                working.append({
+                                    "role": "system",
+                                    "content": build_react_rethink_hint(
+                                        tool_name=fn,
+                                        error_code=_fi.get("error_code") or "",
+                                        error_message=tool_err,
+                                        fail_count=tool_fail_counts[fn],
+                                    ),
+                                })
+                                if should_mark_task_abnormal(
+                                    tool_name=fn,
+                                    fail_count=tool_fail_counts[fn],
+                                    max_fail=max_retry_per_tool,
+                                ) and task_id:
+                                    task_marked_abnormal = True
                                     _span_update(task_id, status=PARENT_ABNORMAL)
                                     yield _sse("span_update", {
                                         "task_id": task_id,
@@ -2909,9 +3012,35 @@ async def chat_stream_v2(
                                         "parent_status": PARENT_ABNORMAL,
                                         "status": "failed",
                                     })
-                                    full_answer = (
-                                        f"工具调用多次失败（不同工具累计 {len(failed_tool_names)} 次），"
-                                        "任务已标记为异常，请检查权限或更换工具后重试。"
+                                    try:
+                                        from .chat_context_memory import upsert_session_main_task_history
+
+                                        upsert_session_main_task_history(
+                                            session_id,
+                                            task_id=str(task_id),
+                                            user_query=message,
+                                            query_summary=(message or "")[:80],
+                                            status=PARENT_ABNORMAL,
+                                        )
+                                    except Exception:
+                                        pass
+                                    full_answer = build_tool_failure_summary_block(
+                                        failures=tool_failure_log,
+                                        task_id=str(task_id or ""),
+                                    )
+                                    break
+                                if len(failed_tool_names) >= distinct_fail_limit and task_id:
+                                    task_marked_abnormal = True
+                                    _span_update(task_id, status=PARENT_ABNORMAL)
+                                    yield _sse("span_update", {
+                                        "task_id": task_id,
+                                        "step_id": step_id_tool,
+                                        "parent_status": PARENT_ABNORMAL,
+                                        "status": "failed",
+                                    })
+                                    full_answer = build_tool_failure_summary_block(
+                                        failures=tool_failure_log,
+                                        task_id=str(task_id or ""),
                                     )
                                     break
                             if tool_err is None and isinstance(raw_out, dict) and raw_out.get("error"):
@@ -3113,6 +3242,8 @@ async def chat_stream_v2(
                         exec_ctx.react_round_idx = react_round_idx
                         exec_ctx.tool_round = tool_round
                         exec_ctx.web_block = web_block if isinstance(web_block, dict) else exec_ctx.web_block
+                        if task_marked_abnormal:
+                            break
                         continue
 
                     exec_ctx.react_round_idx = react_round_idx
@@ -3335,7 +3466,7 @@ async def chat_stream_v2(
     })
 
     # ── Phase 3: 复杂任务落主任务状态；禁止自动标「已解决」，仅用户手动可 resolved ──
-    final_status = PARENT_EXECUTING
+    final_status = PARENT_ABNORMAL if task_marked_abnormal else PARENT_EXECUTING
     pause_reason = ""
     summary_expect = (message or "")[:200]
     snap_final: Dict[str, Any] = {}
@@ -3344,7 +3475,7 @@ async def chat_stream_v2(
     pipeline_task_ids: List[str] = list(pipeline_task_ids_pre)
     answer_claims_pipeline = answer_implies_async_pipeline_pending(full_answer, message)
     if use_main_task and task_id:
-        if full_answer and len(full_answer.strip()) < 8:
+        if not task_marked_abnormal and full_answer and len(full_answer.strip()) < 8:
             final_status = PARENT_PAUSED
             pause_reason = "回答过短，未满足任务摘要中的输出要求"
         span_final = _span_get(task_id) or {}
@@ -3355,7 +3486,7 @@ async def chat_stream_v2(
             pipeline_task_ids = _async_pipeline_ids_from_tool_outputs(tool_outputs_final)
         if not pipeline_task_ids and full_answer:
             pipeline_task_ids = pipeline_ids_from_answer_text(full_answer)
-        if pipeline_task_ids:
+        if not task_marked_abnormal and pipeline_task_ids:
             from .task_manager import get_task as _get_pipe_task
 
             still_active = any(
@@ -3366,7 +3497,7 @@ async def chat_stream_v2(
             if still_active:
                 final_status = PARENT_EXECUTING
                 pause_reason = pause_reason or "链接文档化流水线仍在执行，请稍后追问进度"
-        elif answer_claims_pipeline:
+        elif not task_marked_abnormal and answer_claims_pipeline:
             async_pipeline_pending = True
             final_status = PARENT_EXECUTING
             pause_reason = pause_reason or "回答表明后台流水线仍在处理，主任务保持执行中"

@@ -365,7 +365,19 @@ def assess_xhs_extractor_result(
     """
     text_len, image_links, ocr_text_len = xhs_payload_stats(result)
     body = ((result or {}).get("text_content") or "").strip()
+    title = str((result or {}).get("title") or "").strip()
     stage = "ocr" if after_ocr else "extract"
+
+    if _match_any(title, _LINK_NOT_FOUND_MARKERS):
+        return ContentAssessment(
+            ok=False,
+            error_code=PIPE_LINK_NOT_FOUND,
+            error_message=f"链接疑似失效或返回错误页（title={title[:40]!r}）",
+            span_stage="extract",
+            text_len=text_len,
+            image_links=image_links,
+            ocr_text_len=ocr_text_len,
+        )
 
     if after_ocr:
         combined = body

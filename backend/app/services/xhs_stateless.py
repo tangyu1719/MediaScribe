@@ -167,7 +167,7 @@ def resolve_red_id_stateless(red_id: str, *, display_name: str = "") -> Dict[str
         keywords.insert(0, display_name)
 
     for kw in keywords:
-        for suffix in ("&type=user", ""):
+        for suffix in ("&type=user", "&type=51", ""):
             search_url = f"https://www.xiaohongshu.com/search_result?keyword={kw}{suffix}"
             r = sess.get(search_url, timeout=30)
             if r.status_code != 200:

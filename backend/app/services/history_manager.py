@@ -419,6 +419,7 @@ def list_history_tasks(limit: int = 100, *, repair_html: bool = True, persist_no
 
 
 def _merged_logs_for_history(task_id: str, task_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """任务写入历史时即固化一份可展示日志，优先供历史查看直取。"""
     try:
         from .pipeline_task_logs import merge_task_logs
 
@@ -432,20 +433,25 @@ def _merged_logs_for_history(task_id: str, task_data: Dict[str, Any]) -> List[Di
 
 
 def get_history_logs(task_id: str) -> Optional[List[Dict[str, Any]]]:
-    """按 task id 读取已持久化的历史日志（JSONL + history 合并）。"""
+    """按 task id 读取已持久化的历史日志。优先直取固化日志，缺失时再做多源合并。"""
     tid = (task_id or "").strip()
     if not tid:
         return None
     hist_rows = None
+    status = ""
     if _db_enabled():
         row = _db_store().get_by_task_id(tid)
         if row:
             hist_rows = list(row.get("logs") or [])
+            status = str(row.get("status") or "")
     if hist_rows is None:
         for t in _load_history().get("tasks", []):
             if t.get("id") == tid:
                 hist_rows = list(t.get("logs") or [])
+                status = str(t.get("status") or "")
                 break
+    if hist_rows is not None and status in ("completed", "failed", "cancelled"):
+        return hist_rows
     try:
         from .pipeline_task_logs import merge_task_logs
 
@@ -489,11 +495,16 @@ def build_task_log_bundle(task_id: str) -> Dict[str, Any]:
         platform = platform or mem.get("platform") or ""
         status = status or mem.get("status") or ""
 
-    text_logs = merge_task_logs(
-        tid,
-        memory_logs=(mem or {}).get("logs"),
-        history_logs=(hist or {}).get("logs") if hist else None,
-    )
+    history_logs = (hist or {}).get("logs") if hist else None
+    terminal_status = {"completed", "failed", "cancelled"}
+    if history_logs and status in terminal_status and not mem:
+        text_logs = list(history_logs)
+    else:
+        text_logs = merge_task_logs(
+            tid,
+            memory_logs=(mem or {}).get("logs"),
+            history_logs=history_logs,
+        )
     errors = extract_error_logs(text_logs)
 
     span_task = None

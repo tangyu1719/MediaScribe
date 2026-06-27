@@ -717,6 +717,13 @@ def _read_text_preview(file_path: str, limit: int = 12000) -> str:
         return ""
     suf = p.suffix.lower()
     if suf in (".txt", ".md", ".markdown", ".json", ".yaml", ".yml", ".py", ".java", ".js", ".ts"):
+        for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
+            try:
+                text = p.read_text(encoding=enc, errors="strict")
+                if text:
+                    return text[:limit]
+            except Exception:
+                continue
         return p.read_text(encoding="utf-8", errors="ignore")[:limit]
     return ""
 
