@@ -472,6 +472,32 @@ async def run_favorites_sync(
                     )
                     continue
 
+                if "xsec_token" not in (it.canonical_url or ""):
+                    failed += 1
+                    err = "missing_xsec_token: 收藏链接缺少 xsec_token，笔记无法访问（页面不见了）"
+                    _log.warning(
+                        "[%s|favorites_sync_runner|%s|Agent执行|裸链跳过] note_id=%s; url=%s",
+                        _CHAIN,
+                        sync_run_id,
+                        it.note_id,
+                        (it.canonical_url or "")[:120],
+                    )
+                    update_sync_run_item(
+                        sync_run_id,
+                        it.note_id,
+                        analysis_status="failed",
+                        error_message=err,
+                    )
+                    digest_items.append(
+                        _item_to_digest_row(
+                            it,
+                            analysis_status="failed",
+                            summary=it.title,
+                            error_message=err,
+                        )
+                    )
+                    continue
+
                 src_meta = source_meta_kwargs(
                     SOURCE_SUB_FAVORITES,
                     display_name=str(sub.get("display_name") or ""),

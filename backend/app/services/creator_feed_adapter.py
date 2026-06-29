@@ -280,13 +280,19 @@ def extract_xhs_note_url_from_location(location_href: str, html: str = "") -> st
     return ""
 
 
-def _build_note_url(note_id: str, xsec_token: str = "") -> str:
+def _build_note_url(note_id: str, xsec_token: str = "", *, xsec_source: str = "pc_user") -> str:
     if not is_valid_xhs_note_id(note_id):
         return ""
     base = f"https://www.xiaohongshu.com/explore/{note_id}"
     if xsec_token:
-        return f"{base}?xsec_token={xsec_token}&xsec_source=pc_user"
+        src = (xsec_source or "pc_user").strip() or "pc_user"
+        return f"{base}?xsec_token={xsec_token}&xsec_source={src}"
     return base
+
+
+def _build_favorites_note_url(note_id: str, xsec_token: str = "") -> str:
+    """收藏夹笔记链接须带 pc_collect 来源，否则易出现「页面不见了」。"""
+    return _build_note_url(note_id, xsec_token, xsec_source="pc_collect")
 
 
 def _flatten_dict_list(nodes: List[Any]) -> List[Dict[str, Any]]:

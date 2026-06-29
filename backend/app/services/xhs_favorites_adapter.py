@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .creator_feed_adapter import (
     FeedItem,
+    _build_favorites_note_url,
     _build_note_url,
     _note_type_to_content,
     extract_xhs_note_id_from_url,
@@ -237,7 +238,7 @@ def parse_favorites_meta_from_init_state(
         author_name = str(author.get("nickname") or author.get("name") or "")
         token = str(n.get("xsecToken") or n.get("xsec_token") or "")
         nid = _note_id_from_dict(n)
-        url = _build_note_url(nid, token) if nid else ""
+        url = _build_favorites_note_url(nid, token) if nid else ""
         items.append(
             FavoritesFeedItem(
                 platform=_PLATFORM,
@@ -289,7 +290,7 @@ def parse_favorites_from_init_state(
         )
         title = str(title).strip() or f"笔记 {nid[:8]}"
         token = str(n.get("xsecToken") or n.get("xsec_token") or "")
-        url = _build_note_url(nid, token)
+        url = _build_favorites_note_url(nid, token)
         if not url:
             continue
         uh = link_url_hash(url)
@@ -368,6 +369,69 @@ def parse_favorites_from_init_state(
     return items
 
 
+def enrich_favorites_feed_items_with_xsec(
+    items: List[FavoritesFeedItem],
+    *,
+    creator_id: str,
+    profile_url: str = "",
+) -> List[FavoritesFeedItem]:
+    """对缺少 xsec_token 的收藏笔记，在收藏页逐条点击补全真实链接。"""
+    if not items:
+        return items
+
+    bare = [
+        it
+        for it in items
+        if is_valid_xhs_note_id(getattr(it, "note_id", "") or "")
+        and "xsec_token" not in (getattr(it, "canonical_url", "") or "")
+    ]
+    if not bare:
+        return items
+
+    cid = (creator_id or "").strip()
+    fav_url = profile_url or (f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note" if cid else "")
+    if cid and not fav_url.rstrip("/").endswith(("tab=fav", "tab=collect", "tab=favorite")) and "tab=fav" not in fav_url:
+        fav_url = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
+
+    from .xhs_local_browser import resolve_bare_favorites_note_links_via_click
+
+    try:
+        resolved = resolve_bare_favorites_note_links_via_click(
+            fav_url,
+            [it.note_id for it in bare],
+            creator_id=cid,
+            max_clicks=max(len(items), len(bare) + 5, 20),
+        )
+    except Exception as ex:
+        _log.warning(
+            "[%s|enrich_favorites_feed_items_with_xsec|%s|Agent执行|点击补token失败] error=%s",
+            _CHAIN,
+            cid,
+            ex,
+        )
+        resolved = {}
+
+    enriched = 0
+    for it in items:
+        url = resolved.get(it.note_id)
+        if not url or "xsec_token" not in url:
+            continue
+        it.canonical_url = url
+        it.note_url = url
+        it.url_hash = link_url_hash(url)
+        enriched += 1
+
+    _log.info(
+        "[%s|enrich_favorites_feed_items_with_xsec|%s|Agent执行|补全] bare=%s; enriched=%s; with_token=%s",
+        _CHAIN,
+        cid,
+        len(bare),
+        enriched,
+        sum(1 for it in items if "xsec_token" in (it.canonical_url or "")),
+    )
+    return items
+
+
 def fetch_favorites_catalog(
     creator_id: str,
     *,
@@ -419,6 +483,11 @@ def fetch_favorites_catalog(
             "请确认 Chrome 收藏 Tab 已打开且页面已滚动加载。"
         )
     items = valid_items[:limit]
+    items = enrich_favorites_feed_items_with_xsec(
+        items,
+        creator_id=creator_id,
+        profile_url=url,
+    )
 
     _log.info(
         "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|拉取] 完成; count=%s; with_token=%s",

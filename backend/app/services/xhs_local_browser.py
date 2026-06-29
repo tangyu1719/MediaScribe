@@ -1677,16 +1677,19 @@ _DISMISS_XHS_OVERLAY_JS = """() => {
     return document.querySelectorAll('section.note-item').length;
 }"""
 
-_CLICK_FIRST_FAV_NOTE_JS = """() => {
-    const el = document.querySelector('section.note-item');
-    if (!el) return { ok: false, total: 0 };
+_CLICK_FAV_NOTE_BY_INDEX_JS = """(idx) => {
+    const items = document.querySelectorAll('section.note-item');
+    const el = items[idx];
+    if (!el) return { ok: false, total: items.length, idx };
+    try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
     const target = el.querySelector('a.cover') || el.querySelector('.cover')
         || el.querySelector('a[href]') || el;
     try { target.click(); } catch (e) {}
     return {
         ok: true,
-        total: document.querySelectorAll('section.note-item').length,
-        title: (el.textContent || '').trim().slice(0, 80),
+        total: items.length,
+        idx,
+        title: (el.innerText || el.textContent || '').trim().slice(0, 80),
     };
 }"""
 
@@ -1726,8 +1729,8 @@ def _collect_note_links_via_click_cdp_ws(
 
     _cdp_eval_iife(ws_url, _DISMISS_XHS_OVERLAY_JS)
     time.sleep(0.5)
-    ordered: List[Tuple[str, str]] = []
-    seen: set[str] = set()
+    links: Dict[str, str] = {}
+    order: List[str] = []
 
     for attempt in range(max(1, max_clicks)):
         count = cdp_tab_eval(ws_url, "document.querySelectorAll('section.note-item').length") or 0
@@ -1739,29 +1742,39 @@ def _collect_note_links_via_click_cdp_ws(
             if not count:
                 break
 
-        click_res = _cdp_eval_iife(ws_url, _CLICK_FIRST_FAV_NOTE_JS)
+        click_res = _cdp_eval_iife(ws_url, f"(({_CLICK_FAV_NOTE_BY_INDEX_JS}))({attempt})")
         if not (isinstance(click_res, dict) and click_res.get("ok")):
-            break
+            cdp_tab_scroll_bottom(ws_url, rounds=1, pause_sec=1.2)
+            click_res = _cdp_eval_iife(ws_url, f"(({_CLICK_FAV_NOTE_BY_INDEX_JS}))({attempt})")
+            if not (isinstance(click_res, dict) and click_res.get("ok")):
+                break
         time.sleep(2.8)
 
         loc = str(cdp_tab_eval(ws_url, "location.href") or "")
         html = cdp_tab_get_html(ws_url)
         note_url = extract_xhs_note_url_from_location(loc, html)
         nid = extract_xhs_note_id_from_url(note_url)
-        if is_valid_xhs_note_id(nid) and nid not in seen:
-            seen.add(nid)
-            ordered.append((nid, note_url))
-            _log.info(
-                "[%s|_collect_note_links_via_click_cdp_ws|Agent执行|解析] attempt=%s; note_id=%s; title=%s",
-                _CHAIN,
-                attempt + 1,
-                nid,
-                (click_res.get("title") or "")[:40],
-            )
+        if is_valid_xhs_note_id(nid) and note_url:
+            cur = links.get(nid) or ""
+            if nid not in links:
+                links[nid] = note_url
+                order.append(nid)
+            elif "xsec_token" in note_url and "xsec_token" not in cur:
+                links[nid] = note_url
+            if nid in links and (nid not in order or links[nid] == note_url):
+                _log.info(
+                    "[%s|_collect_note_links_via_click_cdp_ws|Agent执行|解析] idx=%s; note_id=%s; has_token=%s; title=%s",
+                    _CHAIN,
+                    attempt,
+                    nid,
+                    "xsec_token" in note_url,
+                    (click_res.get("title") or "")[:40],
+                )
 
         _cdp_return_to_favorites_tab(ws_url, creator_id, fav_url)
         time.sleep(1.0)
 
+    ordered = [(nid, links[nid]) for nid in order if nid in links]
     _log.info(
         "[%s|_collect_note_links_via_click_cdp_ws|Agent执行|完成] count=%s; with_token=%s",
         _CHAIN,
@@ -1769,6 +1782,91 @@ def _collect_note_links_via_click_cdp_ws(
         sum(1 for _, u in ordered if "xsec_token" in u),
     )
     return ordered
+
+
+def resolve_bare_favorites_note_links_via_click(
+    fav_url: str,
+    note_ids: List[str],
+    *,
+    creator_id: str = "",
+    max_clicks: int = 40,
+) -> Dict[str, str]:
+    """在收藏页按序点击卡片，从跳转 URL 补全 xsec_token（收藏笔记来自不同博主，不能走主页点击）。"""
+    from .creator_feed_adapter import is_valid_xhs_note_id
+
+    cid = (creator_id or "").strip()
+    targets = {str(n).strip() for n in note_ids if is_valid_xhs_note_id(str(n or ""))}
+    if not targets:
+        return {}
+
+    port = find_cdp_port()
+    if not port:
+        _log.warning(
+            "[%s|resolve_bare_favorites_note_links_via_click|CDP|Agent执行|未就绪] count=%s",
+            _CHAIN,
+            len(targets),
+        )
+        return {}
+
+    tab = cdp_pick_owner_tab(port, prefer_cid=cid)
+    if tab is None:
+        _log.warning(
+            "[%s|resolve_bare_favorites_note_links_via_click|CDP|Agent执行|无Tab] creator=%s",
+            _CHAIN,
+            cid[:8],
+        )
+        return {}
+
+    tab_url = str(tab.get("url") or "")
+    ws_url = tab.get("webSocketDebuggerUrl")
+    if not ws_url:
+        return {}
+
+    if not _page_on_favorites_tab_url(tab_url, cid):
+        nav = fav_url or f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
+        cdp_tab_eval(ws_url, f"window.location.href={json.dumps(nav)}", timeout_sec=8)
+        time.sleep(4.0)
+
+    clicked = _collect_note_links_via_click_cdp_ws(
+        ws_url,
+        creator_id=cid,
+        fav_url=fav_url or tab_url,
+        max_clicks=max(1, max_clicks),
+    )
+    out: Dict[str, str] = {}
+    for nid, url in clicked:
+        if nid in targets and "xsec_token" in url:
+            out[nid] = url
+
+    # 对仍未补全的 noteId 尝试按 href 定位点击
+    still = [nid for nid in targets if nid not in out]
+    if still and ws_url:
+        from .creator_feed_adapter import extract_xhs_note_url_from_location
+
+        for nid in still:
+            click_res = _cdp_eval_iife(ws_url, f"(({_CLICK_PROFILE_NOTE_BY_ID_JS}))({json.dumps(nid)})")
+            if not (isinstance(click_res, dict) and click_res.get("ok")):
+                continue
+            time.sleep(2.5)
+            loc = str(cdp_tab_eval(ws_url, "location.href") or "")
+            html = cdp_tab_get_html(ws_url)
+            note_url = extract_xhs_note_url_from_location(loc, html)
+            if note_url and "xsec_token" in note_url:
+                out[nid] = note_url
+            _cdp_return_to_favorites_tab(
+                ws_url,
+                cid,
+                fav_url or f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note",
+            )
+            time.sleep(0.8)
+
+    _log.info(
+        "[%s|resolve_bare_favorites_note_links_via_click|Agent执行|完成] requested=%s; resolved=%s",
+        _CHAIN,
+        len(targets),
+        len(out),
+    )
+    return out
 
 
 def _extract_note_links_from_html(html: str) -> Dict[str, str]:

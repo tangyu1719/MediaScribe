@@ -353,41 +353,58 @@
     }
   };
 
-  // 拦截原生 fetch，强制添加 token
-  const _origFetch = window.fetch;
-  window.fetch = function(url, options) {
-    if (!options) options = {};
-    if (typeof url !== 'string') return _origFetch(url, options);
-    var isApi = url.indexOf('/api/') === 0;
-    if (!isApi) return _origFetch(url, options);
-    var isPublic = false;
-    for (var i = 0; i < AUTH_CONFIG.PUBLIC_API_PREFIXES.length; i++) {
-      if (url.indexOf(AUTH_CONFIG.PUBLIC_API_PREFIXES[i]) === 0) { isPublic = true; break; }
-    }
-    if (!isPublic && AuthState.token) {
-      if (!options.headers) options.headers = {};
-      var h = {};
-      if (options.headers instanceof Headers) {
-        options.headers.forEach(function(v, k) { h[k] = v; });
-      } else {
-        for (var k in options.headers) { if (options.headers.hasOwnProperty(k)) h[k] = options.headers[k]; }
+  // 拦截原生 fetch，强制添加 token（兼容被扩展 patch 的 fetch）
+  var _origFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+  if (_origFetch) {
+    window.fetch = function(url, options) {
+      if (!options) options = {};
+      if (typeof url !== 'string') {
+        try { return _origFetch(url, options); } catch (e) { return Promise.reject(e); }
       }
-      h['Authorization'] = 'Bearer ' + AuthState.token;
-      options.headers = h;
-    }
-    return _origFetch(url, options).then(function(response) {
-      if (response.status === 401 && !isPublic) {
-        AuthState.clearAuth();
-        if (window.location.pathname !== '/login.html') {
+      var isApi = url.indexOf('/api/') === 0;
+      if (!isApi) {
+        try { return _origFetch(url, options); } catch (e) { return Promise.reject(e); }
+      }
+      var isPublic = false;
+      for (var i = 0; i < AUTH_CONFIG.PUBLIC_API_PREFIXES.length; i++) {
+        if (url.indexOf(AUTH_CONFIG.PUBLIC_API_PREFIXES[i]) === 0) { isPublic = true; break; }
+      }
+      if (!isPublic && AuthState.token) {
+        if (!options.headers) options.headers = {};
+        var h = {};
+        if (options.headers instanceof Headers) {
+          options.headers.forEach(function(v, k) { h[k] = v; });
+        } else {
+          for (var k in options.headers) { if (options.headers.hasOwnProperty(k)) h[k] = options.headers[k]; }
+        }
+        h['Authorization'] = 'Bearer ' + AuthState.token;
+        options.headers = h;
+      }
+      var chain;
+      try {
+        chain = _origFetch(url, options);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      if (!chain || typeof chain.then !== 'function') {
+        return Promise.reject(new Error('fetch 被浏览器扩展拦截，返回无效'));
+      }
+      return chain.then(function(response) {
+        if (response.status === 401 && !isPublic) {
+          AuthState.clearAuth();
+          if (window.location.pathname !== '/login.html') {
+            redirectToLogin();
+          }
+        }
+        if (response.status === 403 && !isPublic && !AuthState.isAuthenticated) {
           redirectToLogin();
         }
-      }
-      if (response.status === 403 && !isPublic && !AuthState.isAuthenticated) {
-        redirectToLogin();
-      }
-      return response;
-    });
-  };
+        return response;
+      });
+    };
+  } else {
+    console.warn('[Auth] window.fetch 不可用，跳过 fetch 拦截');
+  }
   var _OrigEventSource = window.EventSource;
   window.EventSource = function(url, config) {
     var token = AuthState.token || localStorage.getItem(AUTH_CONFIG.TOKEN_KEY);
