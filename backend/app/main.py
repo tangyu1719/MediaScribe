@@ -1146,12 +1146,14 @@ async def route_output_file_marks_put(request: Request):
     body = await request.json()
     name = (body.get("file") or body.get("name") or "").strip()
     marks = body.get("marks")
+    client_content = body.get("content")
     if not name:
         raise HTTPException(400, "缺少 file")
     if not isinstance(marks, list):
         raise HTTPException(400, "marks 须为数组")
     try:
-        return save_marks(name, marks)
+        content = client_content if isinstance(client_content, str) else None
+        return save_marks(name, marks, content=content)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except (ValueError, PermissionError) as e:
@@ -1168,6 +1170,7 @@ async def route_output_file_marks_remap(request: Request):
     old_text = body.get("old_text")
     new_text = body.get("new_text")
     marks = body.get("marks")
+    client_content = body.get("content")
     if not name:
         raise HTTPException(400, "缺少 file")
     if old_text is None or new_text is None:
@@ -1175,8 +1178,9 @@ async def route_output_file_marks_remap(request: Request):
     if not isinstance(marks, list):
         raise HTTPException(400, "marks 须为数组")
     try:
+        content = client_content if isinstance(client_content, str) else None
         remapped = remap_marks_on_text_change(str(old_text), str(new_text), marks)
-        return save_marks(name, remapped)
+        return save_marks(name, remapped, content=content or str(new_text))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except (ValueError, PermissionError) as e:
@@ -2453,9 +2457,9 @@ async def route_skills_import_json(request: Request):
             command=body.get("command", ""),
             source=body.get("source", "form"),
         )
-        from .services.skill_flow_service import schedule_skill_flow
+        from .services.skill_intelligence_service import schedule_skill_assets
 
-        schedule_skill_flow(
+        schedule_skill_assets(
             row.get("id", ""),
             row.get("name", ""),
             row.get("description", ""),
@@ -2487,9 +2491,9 @@ async def route_skills_import_md(request: Request):
         raw = (await request.body()).decode("utf-8", errors="replace")
     try:
         row = skill_import_md(raw, source="md")
-        from .services.skill_flow_service import schedule_skill_flow
+        from .services.skill_intelligence_service import schedule_skill_assets
 
-        schedule_skill_flow(
+        schedule_skill_assets(
             row.get("id", ""),
             row.get("name", ""),
             row.get("description", ""),
@@ -2520,9 +2524,9 @@ async def route_skills_import_batch(request: Request):
         sk = skill_get(sid)
         if not sk:
             continue
-        from .services.skill_flow_service import schedule_skill_flow
+        from .services.skill_intelligence_service import schedule_skill_assets
 
-        schedule_skill_flow(
+        schedule_skill_assets(
             sid,
             sk.get("name", ""),
             sk.get("description", ""),

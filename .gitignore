@@ -60,9 +60,12 @@ ai_chat_config.json
 rag_libraries.json
 skills_registry.json
 
-# ── 预览截图 ──
+# ── 预览页（MD 阅读器等源码需入库；截图仍忽略） ──
 frontend/*.png
-frontend/preview/
+frontend/preview/*
+!frontend/preview/
+!frontend/preview/*.html
+!frontend/preview/*.js
 
 # ── Cookie（登录态） ──
 .xhs_cookies.json
