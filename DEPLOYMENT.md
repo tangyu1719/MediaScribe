@@ -6,6 +6,7 @@
 
 ## 目录
 
+0. [一键安全部署](#0-一键安全部署)
 1. [仓库说明](#1-仓库说明)
 2. [系统要求](#2-系统要求)
 3. [克隆与 Python 依赖](#3-克隆与-python-依赖)
@@ -17,6 +18,53 @@
 9. [启动服务](#9-启动服务)
 10. [Docker 部署](#10-docker-部署)
 11. [常见问题](#11-常见问题)
+
+---
+
+## 0. 一键安全部署
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1
+```
+
+Ubuntu / macOS：
+
+```bash
+bash deploy/install.sh
+```
+
+安装器按以下顺序执行：
+
+1. 检查并下载 Python 3.11、Git、Node.js、Docker Compose v2、FFmpeg。
+2. 在 `.venv` 安装 yt-dlp、Playwright、Redis 客户端、PyYAML、PyTorch 与 sentence-transformers。
+3. 隐藏输入 API Key/Secret；为 MySQL、Redis、MinIO、JWT 自动生成随机密码。
+4. 将真实值写入本机 `.env`（已 gitignore），`config.yaml` 始终只保留 `${ENV_VAR}` 占位符。
+5. 校验 Compose 后启动 `web + mysql + redis + milvus + etcd + minio`。
+
+只检查/生成配置但不启动：
+
+```powershell
+.\deploy\install.ps1 -NoStart -SkipRagModel
+```
+
+```bash
+NO_START=1 SKIP_RAG_MODEL=1 bash deploy/install.sh
+```
+
+完整栈的手动命令：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.yml ps
+```
+
+安全自检：
+
+```bash
+python deploy/security_scan.py
+```
 
 ---
 

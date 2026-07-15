@@ -1,0 +1,31 @@
+version: 1
+
+# 这里只保存环境变量引用，不保存真实密钥。安装脚本会把私密值写入已忽略的 .env。
+agent:
+  volcengine_api_key: "${VOLC_API_KEY}"
+  volcengine_base_url: "${VOLC_BASE_URL}"
+  ai_chat_model: "${LLM_MODEL_QA}"
+  gateway_task_type_route:
+    summary: "${LLM_MODEL_REASON}"
+    qa: "${LLM_MODEL_QA}"
+  feishu_app_id: "${FEISHU_APP_ID}"
+  feishu_app_secret: "${FEISHU_APP_SECRET}"
+  redis_cache_enabled: true
+  redis_url: "${REDIS_URL}"
+
+environment:
+  database_url: "${SBA_DATABASE_URL}"
+  jwt_secret: "${SBA_JWT_SECRET}"
+  rag_backend: "${KB_BACKEND}"
+  milvus_host: "${MILVUS_HOST}"
+  milvus_port: "${MILVUS_PORT}"
+  smtp_host: "${SBA_SMTP_HOST}"
+  smtp_user: "${SBA_SMTP_USER}"
+  smtp_password: "${SBA_SMTP_PASS}"
+
+privacy:
+  chrome_expected_gaia: "${SBA_CHROME_EXPECTED_GAIA}"
+  chrome_expected_email: "${SBA_CHROME_EXPECTED_EMAIL}"
+  xhs_owner_nickname: "${SBA_XHS_OWNER_NICKNAME}"
+  xhs_favorites_red_id: "${XHS_FAVORITES_RED_ID}"
+  xhs_favorites_creator_id: "${XHS_FAVORITES_CREATOR_ID}"

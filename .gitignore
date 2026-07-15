@@ -3,6 +3,8 @@
 *.env
 !.env.example
 !src/agent/config.json.example
+config.local.yaml
+docker-compose.override.yml
 
 # ── 音频上传缓存 ──
 audio_uploads/

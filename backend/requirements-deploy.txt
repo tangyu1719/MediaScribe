@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# 一键部署、RAG、缓存与媒体处理依赖
+PyYAML>=6.0,<7
+redis>=5.0,<6
+sentence-transformers>=3.0,<4
+torch>=2.2
+yt-dlp>=2025.6.30
+volcengine-python-sdk[ark]>=1.0.0

@@ -29,6 +29,20 @@ git clone https://github.com/tangyu1719/MediaScribe.git
 cd MediaScribe
 ```
 
+### 一键安全部署（推荐）
+
+脚本会检查并按需安装 Python 3.11、Git、Node.js、Docker、FFmpeg，安装 yt-dlp/Playwright/RAG SDK，交互询问私密配置，并启动 MySQL、Redis、Milvus 与 Web：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1
+```
+
+```bash
+bash deploy/install.sh
+```
+
+真实密钥只写入已忽略的 `.env`；仓库中的 `config.yaml` 只通过 `${ENV_VAR}` 引用它们。详见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+
 ### 1. 安装依赖
 
 ```bash

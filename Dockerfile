@@ -29,15 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
-    && pip install --no-cache-dir "volcengine-python-sdk[ark]>=1.0.0"
+COPY backend/requirements.txt backend/requirements-deploy.txt /app/backend/
+RUN pip install --no-cache-dir -r /app/backend/requirements-deploy.txt
 
 COPY backend/app /app/backend/app
 COPY frontend /app/frontend
 COPY src/agent /app/src/agent
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/config.template.json /app/docker/config.template.json
+COPY config.yaml /app/config.yaml
 
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /app/runtime/agent /app/output /app/logs
