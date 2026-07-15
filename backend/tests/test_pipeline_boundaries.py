@@ -258,7 +258,9 @@ def test_xiaohongshu_comments_passed_separately_not_in_source():
         stub = {
             "type": "xiaohongshu",
             "title": "标题",
-            "text_content": "正文区",
+            # Stay above the production quality gate so this test reaches the
+            # comment/consolidation boundary it is intended to assert.
+            "text_content": "正文区" * 120,
             "image_links": [],
             "image_analysis": [],
         }

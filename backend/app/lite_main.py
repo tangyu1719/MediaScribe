@@ -29,6 +29,10 @@ from . import main as _full  # noqa: E402  (environment must be set first)
 
 
 app = _full.app
+# Test clients and embedded launchers may have built the full application's
+# middleware stack before importing this lightweight entry point. Lite mode
+# runs in its own process, so rebuild the stack after removing heavy hooks.
+app.middleware_stack = None
 app.title = "SuperBizAgent Lite - 链接分析与 MD 识别器"
 
 # The full app registers heavyweight startup hooks.  The lightweight entry

@@ -31,17 +31,67 @@ cd MediaScribe
 
 ### 一键安全部署（推荐）
 
-脚本会检查并按需安装 Python 3.11、Git、Node.js、Docker、FFmpeg，安装 yt-dlp/Playwright/RAG SDK，交互询问私密配置，并启动 MySQL、Redis、Milvus 与 Web：
+这是给新机器准备的完整部署入口。脚本会检查并按需安装 Python 3.11、Git、Node.js、Docker、FFmpeg，安装 yt-dlp、Playwright 和 RAG SDK，交互询问私密配置，并启动 Web、MySQL、Redis、Milvus、etcd 与 MinIO。
+
+#### Windows 10/11
 
 ```powershell
+git clone https://github.com/tangyu1719/MediaScribe.git
+cd MediaScribe
 powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1
 ```
 
+如果脚本刚安装 Docker Desktop，请先启动 Docker Desktop，等待状态变为 Running，再重新执行同一条安装命令。
+
+#### Ubuntu / Debian / macOS
+
 ```bash
+git clone https://github.com/tangyu1719/MediaScribe.git
+cd MediaScribe
 bash deploy/install.sh
 ```
 
-真实密钥只写入已忽略的 `.env`；仓库中的 `config.yaml` 只通过 `${ENV_VAR}` 引用它们。详见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+安装时会询问以下可选私密数据：火山方舟 API Key 与模型 endpoint、飞书 App ID/Secret，以及浏览器/小红书账号标识。MySQL、Redis、MinIO 和 JWT 密码由脚本自动随机生成。真实值只写入已被 Git 忽略的 `.env`；仓库中的 `config.yaml` 始终只保存 `${ENV_VAR}` 引用。
+
+部署完成后访问：
+
+- Web：`http://127.0.0.1:8000/`
+- API 文档：`http://127.0.0.1:8000/docs`
+- Milvus 健康端口：仅本机 `127.0.0.1:9091`
+- MySQL、Redis、Milvus 默认只绑定本机地址，不直接暴露到公网
+
+常用运维命令：
+
+```bash
+# 查看服务与日志
+docker compose --env-file .env -f deploy/docker-compose.yml ps
+docker compose --env-file .env -f deploy/docker-compose.yml logs -f web
+
+# 更新到远程最新版
+git pull --ff-only
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+
+# 停止服务（保留数据库和模型卷）
+docker compose --env-file .env -f deploy/docker-compose.yml down
+```
+
+只生成配置、不启动服务：
+
+```powershell
+.\deploy\install.ps1 -NoStart -SkipRagModel
+```
+
+```bash
+NO_START=1 SKIP_RAG_MODEL=1 bash deploy/install.sh
+```
+
+部署前后均可执行安全检查：
+
+```bash
+python deploy/security_scan.py
+```
+
+更多端口调整、离线模型、故障排查与手工部署说明见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ### 1. 安装依赖
 

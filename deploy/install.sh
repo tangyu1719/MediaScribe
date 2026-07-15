@@ -64,8 +64,14 @@ install_system_packages
 for cmd in git python3 ffmpeg docker; do
   have "$cmd" || { echo "缺少 $cmd，请安装后重试。"; exit 1; }
 done
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+  || { echo "需要 Python 3.10 或更高版本。"; exit 1; }
 docker compose version >/dev/null
-docker info >/dev/null || { echo "Docker daemon 未启动，请启动后重试。"; exit 1; }
+if [[ "$NO_START" != "1" ]]; then
+  docker info >/dev/null || { echo "Docker daemon 未启动，请启动后重试。"; exit 1; }
+else
+  echo "[跳过] NO_START=1：不要求 Docker daemon 已启动"
+fi
 
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
@@ -76,7 +82,7 @@ if have npm && [[ -f package.json ]]; then
   npx playwright install chromium
 fi
 
-echo "[配置] 私密值只写入本机 .env；config.yaml 保持 ${ENV_VAR} 占位符。"
+echo "[配置] 私密值只写入本机 .env；config.yaml 保持 \${ENV_VAR} 占位符。"
 VOLC_API_KEY="$(read_secret "火山方舟 API Key（可留空）" "${VOLC_API_KEY:-$(env_value VOLC_API_KEY)}")"
 LLM_MODEL_QA="$(read_plain "问答模型 endpoint id" "${LLM_MODEL_QA:-$(env_value LLM_MODEL_QA)}")"
 LLM_MODEL_REASON="$(read_plain "摘要/推理模型 endpoint id" "${LLM_MODEL_REASON:-$(env_value LLM_MODEL_REASON)}")"

@@ -18,8 +18,8 @@ def test_get_ffmpeg_executables_returns_pair_or_none():
     invalidate_ffmpeg_cache()
     ff, fp = get_ffmpeg_executables(force=True)
     # CI/开发机可能无 ffmpeg；只断言返回类型
-    assert ff is None or str(ff).endswith(("ffmpeg", "ffmpeg.exe"))
-    assert fp is None or str(fp).endswith(("ffprobe", "ffprobe.exe"))
+    assert ff is None or str(ff).lower().endswith(("ffmpeg", "ffmpeg.exe"))
+    assert fp is None or str(fp).lower().endswith(("ffprobe", "ffprobe.exe"))
     if ff and fp:
         ff2, fp2 = get_ffmpeg_executables()
         assert ff2 == ff and fp2 == fp

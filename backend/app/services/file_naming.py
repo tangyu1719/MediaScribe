@@ -38,6 +38,22 @@ _GENERIC_DOC_TITLE_MARKERS = frozenset({
     "B站视频分析", "B站图文分析", "内容分析", "未知标题", "文档标题",
 })
 
+_GENERIC_AUTHOR_NAMES = frozenset({
+    "小编", "编辑", "作者", "博主", "官方", "管理员", "运营", "未知", "匿名",
+})
+
+
+def is_generic_author_name(name: str) -> bool:
+    """Return whether an author label is empty or too generic to persist."""
+    text = re.sub(r"\s+", "", str(name or "").strip())
+    if not text:
+        return True
+    if text.lower() in {"unknown", "author", "editor", "admin"}:
+        return True
+    if text in _GENERIC_AUTHOR_NAMES:
+        return True
+    return len(text) <= 1
+
 
 def resolve_output_author_name(
     *,

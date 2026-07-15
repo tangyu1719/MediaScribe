@@ -1197,7 +1197,9 @@ def move_task_priority(task_id: str, direction: str) -> bool:
     if not task or task.get("status") != "pending":
         return False
 
-    pending = list_pending_tasks()
+    # Movement follows the card order shown in the UI (newest queue_seq first),
+    # not the worker's importance/FIFO execution order.
+    pending = [t for t in list_tasks() if t.get("status") == "pending"]
     if len(pending) < 2:
         return False
 

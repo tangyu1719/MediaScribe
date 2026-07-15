@@ -31,14 +31,49 @@ function Install-WingetPackage([string]$Command, [string]$Id, [string]$Label) {
     }
 }
 
-function Invoke-SystemPython([string[]]$PythonArgs) {
+function Get-CompatiblePythonSpec {
+    $candidates = @()
     if (Test-Command "py") {
-        & py -3.11 @PythonArgs
-    } elseif (Test-Command "python") {
-        & python @PythonArgs
-    } else {
-        throw "Python 已安装但当前终端 PATH 尚未刷新。请重开 PowerShell 后再次运行。"
+        $candidates += [pscustomobject]@{ Exe = (Get-Command "py").Source; Prefix = @("-3.11") }
     }
+    if (Test-Command "python") {
+        $candidates += [pscustomobject]@{ Exe = (Get-Command "python").Source; Prefix = @() }
+    }
+    $local311 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"
+    if (Test-Path -LiteralPath $local311) {
+        $candidates += [pscustomobject]@{ Exe = $local311; Prefix = @() }
+    }
+    foreach ($candidate in $candidates) {
+        $exe = [string]$candidate.Exe
+        $prefix = @($candidate.Prefix)
+        & $exe @prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        if ($LASTEXITCODE -eq 0) { return $candidate }
+    }
+    return $null
+}
+
+function Ensure-CompatiblePython {
+    if (Get-CompatiblePythonSpec) {
+        Write-Host "[OK] Python 3.10+"
+        return
+    }
+    if (-not (Test-Command "winget")) {
+        throw "缺少 Python 3.10+，且未找到 winget。请安装 Python 3.11 后重试。"
+    }
+    Write-Host "[安装] Python 3.11 (Python.Python.3.11)"
+    & winget install --id Python.Python.3.11 --exact --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw "Python 3.11 安装失败，winget exit=$LASTEXITCODE" }
+    if (-not (Get-CompatiblePythonSpec)) {
+        throw "Python 3.11 已安装但当前终端尚未识别，请重开 PowerShell 后再次运行。"
+    }
+}
+
+function Invoke-SystemPython([string[]]$PythonArgs) {
+    $spec = Get-CompatiblePythonSpec
+    if (-not $spec) { throw "未找到 Python 3.10+。" }
+    $exe = [string]$spec.Exe
+    $prefix = @($spec.Prefix)
+    & $exe @prefix @PythonArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Python 命令失败，exit=$LASTEXITCODE"
     }
@@ -71,7 +106,7 @@ function Read-Secret([string]$Prompt, [string]$Default = "") {
 
 if (-not $SkipSystemPackages) {
     Install-WingetPackage "git" "Git.Git" "Git"
-    Install-WingetPackage "python" "Python.Python.3.11" "Python 3.11"
+    Ensure-CompatiblePython
     Install-WingetPackage "node" "OpenJS.NodeJS.LTS" "Node.js LTS"
     Install-WingetPackage "ffmpeg" "Gyan.FFmpeg" "FFmpeg"
     Install-WingetPackage "docker" "Docker.DockerDesktop" "Docker Desktop"
@@ -84,8 +119,12 @@ if (-not (Test-Command "ffmpeg")) { throw "未找到 FFmpeg，请重开终端后
 if (-not (Test-Command "docker")) { throw "未找到 Docker，请启动 Docker Desktop 或重开终端后重试。" }
 & docker compose version
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose v2 不可用。" }
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) { throw "Docker daemon 未启动。请启动 Docker Desktop 后重试。" }
+if (-not $NoStart) {
+    & docker info *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Docker daemon 未启动。请启动 Docker Desktop 后重试。" }
+} else {
+    Write-Host "[跳过] -NoStart：不要求 Docker daemon 已启动"
+}
 
 if (-not $SkipPythonDependencies) {
     if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) {

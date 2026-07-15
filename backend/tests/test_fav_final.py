@@ -50,7 +50,7 @@ for attempt in range(3):
         ws = t.get('webSocketDebuggerUrl','')
         is_xhs = 'xiaohongshu' in url.lower()
         is_login = '/login' in url
-        print(f'  {is_xhs and \"XHS\" or \"   \"} {is_login and \"LOGIN\" or \"     \"} {url[:100]}')
+        print(f"  {'XHS' if is_xhs else '   '} {'LOGIN' if is_login else '     '} {url[:100]}")
         if ws and is_xhs and not is_login:
             ws_url = ws
     if ws_url:

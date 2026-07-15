@@ -46,7 +46,7 @@ venv/
 
 # ── 后端进程运行时 ──
 backend/.run/
-backend/app/services/data/rss/
+backend/app/services/data/
 
 # ── 临时文件 ──
 *.tmp
