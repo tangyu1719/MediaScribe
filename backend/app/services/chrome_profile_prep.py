@@ -661,7 +661,7 @@ def ensure_sba_cdp_chrome_running(*, wait_sec: float = 45.0) -> int:
         exe = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         if not Path(exe).is_file():
             exe = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-        cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+        cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
         start_url = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
         run = _launch_chrome_exe(exe, chrome_cdp_launch_tokens(port=port), initial_url=start_url)
         if not run.get("ok"):

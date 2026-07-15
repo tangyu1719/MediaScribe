@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi.testclient import TestClient
 
 from app.main import app
-from sse_regress_lib import (
+from tests.sse_regress_lib import (
     assert_answer_streaming,
     assert_required_events,
     assert_step_think_multi_delta,

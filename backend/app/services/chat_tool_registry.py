@@ -21,6 +21,7 @@ _BUILTIN_ID_TO_FN = {
     "tool_ops_snapshot": "ops_overview",
     "tool_rss_reader": "rss_list_recent",
     "tool_xhs_user_search": "xhs_user_search",
+    "tool_xhs_cookie_sync": "sync_xhs_cookies",
     "tool_local_file_list": "local_file_list",
     "tool_local_file_read": "local_file_read",
     "tool_local_file_write": "local_file_write",
@@ -309,64 +310,75 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         red_id: str,
         user_prompt: str = "",
     ) -> str:
-        """通过小红书号搜索用户主页，解析 profile URL 并启动画像分析流水线。"""
+        """通过小红书号解析用户并执行五阶段人物画像（主页 catalog → 选篇 → 笔记流水线 → 深度画像）。"""
         rid = (red_id or "").strip()
         if not rid:
             return _json_result({"ok": False, "error": "请提供小红书号（数字 ID）"})
         if not rid.isdigit() or len(rid) < 6:
             return _json_result({"ok": False, "error": f"小红书号格式异常：{rid}，应为纯数字（6-15 位）"})
 
-        from .creator_feed_adapter import resolve_xhs_red_id
-        from .task_manager import reuse_or_enqueue_task, add_log
-        from .video_pipeline import process_video_pipeline
-        from .span_orchestration import get_active_span_context
-        # Step 1: 通过小红书号解析用户主页
+        from .creator_profile_runner import run_xhs_chat_profile
+        from .tool_chat_resilience import extract_error_code
+
+        up = (user_prompt or "").strip() or f"分析小红书用户（小红书号 {rid}）的内容与人设，输出人物画像"
         try:
-            resolved = resolve_xhs_red_id(rid)
+            result = await run_xhs_chat_profile(red_id=rid, user_prompt=up)
         except Exception as ex:
-            _LOG.warning("xhs_user_search: resolve failed for %s: %s", rid, ex)
+            _LOG.warning("xhs_user_search: profile failed for %s: %s", rid, ex)
+            code = extract_error_code(str(ex))
             return _json_result({
                 "ok": False,
-                "error": f"未找到小红书号 {rid} 对应的用户：{ex}",
-                "hint": "请确认小红书号正确，或直接提供用户主页链接（如 https://www.xiaohongshu.com/user/profile/xxx）",
+                "error_code": code or "PROFILE_FAILED",
+                "error": str(ex),
+                "hint": "可先调用 sync_xhs_cookies 同步登录态；CDP 9223 未就绪时会尝试 HTTP+Cookie 回退",
             })
 
-        creator_id = str(resolved.get("creator_id") or "")
-        profile_url = str(resolved.get("profile_url") or f"https://www.xiaohongshu.com/user/profile/{creator_id}")
-        display_name = str(resolved.get("display_name") or rid)
+        if not result.get("ok"):
+            code = str(result.get("error_code") or extract_error_code(str(result.get("error") or "")) or "PROFILE_FAILED")
+            hint = "可先调用 sync_xhs_cookies；若 PROFILE_CATALOG_EMPTY 请确认 CDP Chrome 9223 已登录小红书"
+            if code in ("SUB_XHS_CDP_REQUIRED", "SUB_XHS_COOKIE_UNAVAILABLE"):
+                hint = "请先启动 CDP Chrome（9223）并调用 sync_xhs_cookies 同步 Cookie"
+            return _json_result({**result, "error_code": code, "hint": hint})
 
-        # Step 2: 启动链接文档化流水线
-        span_ctx = get_active_span_context() or {}
-        main_tid = str(span_ctx.get("task_id") or "").strip()
-        plat = "小红书"
-        up = (user_prompt or "").strip() or f"分析小红书用户 {display_name}（小红书号 {rid}）的主页内容，做用户画像"
-        tid, reused, _ = reuse_or_enqueue_task(plat, profile_url, user_prompt=up[:500], comments={"enabled": False}, action="start")
-        add_log(tid, f"AI 工具 xhs_user_search: red_id={rid} -> creator_id={creator_id} url={profile_url}; reused={reused}")
-
-        from .pipeline_scheduler import request_video_pipeline_async
-
-        asyncio.create_task(request_video_pipeline_async(tid))
         return _json_result({
-            "ok": True,
-            "async": True,
-            "task_id": tid,
-            "reused": reused,
-            "platform": plat,
-            "red_id": rid,
-            "creator_id": creator_id,
-            "display_name": display_name,
-            "profile_url": profile_url,
-            "hint": f"已解析小红书号 {rid} → 用户 {display_name}（{creator_id}），流水线已启动。在链接文档化页查看进度。",
+            **result,
+            "async": False,
+            "hint": (
+                f"已完成人物画像：{result.get('display_name')}（{result.get('creator_id')}），"
+                f"采样 {result.get('deep_ok_count')} 篇笔记。"
+                f"完整文档：{result.get('profile_md_path')}"
+            ),
         })
 
     tools.append(StructuredTool.from_function(
         coroutine=xhs_user_search,
         name="xhs_user_search",
         description=(
-            "通过小红书号（数字 ID）搜索并解析用户主页，自动启动画像分析流水线。"
-            "当用户提到「小红书号」「red id」「搜小红书用户」并提供数字 ID 时优先调用。"
-            "red_id 为小红书号（纯数字，如 1234567890）；user_prompt 为可选的额外分析指令。"
-            "内部自动完成：red_id → 浏览器搜索 → 解析 profile URL → 启动文档化流水线。"
+            "通过小红书号（数字 ID）搜索用户并生成人物画像。"
+            "当用户提到「小红书号」「red id」「搜小红书用户」「人物画像」并提供数字 ID 时优先调用。"
+            "流程：解析 red_id → 拉主页笔记目录 → 轻量画像 → 选取若干笔记链接（非主页 URL）"
+            "→ 逐条链接分析拉原文 → LLM 深度画像整合。"
+            "red_id 为纯数字；user_prompt 为分析侧重点（如内容风格、行业定位）。"
+            "不将用户主页 profile URL 当作单条链接提交流水线。"
+        ),
+    ))
+
+    async def sync_xhs_cookies(force: bool = False) -> str:
+        """从本机 Chrome（CDP 9223）同步小红书登录 Cookie 到后端，与订阅页「从 Chrome 同步 Cookie」相同。"""
+        from .cookie_manager import diagnose_xhs_cookies
+        from .xhs_local_browser import ensure_xhs_cookies_synced
+
+        result = dict(ensure_xhs_cookies_synced(force=bool(force)))
+        result["cookie_diagnosis"] = diagnose_xhs_cookies()
+        return _json_result(result)
+
+    tools.append(StructuredTool.from_function(
+        coroutine=sync_xhs_cookies,
+        name="sync_xhs_cookies",
+        description=(
+            "从本机 Chrome（CDP 端口 9223）同步小红书登录 Cookie 到后端。"
+            "当 xhs_user_search / 小红书抓取报 SUB_XHS_COOKIE_UNAVAILABLE 或 Cookie 未就绪时优先调用。"
+            "与 UI「从 Chrome 同步 Cookie」按钮等价；force=true 时强制重新同步。"
         ),
     ))
 

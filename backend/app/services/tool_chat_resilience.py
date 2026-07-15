@@ -12,7 +12,11 @@ _LOG = logging.getLogger(__name__)
 def extract_error_code(message: str) -> str:
     from .ops_error_classifier import extract_error_code as _extract
 
-    return _extract(message)
+    standard = _extract(message)
+    if standard:
+        return standard
+    legacy = re.search(r"\b(SUB_[A-Z0-9_]+)\b", str(message or ""), re.IGNORECASE)
+    return legacy.group(1).upper() if legacy else ""
 
 
 # 已知错误码 → 重试策略（标准码 S1001 等；运维/聊天链路）
@@ -23,6 +27,10 @@ _KNOWN_RETRY: Dict[str, Dict[str, Any]] = {
     },
     "S1002": {
         "hint": "Chrome 未开 CDP；重试前探测 CDP 端口",
+        "pre_retry": "probe_cdp",
+    },
+    "SUB_XHS_CDP_REQUIRED": {
+        "hint": "Chrome 未开启 CDP；重试前探测 CDP 端口",
         "pre_retry": "probe_cdp",
     },
     "SUB_XHS_CDP_SEARCH_FAILED": {

@@ -70,12 +70,12 @@ def coerce_pasted_link(raw: str) -> str:
     从分享口令/整段粘贴文本中提取首个可用 http(s) 链接。
     抖音/小红书复制文案常夹带标题、口令与表情，不可整段当作 URL。
     """
-    from .link_doc_routing import extract_http_urls
-
     text = (raw or "").strip()
     if not text:
         return ""
-    urls = extract_http_urls(text)
+    # Keep this helper self-contained: some SDK consumers import ``link_hash``
+    # as a top-level module, where package-relative imports are unavailable.
+    urls = re.findall(r"https?://[^\s<>'\"，。；！？）】]+", text, re.I)
     if urls:
         return urls[0]
     # 无 scheme 的常见主站/短链

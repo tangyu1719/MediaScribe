@@ -1,0 +1,166 @@
+"""AI 辅助搜索 SDK — 构造测试集（模拟工具/链接/技能数据）。"""
+from __future__ import annotations
+
+MOCK_TOOLS = [
+    {
+        "id": "tool_link_pipeline",
+        "name": "链接转写流水线",
+        "kind": "tool_call",
+        "description": "提交视频/图文链接，执行下载、转写、摘要与 Markdown 产出。",
+        "inputs": [{"name": "link", "hint": "页面 URL"}],
+    },
+    {
+        "id": "tool_rag_search",
+        "name": "知识库检索",
+        "kind": "tool_call",
+        "description": "在 Milvus 向量库中语义检索文档片段。",
+        "inputs": [{"name": "query", "hint": "检索问句"}],
+    },
+    {
+        "id": "tool_xhs_user_search",
+        "name": "小红书用户搜索",
+        "kind": "tool_call",
+        "description": "按关键词搜索小红书博主用户。",
+        "inputs": [{"name": "keyword", "hint": "昵称或 red_id"}],
+    },
+    {
+        "id": "tool_local_file_grep",
+        "name": "本地文件 grep",
+        "kind": "tool_call",
+        "description": "在本地工作区按正则搜索文件内容。",
+        "inputs": [{"name": "pattern", "hint": "正则表达式"}],
+    },
+]
+
+MOCK_TASKS = [
+    {
+        "task_id": "t-agent-001",
+        "link_title": "Agent 智能体入门实战",
+        "doc_title": "智能体开发笔记",
+        "link": "https://www.xiaohongshu.com/explore/agent101",
+        "author_name": "AI研习社",
+        "status": "completed",
+        "read_status": "unread",
+        "import_source": "manual",
+        "source_label": "导入链接",
+        "updated_at": "2026-07-01T10:00:00",
+        "queue_seq": 10,
+    },
+    {
+        "task_id": "t-java-002",
+        "link_title": "Java 面试八股文精选",
+        "doc_title": "",
+        "link": "https://example.com/java-interview",
+        "author_name": "后端老张",
+        "status": "completed",
+        "read_status": "read",
+        "import_source": "manual",
+        "source_label": "导入链接",
+        "updated_at": "2026-07-02T08:00:00",
+        "queue_seq": 9,
+    },
+    {
+        "task_id": "t-rag-003",
+        "link_title": "RAG 检索增强生成最佳实践",
+        "doc_title": "向量检索方案",
+        "link": "https://example.com/rag-guide",
+        "author_name": "向量实验室",
+        "status": "completed",
+        "read_status": "unread",
+        "import_source": "chat",
+        "source_label": "对话导入",
+        "updated_at": "2026-07-02T12:00:00",
+        "queue_seq": 11,
+    },
+    {
+        "task_id": "t-python-004",
+        "link_title": "Python 数据分析入门",
+        "doc_title": "",
+        "link": "https://example.com/python-pandas",
+        "author_name": "数据小白",
+        "status": "pending",
+        "import_source": "manual",
+        "source_label": "导入链接",
+        "updated_at": "2026-06-28T15:00:00",
+        "queue_seq": 5,
+    },
+]
+
+MOCK_SKILLS = [
+    {
+        "skill_id": "skill-xhs-profile",
+        "name": "小红书画像分析",
+        "description": "分析博主内容风格、垂类定位与爆款特征。",
+        "commands": ["/xhs-profile", "/画像"],
+    },
+    {
+        "skill_id": "skill-lark-doc",
+        "name": "飞书文档写入",
+        "description": "将 Markdown 内容创建或追加到飞书云文档。",
+        "commands": ["/lark-doc", "/飞书文档"],
+    },
+    {
+        "skill_id": "skill-rag-eval",
+        "name": "RAG 评测",
+        "description": "对知识库召回结果做命中率与 MRR 评测。",
+        "commands": ["/rag-eval"],
+    },
+]
+
+SEARCH_CASES = [
+    {
+        "id": "case_tools_link",
+        "query": "链接转写",
+        "providers": ["builtin_tools"],
+        "use_llm_expand": False,
+        "expect_titles_contain_any": ["链接", "转写"],
+        "expect_min_hits": 1,
+    },
+    {
+        "id": "case_tools_rag_synonym",
+        "query": "知识库",
+        "providers": ["builtin_tools"],
+        "use_llm_expand": False,
+        "expect_titles_contain_any": ["知识库", "检索", "rag"],
+        "expect_min_hits": 1,
+    },
+    {
+        "id": "case_tasks_agent_synonym",
+        "query": "智能体",
+        "providers": ["task_queue"],
+        "use_llm_expand": False,
+        "expect_titles_contain_any": ["Agent", "智能体"],
+        "expect_min_hits": 1,
+    },
+    {
+        "id": "case_tasks_java",
+        "query": "java 面试",
+        "providers": ["task_queue"],
+        "use_llm_expand": False,
+        "expect_titles_contain_any": ["Java", "面试"],
+        "expect_min_hits": 1,
+    },
+    {
+        "id": "case_skills_rag",
+        "query": "rag 评测",
+        "providers": ["skills"],
+        "use_llm_expand": False,
+        "expect_titles_contain_any": ["RAG", "评测"],
+        "expect_min_hits": 1,
+    },
+    {
+        "id": "case_multi_provider",
+        "query": "rag",
+        "providers": ["builtin_tools", "task_queue", "skills"],
+        "use_llm_expand": False,
+        "expect_providers_any": ["builtin_tools", "task_queue", "skills"],
+        "expect_min_hits": 2,
+    },
+    {
+        "id": "case_no_match",
+        "query": "zzzznotexist999",
+        "providers": ["builtin_tools", "task_queue", "skills"],
+        "use_llm_expand": False,
+        "expect_min_hits": 0,
+    },
+]

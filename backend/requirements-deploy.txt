@@ -2,6 +2,7 @@
 
 # 一键部署、RAG、缓存与媒体处理依赖
 PyYAML>=6.0,<7
+setuptools>=68,<82
 redis>=5.0,<6
 sentence-transformers>=3.0,<4
 torch>=2.2

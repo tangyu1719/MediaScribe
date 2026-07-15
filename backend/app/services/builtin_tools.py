@@ -50,12 +50,12 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             "kind": "tool_call",
             "version": "1.0.0",
             "impl": "internal",
-            "description": "通过小红书号（数字 ID）搜索用户主页，解析 profile URL 并自动启动画像分析流水线。内部通过浏览器自动化（CDP/Playwright）完成 red_id → creator_id → profile_url 的解析。",
+            "description": "通过小红书号（数字 ID）解析用户并执行五阶段人物画像：主页笔记目录 → 选篇 → 逐条笔记链接分析 → LLM 深度画像。不会将用户主页 URL 当作单条链接提交流水线。",
             "inputs": [
                 {"name": "red_id", "type": "string", "required": True, "hint": "小红书号（纯数字 ID，如 1234567890）"},
-                {"name": "user_prompt", "type": "string", "required": False, "hint": "额外分析指令，如「做用户画像」「分析内容风格」"},
+                {"name": "user_prompt", "type": "string", "required": False, "hint": "分析侧重点，如「做用户画像」「分析内容风格与受众」"},
             ],
-            "outputs": "解析结果（creator_id、display_name、profile_url）与流水线任务 ID。",
+            "outputs": "人物画像摘要、采样笔记列表、profile_md_path 本地文档路径。",
         },
         {
             "id": "tool_rag_index",

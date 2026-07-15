@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from sse_regress_lib import iter_sse_from_response
+from tests.sse_regress_lib import iter_sse_from_response
 
 QUERY = "搜索知识库中关于MCP技术相关的文档进行总结反馈"
 SESSION = "test_mcp_rag_" + uuid.uuid4().hex[:10]

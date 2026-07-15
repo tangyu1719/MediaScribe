@@ -44,15 +44,16 @@ _GENERIC_AUTHOR_NAMES = frozenset({
 
 
 def is_generic_author_name(name: str) -> bool:
-    """Return whether an author label is empty or too generic to persist."""
-    text = re.sub(r"\s+", "", str(name or "").strip())
-    if not text:
+    t = re.sub(r"\s+", "", str(name or "").strip())
+    if not t:
         return True
-    if text.lower() in {"unknown", "author", "editor", "admin"}:
+    if t.lower() in {"unknown", "author", "editor", "admin"}:
         return True
-    if text in _GENERIC_AUTHOR_NAMES:
+    if t in _GENERIC_AUTHOR_NAMES:
         return True
-    return len(text) <= 1
+    if len(t) <= 1:
+        return True
+    return False
 
 
 def resolve_output_author_name(
@@ -395,7 +396,7 @@ def _extract_author_from_html(html: str, platform: str) -> Tuple[str, str]:
                     if user:
                         author_name = str(user.get("nickname") or user.get("name") or "")
                         author_id = str(user.get("userId") or user.get("id") or user.get("user_id") or "")
-                        if author_name:
+                        if author_name and not is_generic_author_name(author_name):
                             break
         elif platform == "抖音":
             import re as _re
@@ -449,6 +450,8 @@ def _extract_author_from_html(html: str, platform: str) -> Tuple[str, str]:
             author_name = _meta_content(soup, "author", "article:author")
             if author_name:
                 author_name = str(author_name).strip()
+                if is_generic_author_name(author_name):
+                    author_name = ""
         except Exception:
             pass
     return author_name, author_id
