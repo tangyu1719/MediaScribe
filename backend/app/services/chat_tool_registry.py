@@ -312,7 +312,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         description=(
             "通过小红书号（数字 ID）搜索并解析用户主页，自动启动画像分析流水线。"
             "当用户提到「小红书号」「red id」「搜小红书用户」并提供数字 ID 时优先调用。"
-            "red_id 为小红书号（纯数字，如 9545679835）；user_prompt 为可选的额外分析指令。"
+            "red_id 为小红书号（纯数字，如 1234567890）；user_prompt 为可选的额外分析指令。"
             "内部自动完成：red_id → 浏览器搜索 → 解析 profile URL → 启动文档化流水线。"
         ),
     ))

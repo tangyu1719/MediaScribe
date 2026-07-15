@@ -26,7 +26,7 @@ def test_enrich_subscription_from_subscription_id(monkeypatch):
         return {
             "subscription_id": sid,
             "platform": "xiaohongshu_favorites",
-            "display_name": "三点、水",
+            "display_name": "示例账号",
         }
 
     monkeypatch.setattr(
@@ -47,11 +47,11 @@ def test_enrich_subscription_from_subscription_id(monkeypatch):
 def test_build_source_label_favorites():
     lbl = build_source_label(
         SOURCE_SUB_FAVORITES,
-        display_name="三点、水",
+        display_name="示例账号",
         platform="xiaohongshu_favorites",
     )
     assert "收藏夹" in lbl
-    assert "三点、水" in lbl
+    assert "示例账号" in lbl
 
 
 def test_title_synonym_match():

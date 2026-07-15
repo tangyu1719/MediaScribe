@@ -27,18 +27,18 @@ if str(_BACKEND) not in sys.path:
 # 用户指定 13 条（必跑）
 REQUIRED_LINKS: List[Dict[str, str]] = [
     {"id": "1", "platform": "抖音", "link": "https://www.douyin.com/video/7522305267925634356"},
-    {"id": "2", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a13fbe30000000035030727?xsec_token=ABBfS-iml4Q9w1C8unyXSg6eefYx0oROvgMpYh1I5EdUc=&xsec_source=pc_collect"},
-    {"id": "3", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a0ae15e000000003601db35?xsec_token=AB8qZrLaOFF3rSXTnkGE4DgEcQV3PyERaWfgCQdHq-Rss=&xsec_source=pc_collect"},
-    {"id": "4", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1ba0d2000000000603312e?xsec_token=AB2ZUAWjTMQLAGX3HXsldOAcAQl-IFcLRWY1vozCGsxlE=&xsec_source=pc_collect"},
-    {"id": "5", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a03567a0000000038021532?xsec_token=ABmPxTpGr_2YlG4Codi_tUOD7JQI6LM7f-iXTMqI5hoME=&xsec_source=pc_collect"},
-    {"id": "6", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a15bf0700000000370353f8?xsec_token=ABr80hhQx2AJhkQiC1varnleciu4Yma-vO5RXAbihTW88=&xsec_source=pc_collect"},
-    {"id": "7", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69f4ff4000000000360331a8?xsec_token=AB44ajUA8NiTsAlPyBu_X48MgIDLzF7HapzXKCgnPaIak=&xsec_source=pc_collect"},
-    {"id": "8", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69fcc036000000001a034be5?xsec_token=ABNMR6Y5U8UpnfyNTiNBBgOxwaLC0bwBb-6mMjLbPPkz4=&xsec_source=pc_collect"},
-    {"id": "9", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a14433d00000000360307f7?xsec_token=ABt5DaDs3vdzh8QB4Y1qr8zEgSOEQOy8xlQH5MxjrS4-U=&xsec_source=pc_collect"},
-    {"id": "10", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1a5a8a0000000007026aca?xsec_token=AB3HR26Q-818zdVMzZCI94XZd3vInQ14Bbza33x8SwrDY=&xsec_source=pc_collect"},
-    {"id": "11", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1a4d7500000000060329f6?xsec_token=AB3HR26Q-818zdVMzZCI94XcGTFnkePcsGz0OSX8h3zQI=&xsec_source=pc_collect"},
-    {"id": "12", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69c1e81200000000230237ef?xsec_token=ABgfF_O6unnSexOjawLsJBhzHuW1YnLMtTXJHWNciW5xw=&xsec_source=pc_collect"},
-    {"id": "13", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a180dd8000000003802116d?xsec_token=ABOSNHVUcKOyl35wQo-XXlO6k7wSI7wB4iiDE5JvnJnEo=&xsec_source=pc_collect"},
+    {"id": "2", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a13fbe30000000035030727?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "3", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a0ae15e000000003601db35?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "4", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1ba0d2000000000603312e?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "5", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a03567a0000000038021532?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "6", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a15bf0700000000370353f8?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "7", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69f4ff4000000000360331a8?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "8", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69fcc036000000001a034be5?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "9", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a14433d00000000360307f7?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "10", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1a5a8a0000000007026aca?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "11", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a1a4d7500000000060329f6?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "12", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/69c1e81200000000230237ef?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
+    {"id": "13", "platform": "小红书", "link": "https://www.xiaohongshu.com/explore/6a180dd8000000003802116d?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"},
 ]
 
 # 补充边界（可选，默认一并跑）

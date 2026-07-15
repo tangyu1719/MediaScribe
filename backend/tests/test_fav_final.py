@@ -70,7 +70,7 @@ if not s.get('loggedIn') or s.get('guest'):
     sys.exit(1)
 
 print("\n=== 3. 导航收藏页 ===")
-creator_id = '60dc2e340000000001008a1f'
+creator_id = '000000000000000000000000'
 fav_url = f'https://www.xiaohongshu.com/user/profile/{creator_id}?tab=fav&subTab=note'
 requests.put(f'http://127.0.0.1:{port}/json/new?url={fav_url}', timeout=10)
 time.sleep(6)

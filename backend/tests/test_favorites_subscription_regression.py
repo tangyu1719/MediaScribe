@@ -78,7 +78,7 @@ def test_favorites_scrape_entry():
     """收藏抓取入口不会因 Cookie 不可用而崩溃（应正确 fallback）"""
     from app.services.xhs_favorites_adapter import fetch_favorites_catalog
 
-    creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "60dc2e340000000001008a1f")
+    creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "000000000000000000000000")
     print(f"\n测试收藏抓取: creator_id={creator_id}")
 
     try:

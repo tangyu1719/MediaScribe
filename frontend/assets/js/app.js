@@ -907,7 +907,7 @@ const upUnifiedList=computed(()=>{
   });
 });
 const favSub=reactive({subscription_id:"",display_name:"",status:"",red_id:"",initial_backfill_done:false,cursor_offset:0});
-const favSession=reactive({chrome_profile_ok:false,chrome_gaia:"",xhs_nickname:"",xhs_owner_ok:false,cdp_ready:false,cookie_logged_in:false,prefer_cookie_fetch:false,fetch_mode:"none",expected_gaia:"有光",login_hint:""});
+const favSession=reactive({chrome_profile_ok:false,chrome_gaia:"",xhs_nickname:"",xhs_owner_ok:false,cdp_ready:false,cookie_logged_in:false,prefer_cookie_fetch:false,fetch_mode:"none",expected_gaia:"",login_hint:""});
 const favDigest=reactive({digest_md:"",rag_degraded:false,digest_id:""});
 const favHabit=reactive({top_authors:[],interest_topics:[],preferred_content_types:[],persona_md:"",total_analyzed:0});
 const favCards=ref([]);
@@ -1226,13 +1226,13 @@ function _applyFavPayload(d){
     cookie_logged_in:!!sess.cookie_logged_in,
     prefer_cookie_fetch:!!sess.prefer_cookie_fetch,
     fetch_mode:sess.fetch_mode||"none",
-    expected_gaia:sess.expected_gaia||"有光",
+    expected_gaia:sess.expected_gaia||"",
     login_hint:""
   });
   favForm.error=d.subscription_error||"";
   if(favForm.syncing||favForm.cookieSyncing)return;
-  const nick=sess.xhs_nickname||"三点、水";
-  const gaia=sess.chrome_gaia||"有光";
+  const nick=sess.xhs_nickname||"已配置账号";
+  const gaia=sess.chrome_gaia||"已配置用户";
   if(sess.xhs_owner_ok&&sess.cookie_logged_in){
     _setFavProgress("ok",`小红书「${nick}」已登录 · Cookie 模式 · Chrome「${gaia}」`,"ready",4,4);
     return;
@@ -1254,7 +1254,7 @@ function _applyFavPayload(d){
     return;
   }
   if(!sess.xhs_owner_ok){
-    _setFavProgress("error",sess.login_hint||"请在 CDP Chrome 登录小红书「三点、水」","need_xhs_login",3,4);
+    _setFavProgress("error",sess.login_hint||"请在 CDP Chrome 登录配置的小红书账号","need_xhs_login",3,4);
     return;
   }
   _setFavProgress("info",sess.login_hint||"检测完成","checking",0,4);
@@ -1609,7 +1609,7 @@ async function ldFavorites(){
       status:sub.status||"",
       initial_backfill_done:!!sub.initial_backfill_done,
       cursor_offset:Number(sub.cursor_offset||0),
-      red_id:((sub.tags||[]).find(t=>String(t).startsWith("red_id:"))||"").replace(/^red_id:/,"")||"9545679835"
+      red_id:((sub.tags||[]).find(t=>String(t).startsWith("red_id:"))||"").replace(/^red_id:/,"")
     });
     const habit=(d.habit&&d.habit.habit_json)||{};
     Object.assign(favHabit,{
@@ -1633,7 +1633,7 @@ function _fmtFavSyncErr(d){
   const msg=(d&&(d.detail&&(d.detail.message||d.detail.error)||d.error||d.detail)||"").toString();
   if(/SUB_XHS_GUEST|访客态/i.test(msg))return msg+"（Chrome 149 须用「Google Chrome CDP 9223」快捷方式，不能用普通 Chrome）";
   if(/SUB_OWNER_CDP|CDP 未就绪|CHROME_CDP_BROKEN/i.test(msg))return msg+"（请完全退出 Chrome，双击桌面「Google Chrome CDP 9223」再试）";
-  if(/SUB_OWNER_XHS_LOGIN|Cookie 未处于登录/i.test(msg))return msg+"（请在本机 Chrome 登录小红书「三点、水」后重试）";
+  if(/SUB_OWNER_XHS_LOGIN|Cookie 未处于登录/i.test(msg))return msg+"（请在本机 Chrome 登录配置的小红书账号后重试）";
   return msg;
 }
 async function refreshFavoritesCookies(){

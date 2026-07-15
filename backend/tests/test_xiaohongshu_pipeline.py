@@ -46,7 +46,7 @@ def test_video_pipeline_routes_xhs_without_get_task_name_error():
 
         link = (
             f"https://www.xiaohongshu.com/explore/{uuid.uuid4().hex[:24]}"
-            "?xsec_token=ABBfS-iml4Q9w1C8unyXSg6XUnnBAIbvsyuWfQGZFKUfA=&xsec_source=pc_collect"
+            "?xsec_token=REDACTED_TEST_TOKEN&xsec_source=pc_collect"
         )
         tid = create_task("小红书", link, user_prompt="admin")
         stub = {

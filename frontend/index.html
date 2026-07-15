@@ -656,11 +656,11 @@
     <div v-show="sub.sec==='bind'" class="xhs-sub-page">
       <div class="glass">
         <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>小红书绑定</div>
-        <p style="font-size:12px;color:var(--t2);margin-bottom:8px">绑定<strong>本人</strong>小红书账号（三点、水 / 9545679835），供收藏夹订阅与关注 UP 拉取使用。Chrome 149 起须用桌面<strong>「Google Chrome CDP 9223」</strong>快捷方式（独立 SBA-Chrome-CDP 目录）。</p>
+        <p style="font-size:12px;color:var(--t2);margin-bottom:8px">绑定<strong>本人</strong>小红书账号（由环境变量配置），供收藏夹订阅与关注 UP 拉取使用。Chrome 149 起须用桌面<strong>「Google Chrome CDP 9223」</strong>快捷方式（独立 SBA-Chrome-CDP 目录）。</p>
         <ul style="font-size:11px;color:var(--t2);margin:0 0 10px 18px;line-height:1.6">
           <li><strong>评论读取</strong>：公开笔记评论区，通常<strong>无需登录</strong>（有 Cookie 可抓更多）</li>
           <li><strong>UP 订阅</strong>：他人主页公开笔记，需小红书 Cookie 登录态</li>
-          <li><strong>收藏夹订阅</strong>：仅本人账号可见，需<strong>三点、水</strong>登录；优先 Cookie 模式，CDP 可选增强</li>
+          <li><strong>收藏夹订阅</strong>：仅本人账号可见，需登录已配置账号；优先 Cookie 模式，CDP 可选增强</li>
         </ul>
         <div class="fr" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
           <button type="button" class="btn btn-p btn-xs" :disabled="favForm.cookieSyncing" @click="refreshFavoritesCookies()">{{favForm.cookieSyncing?'同步 Cookie…':'从 Chrome 同步 Cookie'}}</button>
@@ -697,7 +697,7 @@
           <span class="fav-progress-msg">{{favProgress.message}}</span>
         </div>
         <div v-if="favSub.subscription_id" class="rss-feed-meta" style="margin-top:6px">
-          {{favSub.display_name||'三点、水-收藏夹'}} · 小红书号 {{favSub.red_id||'9545679835'}} · {{favSub.status||'active'}}
+          {{favSub.display_name||'我的收藏夹'}} · 小红书号 {{favSub.red_id||'未配置'}} · {{favSub.status||'active'}}
           <span v-if="favSub.initial_backfill_done"> · 增量模式</span>
           <span v-else> · offset 回填中（cursor {{favSub.cursor_offset||0}}）</span>
         </div>

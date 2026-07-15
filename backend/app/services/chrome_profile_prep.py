@@ -48,7 +48,7 @@ def is_default_chrome_user_data_path(path: str | Path) -> bool:
 def bootstrap_cdp_profile_from_owner(*, force: bool = False) -> Dict[str, Any]:
     """
     首次将日常 Chrome Default Profile 复制到 CDP 专用目录（Chrome 须已完全退出）。
-    复制后用户可在 CDP Chrome 中沿用有光/小红书登录态（视 Chrome 加密策略而定）。
+    复制后用户可在 CDP Chrome 中沿用已配置用户/小红书登录态（视 Chrome 加密策略而定）。
     """
     dest_ud = cdp_chrome_user_data_dir()
     dest_ud.mkdir(parents=True, exist_ok=True)
@@ -274,17 +274,17 @@ def _normalize_chrome_launch_argv(tokens: List[str]) -> List[str]:
 
 
 def _verify_chrome_owner_profile_attached() -> None:
-    """冷启动后校验：必须是有光 Default Profile，禁止空白/访客态冒充用户态。"""
+    """冷启动后校验：必须是已配置的 Default Profile，禁止空白/访客态冒充用户态。"""
     from .xhs_local_browser import _browser_config_chrome, is_browser_google_signed_in
 
     cfg = _browser_config_chrome()
     if not is_browser_google_signed_in(cfg):
         raise RuntimeError(
-            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未附着到有光 Default Profile。"
+            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未附着到已配置的 Default Profile。"
             "常见原因：--user-data-dir 路径含空格被错误拆分。"
             f"期望 user_data_dir={cfg.user_data_dir}; profile={cfg.profile}"
         )
-    expected_gaia = (os.environ.get("SBA_CHROME_EXPECTED_GAIA") or "有光").strip()
+    expected_gaia = (os.environ.get("SBA_CHROME_EXPECTED_GAIA") or "").strip()
     local_state = cfg.user_data_dir / "Local State"
     gaia = ""
     if local_state.is_file():
@@ -746,7 +746,7 @@ def wait_and_launch_chrome_from_desktop_shortcut(
 ) -> Dict[str, Any]:
     """
     等待用户完全退出 Chrome（不 taskkill），随后执行桌面快捷方式并等 CDP。
-    供 Agent 无人值守：用户关浏览器后自动拉起带 9223 的有光 Profile。
+    供 Agent 无人值守：用户关浏览器后自动拉起带 9223 的已配置 Profile。
     """
     info = build_launch_args_from_desktop_shortcut()
     if not info.get("ok"):

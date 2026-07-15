@@ -1,4 +1,4 @@
-"""收藏夹/个人号 — 强制本机 Chrome「有光」用户配置 + Cookie 守卫（禁止 Edge / 禁止新开自动化浏览器）。"""
+"""收藏夹/个人号 — 强制使用已配置 Chrome 用户 + Cookie 守卫（禁止 Edge / 禁止新开自动化浏览器）。"""
 from __future__ import annotations
 
 import logging
@@ -26,19 +26,19 @@ from .xhs_local_browser import (
 )
 
 _log = logging.getLogger("sba.xhs_owner_chrome")
-_CHAIN = "小红书收藏夹-Chrome有光会话"
+_CHAIN = "小红书收藏夹-Chrome本人会话"
 
 
 def _expected_gaia() -> str:
-    return (os.environ.get("SBA_CHROME_EXPECTED_GAIA") or "有光").strip()
+    return (os.environ.get("SBA_CHROME_EXPECTED_GAIA") or "").strip()
 
 
 def _expected_email() -> str:
-    return (os.environ.get("SBA_CHROME_EXPECTED_EMAIL") or "liyouguang2@gmail.com").strip().lower()
+    return (os.environ.get("SBA_CHROME_EXPECTED_EMAIL") or "").strip().lower()
 
 
 def _expected_xhs_nickname() -> str:
-    return (os.environ.get("SBA_XHS_OWNER_NICKNAME") or "三点").strip()
+    return (os.environ.get("SBA_XHS_OWNER_NICKNAME") or "").strip()
 
 
 def owner_chrome_config() -> BrowserConfig:
@@ -78,7 +78,7 @@ def read_chrome_profile_identity(cfg: BrowserConfig) -> Dict[str, str]:
 
 
 def verify_owner_chrome_profile(cfg: Optional[BrowserConfig] = None) -> Dict[str, Any]:
-    """校验当前 Chrome Profile 是否为「有光」Google 账号。"""
+    """校验当前 Chrome Profile 是否为环境变量指定的 Google 账号。"""
     cfg = cfg or owner_chrome_config()
     ident = read_chrome_profile_identity(cfg)
     gaia = ident.get("gaia_name") or ident.get("user_name") or ""
@@ -125,7 +125,7 @@ def _nickname_matches(nickname: str) -> bool:
     nick = (nickname or "").strip()
     if needle in nick:
         return True
-    # 兼容「三点、水」「三点水」
+    # 兼容昵称中的顿号、间隔点与空格
     compact = re.sub(r"[、·\s]", "", nick)
     needle_compact = re.sub(r"[、·\s]", "", needle)
     return bool(needle_compact and needle_compact in compact)
@@ -141,7 +141,7 @@ def _cookies_indicate_xhs_login(cookies: Dict[str, str]) -> bool:
 
 
 def verify_owner_xhs_cookies(cookies: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """校验小红书 Cookie 是否为本人（三点、水）登录态。"""
+    """校验小红书 Cookie 是否为已配置的本人登录态。"""
     ck = cookies if cookies is not None else (load_cookies("xiaohongshu") or {})
     probe = probe_xhs_cookies_logged_in(ck)
     nick = str(probe.get("nickname") or "")
@@ -271,7 +271,7 @@ def probe_xhs_session_via_cdp() -> Dict[str, Any]:
 
 def refresh_owner_xhs_cookies() -> Dict[str, Any]:
     """
-    仅从 Chrome「有光」Profile 读取 Cookie（browser_cookie3），
+    仅从环境变量指定的 Chrome Profile 读取 Cookie（browser_cookie3），
     不启动 Edge、不 launch_persistent、不杀 Chrome。
     """
     cfg = owner_chrome_config()
@@ -352,7 +352,7 @@ def refresh_owner_xhs_cookies() -> Dict[str, Any]:
         return {
             "ok": False,
             "error_code": "SUB_OWNER_COOKIE_READ_FAILED",
-            "error": "无法从 Chrome Profile 读取小红书 Cookie，请确认 Chrome 已登录小红书（三点、水）",
+            "error": "无法从 Chrome Profile 读取小红书 Cookie，请确认 Chrome 已登录已配置的小红书账号",
             "profile_check": prof,
             "xhs_check": xhs,
         }
@@ -384,8 +384,8 @@ def refresh_owner_xhs_cookies() -> Dict[str, Any]:
 def ensure_owner_chrome_cdp() -> Dict[str, Any]:
     """
     收藏夹操作前检查：
-    1) Chrome Profile = 有光
-    2) 小红书 = 三点、水
+    1) Chrome Profile = 环境变量指定用户
+    2) 小红书 = 环境变量指定本人账号
     3) CDP 已附着到**正在运行的 Chrome**（不新开浏览器）
     """
     from .xhs_local_browser import assert_plan_a_owner_browser_ops
@@ -418,9 +418,9 @@ def ensure_owner_chrome_cdp() -> Dict[str, Any]:
     nick = live.get("nickname") or cookie_res.get("nickname") or ""
     if not live.get("logged_in"):
         raise RuntimeError(
-            "SUB_OWNER_XHS_LOGIN_REQUIRED: Chrome 已是 Google「有光」Default Profile，"
+            "SUB_OWNER_XHS_LOGIN_REQUIRED: Chrome 已是配置的 Google Default Profile，"
             "但小红书当前为访客/未登录（loggedIn=False）。"
-            "请在 CDP Chrome 窗口手动登录「三点、水」并打开收藏页 tab=fav 后重试。"
+            "请在 CDP Chrome 窗口手动登录已配置的小红书账号并打开收藏页 tab=fav 后重试。"
             f" tab={str(live.get('tab_url') or '')[:120]}"
         )
     if nick and not _nickname_matches(nick):
@@ -447,7 +447,7 @@ def ensure_owner_chrome_cdp() -> Dict[str, Any]:
 
 
 def get_owner_session_status() -> Dict[str, Any]:
-    """供 API/前端展示 Chrome 有光 + 三点、水 会话状态。"""
+    """供 API/前端展示已配置 Chrome + 小红书本人会话状态。"""
     from .cookie_manager import diagnose_xhs_cookies
     from .chrome_profile_prep import cdp_chrome_user_data_dir
     from .xhs_local_browser import should_prefer_cookie_favorites_fetch
@@ -500,7 +500,7 @@ def get_owner_session_status() -> Dict[str, Any]:
                     f"请双击桌面「Google Chrome CDP 9223」启动（目录 {cdp_chrome_user_data_dir()}）。"
                     if diag.get("cdp_blocked_default_profile") or not diag.get("cdp_port")
                     else (
-                        "请在 CDP Chrome 收藏页确认小红书登录「三点、水」。"
+                        "请在 CDP Chrome 收藏页确认已登录配置的小红书账号。"
                         if not (ck.get("ok") or live.get("logged_in"))
                         else "请点击「从 Chrome 同步 Cookie」。"
                     )
@@ -516,7 +516,7 @@ def resolve_owner_creator_id_from_cdp() -> Dict[str, Any]:
     live = probe_xhs_session_via_cdp()
     uid = (live.get("user_id") or "").strip()
     if not uid:
-        expected_red = (os.environ.get("XHS_FAVORITES_RED_ID") or "9545679835").strip()
+        expected_red = (os.environ.get("XHS_FAVORITES_RED_ID") or "").strip()
         override = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
         if override and re.fullmatch(r"[a-f0-9]{24}", override, re.I):
             uid = override
@@ -537,7 +537,7 @@ def resolve_owner_creator_id_from_cdp() -> Dict[str, Any]:
 
 
 def _display_name_fallback() -> str:
-    return (os.environ.get("XHS_FAVORITES_DISPLAY_NAME") or "三点、水-收藏夹").strip()
+    return (os.environ.get("XHS_FAVORITES_DISPLAY_NAME") or "我的收藏夹").strip()
 
 
 def _list_cdp_tabs(port: int) -> List[Dict[str, Any]]:
@@ -555,13 +555,13 @@ def _list_cdp_tabs(port: int) -> List[Dict[str, Any]]:
 
 def verify_plan_a_owner_session() -> Dict[str, Any]:
     """
-    方案 A 只读校验：CDP + 有光 Profile + 小红书登录 + 收藏 Tab。
+    方案 A 只读校验：CDP + 已配置 Profile + 小红书登录 + 收藏 Tab。
     不启动浏览器、不 new_context/new_page、不 goto。
     """
     from .xhs_local_browser import is_usable_xhs_tab_url, xhs_cdp_attach_only
 
     hints: List[str] = []
-    prefer_cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+    prefer_cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
     prof = verify_owner_chrome_profile()
     if not prof.get("ok"):
         return {
@@ -573,7 +573,7 @@ def verify_plan_a_owner_session() -> Dict[str, Any]:
             ),
             "profile_check": prof,
             "hints": [
-                "须使用 Default Profile（李有光 / liyouguang2@gmail.com）",
+                "须使用环境变量指定的 Default Profile",
                 "禁止 Agent 用 Start-Process 冷启动 Chrome（会丢 Cookie 变成灰色访客）",
                 "请完全退出 Chrome 后，Win+R 粘贴 scripts/plan_a_launch_chrome.ps1 打印的启动命令",
             ],
@@ -606,7 +606,7 @@ def verify_plan_a_owner_session() -> Dict[str, Any]:
             "ok": False,
             "error_code": "SUB_OWNER_CHROME_GUEST_SESSION",
             "error": (
-                "附着的不是您日常使用的 Chrome：右上角须为「李有光」，不能是「登录 Chrome」/灰色访客。"
+                "附着的不是配置的日常 Chrome：右上角须为指定用户，不能是「登录 Chrome」/灰色访客。"
                 "请关闭此窗口，在您平时的 Chrome 快捷方式目标后追加 "
                 f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*，再从任务栏打开。"
             ),
@@ -636,14 +636,14 @@ def verify_plan_a_owner_session() -> Dict[str, Any]:
         return {
             "ok": False,
             "error_code": "SUB_OWNER_XHS_LOGIN_REQUIRED",
-            "error": "CDP 附着的是未登录小红书会话（登录页），不是三点、水的有光 Chrome",
+            "error": "CDP 附着的是未登录小红书会话（登录页），不是配置的本人 Chrome 会话",
             "cdp_port": port,
             "profile_check": prof,
             "bad_tabs": [{"title": t.get("title"), "url": (t.get("url") or "")[:120]} for t in login_tabs[:3]],
             "hints": hints
             + [
                 "右上角若是灰色头像 = 错误 Profile/冷启动，须完全退出后用手动命令重开",
-                "确认收藏页 URL: .../60dc2e340000000001008a1f?tab=fav",
+                "确认收藏页 URL: .../<XHS_FAVORITES_CREATOR_ID>?tab=fav",
             ],
         }
 
@@ -683,7 +683,7 @@ def verify_plan_a_owner_session() -> Dict[str, Any]:
             + [
                 "禁止 Agent/脚本执行 plan_a_open_my_chrome.ps1 或 plan_a_auto_open_and_bind 冷启动",
                 "灰色头像 = 非你日常 Chrome，请完全退出后用桌面快捷方式重开",
-                "在已附着的 Chrome 收藏页确认登录「三点、水」",
+                "在已附着的 Chrome 收藏页确认登录配置的小红书账号",
                 "userNoteFetchingStatus=rejected 表示未登录或 Cookie 失效",
                 "勿用 Edge；勿让 Agent 新开浏览器",
             ],
@@ -717,7 +717,7 @@ def verify_plan_a_owner_session() -> Dict[str, Any]:
 
 
 def iter_owner_chrome_configs() -> List[BrowserConfig]:
-    """收藏夹链路仅允许 Chrome 有光 Profile。"""
+    """收藏夹链路仅允许环境变量指定的 Chrome Profile。"""
     cfg = owner_chrome_config()
     if verify_owner_chrome_profile(cfg).get("ok"):
         return [cfg]

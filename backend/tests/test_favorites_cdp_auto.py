@@ -32,7 +32,7 @@ if not port:
         sys.exit(1)
 
 print(f"\n=== Step 2: 检查小红书登录态 ===")
-creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "60dc2e340000000001008a1f")
+creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "000000000000000000000000")
 tabs = cdp_list_tabs(port)
 
 # 找或创建 XHS tab
@@ -72,7 +72,7 @@ for attempt in range(1, 4):
         cdp_tab_eval(ws_url, "window.location.href='https://www.xiaohongshu.com/explore'", timeout_sec=5)
         time.sleep(5)
     else:
-        print("ERROR: 3次重试后仍未登录。请在 Chrome 中手动登录小红书「三点、水」后重试。")
+        print("ERROR: 3次重试后仍未登录。请在 Chrome 中手动登录配置的小红书账号后重试。")
         sys.exit(1)
 
 print(f"\n=== Step 3: 抓取收藏夹 ===")

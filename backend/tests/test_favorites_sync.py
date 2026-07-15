@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 print("=== 收藏夹同步 ===")
 from app.services.xhs_favorites_adapter import fetch_favorites_catalog
 
-creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "60dc2e340000000001008a1f")
+creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "000000000000000000000000")
 profile_url = f"https://www.xiaohongshu.com/user/profile/{creator_id}?tab=fav"
 
 print(f"Creator: {creator_id}")

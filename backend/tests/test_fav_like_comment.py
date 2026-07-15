@@ -14,7 +14,7 @@ print(f"Cookie: {len(cookies)} 个")
 # 2. 照抄 comment_scraper._extract_xhs_via_playwright 的浏览器启动方式
 from playwright.sync_api import sync_playwright
 
-creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "60dc2e340000000001008a1f")
+creator_id = os.environ.get("XHS_FAVORITES_CREATOR_ID", "000000000000000000000000")
 fav_url = f"https://www.xiaohongshu.com/user/profile/{creator_id}?tab=fav&subTab=note"
 
 t0 = time.time()

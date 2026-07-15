@@ -116,7 +116,7 @@ def wait_for_xhs_login_via_cdp(
     if not port:
         return {"ok": False, "logged_in": False, "error": "no_cdp"}
 
-    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
     fav = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
     ws = cdp_pick_xhs_tab_ws(port)
     if ws:
@@ -216,7 +216,7 @@ def warm_xhs_owner_session_via_cdp(
     if not port:
         return {"ok": False, "logged_in": False, "error": "no_cdp"}
 
-    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
     explore = "https://www.xiaohongshu.com/explore"
     fav = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
 
@@ -290,7 +290,7 @@ def open_favorites_tab_if_needed(port: Optional[int] = None) -> Dict[str, Any]:
     port = port or find_cdp_port()
     if not port:
         return {"ok": False, "error": "no_cdp"}
-    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f").strip()
+    cid = (os.environ.get("XHS_FAVORITES_CREATOR_ID") or "").strip()
     fav = f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
     tabs = cdp_list_tabs(port)
     for t in tabs:

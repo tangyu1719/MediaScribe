@@ -17,7 +17,8 @@ _MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _enabled() -> bool:
-    return os.environ.get("FAVORITES_SCHEDULER_ENABLED", "1").strip() not in ("0", "false", "False")
+    enabled = os.environ.get("FAVORITES_SCHEDULER_ENABLED", "1").strip() not in ("0", "false", "False")
+    return enabled and bool(os.environ.get("XHS_FAVORITES_RED_ID", "").strip())
 
 
 def _cron() -> str:
@@ -25,11 +26,11 @@ def _cron() -> str:
 
 
 def _red_id() -> str:
-    return os.environ.get("XHS_FAVORITES_RED_ID", "9545679835").strip()
+    return os.environ.get("XHS_FAVORITES_RED_ID", "").strip()
 
 
 def _display_name() -> str:
-    return os.environ.get("XHS_FAVORITES_DISPLAY_NAME", "三点、水-收藏夹").strip()
+    return os.environ.get("XHS_FAVORITES_DISPLAY_NAME", "我的收藏夹").strip()
 
 
 def _startup_delay_sec() -> float:
@@ -87,7 +88,7 @@ def ensure_default_favorites_subscription() -> Dict[str, Any]:
         )
 
     creator_override = (
-        os.environ.get("XHS_FAVORITES_CREATOR_ID") or "60dc2e340000000001008a1f"
+        os.environ.get("XHS_FAVORITES_CREATOR_ID") or ""
     ).strip()
     if creator_override and re.fullmatch(r"[a-f0-9]{24}", creator_override, re.I):
         profile_url = f"https://www.xiaohongshu.com/user/profile/{creator_override}?tab=fav"

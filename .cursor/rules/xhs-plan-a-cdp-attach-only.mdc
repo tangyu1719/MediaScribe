@@ -6,7 +6,7 @@
 
 
 
-收藏夹 / 三点、水 个人号链路 **只允许方案 A**：
+收藏夹 / 本人账号链路 **只允许方案 A**：
 
 
 
@@ -16,7 +16,7 @@
 
 3. **禁止** `page.bring_to_front()`（`SBA_XHS_BACKGROUND=1` 默认开）。
 
-4. **禁止** attach-only 下自动 `goto` 收藏页；用户须**已打开** `profile/60dc2e340000000001008a1f?tab=fav` 且**已登录**。
+4. **禁止** attach-only 下自动 `goto` 收藏页；用户须**已打开** `profile/${XHS_FAVORITES_CREATOR_ID}?tab=fav` 且**已登录**。
 
 5. 检测到 `/login` 或 `data:` 标签 → **立即报错**，不得静默重试或换 Profile。
 
@@ -56,7 +56,7 @@
 
 2. 运行 `scripts/plan_a_launch_chrome.ps1` **仅查看** Win+R 启动命令（脚本已禁止 Start-Process）
 
-3. 确认右上角「李有光」+ 收藏页 `tab=fav` + 无 `data:` 标签
+3. 确认右上角为 `${SBA_CHROME_EXPECTED_GAIA}` 对应用户 + 收藏页 `tab=fav` + 无 `data:` 标签
 
 4. `py -3 scripts/plan_a_verify_session.py` 通过后再跑回归
 

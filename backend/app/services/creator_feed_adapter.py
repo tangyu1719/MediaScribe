@@ -117,7 +117,7 @@ def _find_user_by_red_id_in_obj(obj: Any, red_id: str) -> Optional[Dict[str, Any
     return None
 
 
-# 仅拦截已知的搜索页误匹配占位 id（三点、水 真实 uid 为 60dc2e340000000001008a1f）
+# 仅拦截已知的搜索页误匹配占位 id；真实 uid 必须来自环境配置
 _KNOWN_BAD_XHS_CREATOR_IDS = frozenset({"60dc2e340000000000000000"})
 
 

@@ -115,7 +115,7 @@ def assert_page_not_xhs_login(page, *, action: str = "") -> None:
     if "/login" in url:
         raise RuntimeError(
             "SUB_OWNER_XHS_LOGIN_REQUIRED: 当前标签在小红书登录页，说明未复用已登录会话。"
-            f"请在你自己的 Chrome（李有光/Default）手动登录「三点、水」并打开收藏页 tab=fav；"
+            f"请在配置的 Chrome Default Profile 手动登录本人小红书账号并打开收藏页 tab=fav；"
             f"禁止自动新开浏览器/标签。{action}"
         )
     if url.startswith("data:"):
@@ -165,7 +165,7 @@ def require_cdp_port() -> int:
     if not port:
         raise RuntimeError(
             "SUB_OWNER_CDP_REQUIRED: 方案A仅附着你已打开的 Chrome，不会杀进程、不会新开 Profile 或标签。"
-            f"请在你正在使用的 Chrome（李有光 / Default）带 "
+            f"请在你正在使用的 Chrome（配置的 Default Profile）带 "
             f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=* 启动，"
             "并打开个人收藏页（tab=fav）；当前 CDP 未就绪。"
         )
@@ -325,13 +325,13 @@ def assert_plan_a_owner_browser_ops(*, caller: str = "") -> None:
                 f"SUB_OWNER_CHROME_GUEST_SESSION: {caller} 附着的不是您日常 Chrome。"
                 "请关闭 about:blank / data: 标签，用桌面 Google Chrome.lnk 手动启动"
                 f"（含 --remote-debugging-port={CDP_PORT}），"
-                "确认右上角「有光」且已打开收藏页 tab=fav。"
+                "确认右上角为配置的用户且已打开收藏页 tab=fav。"
             )
         return
     raise RuntimeError(
         f"SUB_OWNER_CDP_REQUIRED: {caller} 需要 CDP。"
         f"请手动双击桌面 Google Chrome.lnk（含 --remote-debugging-port={CDP_PORT}）"
-        "打开 Chrome，登录小红书「三点、水」并打开收藏页 tab=fav。"
+        "打开 Chrome，登录配置的小红书账号并打开收藏页 tab=fav。"
         "方案 A 禁止 Agent 自动杀进程/新开浏览器/Playwright 兜底。"
     )
 
@@ -1293,7 +1293,7 @@ def refresh_xhs_cookies_from_system() -> Dict[str, Any]:
         "source": "none",
         "count": len(load_cookies("xiaohongshu") or {}),
         "error": final_probe.get("error")
-        or "未获取到已登录 Cookie；请先在 Chrome 登录 Google 账号「有光」并登录小红书「三点、水」",
+        or "未获取到已登录 Cookie；请先在配置的 Chrome 用户中登录本人小红书账号",
     }
 
 
@@ -1993,7 +1993,7 @@ def scrape_favorites_note_links_via_cdp(
     if cdp_session_looks_like_guest_or_automation(tabs):
         raise RuntimeError(
             "SUB_OWNER_CHROME_GUEST_SESSION: 附着的不是您日常使用的 Chrome。"
-            "右上角须显示「李有光」头像，不能是「登录 Chrome」或灰色访客；"
+            "右上角须显示配置的用户头像，不能是「登录 Chrome」或灰色访客；"
             "请关闭此窗口，在您平时的 Chrome 快捷方式后加 "
             f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=* 后从任务栏打开。"
         )
@@ -2008,7 +2008,7 @@ def scrape_favorites_note_links_via_cdp(
     if "/login" in tab_url:
         raise RuntimeError(
             "SUB_OWNER_XHS_LOGIN_REQUIRED: 当前 Tab 在登录页。"
-            "请在你日常 Chrome（李有光）登录「三点、水」并打开收藏页。"
+            "请在配置的日常 Chrome 用户中登录本人小红书账号并打开收藏页。"
         )
     ws_url = tab.get("webSocketDebuggerUrl")
     if not ws_url:
@@ -2153,7 +2153,7 @@ def scrape_favorites_feed_items_via_headless_cookies(
 ) -> List[Any]:
     """
     与评论抓取同模式：磁盘 Cookie + headless Playwright 导航收藏页。
-    不依赖 CDP 附着、不杀用户 Chrome、不要求 Google 有光 Profile。
+    不依赖 CDP 附着、不杀用户 Chrome、不要求特定 Google Profile。
     """
     from playwright.sync_api import sync_playwright
 
@@ -2169,7 +2169,7 @@ def scrape_favorites_feed_items_via_headless_cookies(
     if not cookies:
         raise RuntimeError(
             "SUB_XHS_COOKIE_UNAVAILABLE: 无小红书 Cookie。"
-            "请先在本机 Chrome 登录小红书「三点、水」，或跑一次带 read_comments 的链接分析以写入 Cookie。"
+            "请先在本机 Chrome 登录配置的小红书账号，或跑一次带 read_comments 的链接分析以写入 Cookie。"
         )
     if not probe_xhs_cookies_logged_in(cookies).get("logged_in"):
         from .cookie_manager import diagnose_xhs_cookies
@@ -2178,7 +2178,7 @@ def scrape_favorites_feed_items_via_headless_cookies(
         if diag.get("guest"):
             raise RuntimeError(
                 "SUB_XHS_GUEST_SESSION: 当前 Cookie 为访客态，无法读取收藏/UP 订阅。"
-                "请在本机 Chrome 登录小红书「三点、水」后，在设置页重新提取 Cookie 或重启带 CDP 的 Chrome。"
+                "请在本机 Chrome 登录配置的小红书账号后，在设置页重新提取 Cookie 或重启带 CDP 的 Chrome。"
                 f" {diag.get('hint','')}"
             )
         raise RuntimeError(
@@ -2355,7 +2355,7 @@ def scrape_favorites_feed_items_via_playwright(
 
     cfg = _browser_config_chrome()
     if not is_browser_google_signed_in(cfg):
-        raise RuntimeError("SUB_XHS_BROWSER_GUEST: Chrome 未登录 Google 有光账号")
+        raise RuntimeError("SUB_XHS_BROWSER_GUEST: Chrome 未登录配置的 Google 账号")
 
     cid = (creator_id or "").strip()
     fav_url = profile_url or (f"https://www.xiaohongshu.com/user/profile/{cid}" if cid else "")
@@ -2422,7 +2422,7 @@ def scrape_favorites_feed_items_via_playwright(
                 raise RuntimeError(
                     f"SUB_OWNER_XHS_LOGIN_REQUIRED: Chrome Profile 中小红书为{'访客态' if login_state.get('guest') else '未登录'}。"
                     f"loggedIn={login_state.get('loggedIn')} guest={login_state.get('guest')} redId={login_state.get('redId','')[:10]}。"
-                    "请在 Chrome 中登录小红书「三点、水」后重试。"
+                    "请在 Chrome 中登录配置的小红书账号后重试。"
                 )
 
             # 登录态确认，导航到收藏页
@@ -2494,7 +2494,7 @@ def scrape_favorites_feed_items_via_playwright(
         if not user.get("loggedIn") or "登录后可查看" in (html or ""):
             raise RuntimeError(
                 "SUB_OWNER_XHS_LOGIN_REQUIRED: Playwright 收藏页未登录。"
-                "请在 Chrome 登录小红书「三点、水」后重试。"
+                "请在 Chrome 登录配置的小红书账号后重试。"
             )
         raise RuntimeError("SUB_FAVORITES_EMPTY: Playwright 未解析到收藏笔记")
     _log.info(
@@ -2506,7 +2506,7 @@ def scrape_favorites_feed_items_via_playwright(
 
 
 def should_prefer_cookie_favorites_fetch() -> bool:
-    """磁盘 Cookie 已登录但 CDP 有光/收藏 Tab 未就绪时，优先 Cookie 模式（与评论抓取一致）。"""
+    """磁盘 Cookie 已登录但 CDP 配置用户/收藏 Tab 未就绪时，优先 Cookie 模式（与评论抓取一致）。"""
     ck = _resolve_xhs_cookies_for_scrape()
     probe = probe_xhs_cookies_logged_in(ck) if ck else {"logged_in": False}
     if not probe.get("logged_in"):
@@ -2713,8 +2713,8 @@ def scrape_favorites_feed_items_via_cdp(
     cfg_local = _browser_config_chrome()
     if not is_browser_google_signed_in(cfg_local):
         raise RuntimeError(
-            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未登录 Google 账号「有光」。"
-            "请确认用桌面快捷方式「Google Chrome CDP 9223」启动的 Chrome 右上角显示「有光」头像。"
+            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未登录配置的 Google 账号。"
+            "请确认用桌面快捷方式「Google Chrome CDP 9223」启动的 Chrome 右上角显示配置用户头像。"
         )
 
     # 找或创建小红书 tab
@@ -2768,7 +2768,7 @@ def scrape_favorites_feed_items_via_cdp(
             )
         raise RuntimeError(
             f"SUB_OWNER_XHS_LOGIN_REQUIRED: 已重试 {_attempt} 次仍为{'访客态' if is_guest else '未登录'}。"
-            "请在 Chrome 中确认已登录小红书「三点、水」"
+            "请在 Chrome 中确认已登录配置的小红书账号"
         )
 
     # 自动导航到收藏页（用 CDP API 新开标签页，避免 JS 导航被 XHS 检测）
@@ -2913,7 +2913,7 @@ def scrape_favorites_feed_items_via_cdp(
                     "SUB_OWNER_XHS_LOGIN_REQUIRED: 收藏页未登录或 Cookie 失效"
                     f"（loggedIn={user.get('loggedIn')}; fav_status="
                     f"{statuses[fav_idx] if len(statuses) > fav_idx else 'n/a'}）。"
-                    "请在 CDP Chrome 登录「三点、水」后刷新收藏页 tab=fav。"
+                    "请在 CDP Chrome 登录配置的小红书账号后刷新收藏页 tab=fav。"
                 )
         except RuntimeError:
             raise
@@ -3539,7 +3539,7 @@ def scrape_profile_feed_items_via_cdp(
     cfg_local = _browser_config_chrome()
     if not is_browser_google_signed_in(cfg_local):
         raise RuntimeError(
-            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未登录 Google 账号「有光」。"
+            "SUB_OWNER_CHROME_PROFILE_MISMATCH: Chrome 未登录配置的 Google 账号。"
         )
 
     port = find_cdp_port() or CDP_PORT

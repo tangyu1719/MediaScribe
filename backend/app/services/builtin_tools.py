@@ -27,7 +27,7 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             "impl": "internal",
             "description": "通过小红书号（数字 ID）搜索用户主页，解析 profile URL 并自动启动画像分析流水线。内部通过浏览器自动化（CDP/Playwright）完成 red_id → creator_id → profile_url 的解析。",
             "inputs": [
-                {"name": "red_id", "type": "string", "required": True, "hint": "小红书号（纯数字 ID，如 9545679835）"},
+                {"name": "red_id", "type": "string", "required": True, "hint": "小红书号（纯数字 ID，如 1234567890）"},
                 {"name": "user_prompt", "type": "string", "required": False, "hint": "额外分析指令，如「做用户画像」「分析内容风格」"},
             ],
             "outputs": "解析结果（creator_id、display_name、profile_url）与流水线任务 ID。",

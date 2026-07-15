@@ -52,6 +52,8 @@ def main() -> int:
                 if pattern.search(line):
                     findings.append((rel, line_no, rule))
             for match in EMAIL.finditer(line):
+                if match.group(0).lower() == "r@e.ok":
+                    continue  # 抖音分享口令，不是邮箱
                 domain = match.group(1).lower()
                 if domain not in ALLOWED_EMAIL_DOMAINS and not domain.endswith(".example.com"):
                     findings.append((rel, line_no, "personal-email"))

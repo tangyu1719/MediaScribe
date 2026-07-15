@@ -511,7 +511,7 @@ def fetch_favorite_up_authors(
 
 
 def resolve_favorites_owner(red_id: str, *, display_name: str = "") -> Dict[str, Any]:
-    """解析收藏夹所属用户（小红书号 → creator_id）；强制 Chrome 有光会话。"""
+    """解析收藏夹所属用户（小红书号 → creator_id）；强制已配置 Chrome 会话。"""
     from .xhs_owner_chrome import refresh_owner_xhs_cookies
 
     refresh_owner_xhs_cookies()
