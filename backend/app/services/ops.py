@@ -46,6 +46,41 @@ def _ops_reports_dir() -> Path:
     return (_AGENT_DIR or Path(".")) / "output" / "ops_reports"
 
 
+def _ops_reports_search_dirs() -> List[Path]:
+    """运维报告目录候选（worktree / 主仓库 / 上级 src/agent）。"""
+    seen: set[str] = set()
+    out: List[Path] = []
+    candidates: List[Path] = []
+    if _AGENT_DIR:
+        candidates.append(_AGENT_DIR / "output" / "ops_reports")
+        for parent in _AGENT_DIR.parents:
+            candidates.append(parent / "src" / "agent" / "output" / "ops_reports")
+            candidates.append(parent / "output" / "ops_reports")
+            candidates.append(parent / "web_rebuild_v2" / "src" / "agent" / "output" / "ops_reports")
+            if parent.name in ("SuperBizAgent-AgentFramework", "web_rebuild_v2", "web_rebuild_v2-video-visual"):
+                pass
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidates.append(parent / "src" / "agent" / "output" / "ops_reports")
+        candidates.append(parent / "web_rebuild_v2" / "src" / "agent" / "output" / "ops_reports")
+    for p in candidates:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.is_dir():
+            out.append(p)
+    primary = _ops_reports_dir()
+    if primary.is_dir() and all(str(primary.resolve()) != str(x.resolve()) for x in out):
+        out.insert(0, primary)
+    elif not out:
+        out.insert(0, primary)
+    return out
+
+
 def _pipeline_log_path() -> Path:
     return (_AGENT_DIR or Path(".")) / "pipeline.log"
 
@@ -234,10 +269,19 @@ def ops_get_memory(limit: int = 30) -> Dict:
 
 
 def ops_list_reports(limit: int = 40) -> Dict:
-    reports_dir = _ops_reports_dir()
-    if not reports_dir.is_dir():
+    files: List[Path] = []
+    seen_names: set[str] = set()
+    for reports_dir in _ops_reports_search_dirs():
+        if not reports_dir.is_dir():
+            continue
+        for fp in reports_dir.glob("ops_*.md"):
+            if fp.name in seen_names:
+                continue
+            seen_names.add(fp.name)
+            files.append(fp)
+    if not files:
         return {"ok": True, "data": {"reports": []}}
-    files = sorted(reports_dir.glob("ops_*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
     out: List[Dict[str, Any]] = []
     for fp in files[:limit]:
         try:
@@ -260,11 +304,49 @@ def ops_list_reports(limit: int = 40) -> Dict:
     return {"ok": True, "data": {"reports": out}}
 
 
+def ops_find_report_for_task(task_id: str) -> Optional[Dict[str, Any]]:
+    """按 task_id 查找最新运维报告（兼容未写入任务字段的历史失败）。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return None
+    safe = tid.replace("/", "_").replace("\\", "_")
+    pattern = f"ops_{safe}_*.md"
+    best: Optional[Path] = None
+    for reports_dir in _ops_reports_search_dirs():
+        if not reports_dir.is_dir():
+            continue
+        files = sorted(reports_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files and (best is None or files[0].stat().st_mtime > best.stat().st_mtime):
+            best = files[0]
+    if not best:
+        return None
+    fp = best
+    try:
+        st = fp.stat()
+        return {
+            "id": fp.name,
+            "task_id": tid,
+            "filename": fp.name,
+            "report_path": str(fp),
+            "created_at": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "size_bytes": st.st_size,
+        }
+    except Exception:
+        return None
+
+
 def ops_get_report(report_id: str) -> Dict:
     safe = Path(report_id).name
     if not safe.endswith(".md") or ".." in safe:
         return {"ok": False, "error": "无效报告 ID"}
-    fp = _ops_reports_dir() / safe
+    fp: Optional[Path] = None
+    for reports_dir in _ops_reports_search_dirs():
+        candidate = reports_dir / safe
+        if candidate.is_file():
+            fp = candidate
+            break
+    if fp is None:
+        fp = _ops_reports_dir() / safe
     if not fp.is_file():
         return {"ok": False, "error": "报告不存在"}
     try:
@@ -395,18 +477,80 @@ def ops_monitor_task(
         err_obj = {"message": str(error_info)}
     else:
         err_obj = {}
+    task_snap: Dict[str, Any] = {}
+    tid = (task_id or "").strip()
+    if tid and tid not in ("_web_log_", "_span_failure_") and not tid.startswith("log_"):
+        try:
+            from .task_manager import get_task
+
+            task_snap = get_task(tid) or {}
+        except Exception:
+            task_snap = {}
+    try:
+        from .ops_error_classifier import classify_task_failure, normalize_error_info
+
+        err_obj = normalize_error_info(
+            err_obj,
+            error_message=str(err_obj.get("message") or err_obj.get("error_message") or ""),
+            stage=str(err_obj.get("failure_stage") or err_obj.get("step_name") or ""),
+            task=task_snap,
+        )
+        failure_cls = classify_task_failure(error_info=err_obj, task=task_snap)
+    except Exception:
+        failure_cls = {}
     report_path = agent.monitor_task_completion(
         link=link,
         task_id=task_id,
         status=status,
         logs=logs or [],
         error_info=err_obj,
+        failure_classification=failure_cls or None,
     )
+    report_id = ""
+    if report_path:
+        try:
+            report_id = Path(str(report_path)).name
+        except Exception:
+            report_id = ""
+    tid = (task_id or "").strip()
+    if report_id and tid and tid not in ("_web_log_", "_span_failure_") and not tid.startswith("log_"):
+        try:
+            from .task_manager import get_task, update_task
+
+            if get_task(tid):
+                patch: Dict[str, Any] = {
+                    "ops_report_id": report_id,
+                    "ops_report_path": str(report_path),
+                }
+                if failure_cls:
+                    patch["ops_failure_code"] = failure_cls.get("error_code") or ""
+                    patch["ops_failure_summary"] = (
+                        f"{failure_cls.get('error_code')}: {failure_cls.get('error_message')}"
+                        if failure_cls.get("error_code")
+                        else str(failure_cls.get("error_message") or "")
+                    )
+                    patch["ops_failure_category"] = failure_cls.get("category") or ""
+                update_task(tid, **patch)
+                snap = get_task(tid) or {}
+                if (snap.get("status") or "").lower() == "failed":
+                    from .history_manager import add_or_update_task_in_history
+
+                    add_or_update_task_in_history(dict(snap))
+        except Exception as exc:
+            _log.warning(
+                "[OPS运维-任务报告|ops.ops_monitor_task|task:%s|Agent执行|回写] "
+                "报告字段写入失败; error_type=%s; error_message=%s",
+                tid[:12],
+                type(exc).__name__,
+                str(exc)[:200],
+            )
     return {
         "ok": True,
         "llm_powered": llm_powered,
         "report_path": report_path,
+        "report_id": report_id,
         "degraded": llm_powered and not report_path,
+        "failure_classification": failure_cls or {},
     }
 
 

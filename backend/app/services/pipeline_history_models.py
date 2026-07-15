@@ -4,7 +4,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+_LogsJsonColumn = Text().with_variant(LONGTEXT(), "mysql")
 
 
 class PipelineHistoryBase(DeclarativeBase):
@@ -45,7 +48,7 @@ class PipelineTaskHistory(PipelineHistoryBase):
     html_status: Mapped[str] = mapped_column(String(32), default="")
     html_message: Mapped[str] = mapped_column(String(512), default="")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    logs_json: Mapped[str] = mapped_column(Text, default="[]")
+    logs_json: Mapped[str] = mapped_column(_LogsJsonColumn, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True

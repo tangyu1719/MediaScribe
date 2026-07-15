@@ -4,13 +4,29 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from .config import load_config
 
 _log = logging.getLogger("sba.whisper_pool")
+
+# src/agent/torch_runtime
+_AGENT_DIR = None
+for _p in Path(__file__).resolve().parents:
+    _cand = _p / "src" / "agent"
+    if _cand.is_dir():
+        _AGENT_DIR = _cand.resolve()
+        break
+if _AGENT_DIR and str(_AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_AGENT_DIR))
+try:
+    from torch_runtime import ensure_torch_runtime  # noqa: E402
+except Exception:
+    ensure_torch_runtime = None  # type: ignore
 
 Slot = Tuple[str, Any]
 
@@ -49,6 +65,10 @@ class WhisperPool:
             return self._total
 
     def _load_model(self) -> Any:
+        if ensure_torch_runtime is not None:
+            ok, detail = ensure_torch_runtime()
+            if not ok:
+                raise ImportError(detail or "PyTorch 运行环境不可用")
         import whisper
 
         name = self._model_name

@@ -96,6 +96,9 @@ def _verify_token(body: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     if not expected:
         return True
     token = str(body.get("token") or body.get("header", {}).get("token") or "").strip()
+    if not token and str(cfg.get("feishu_im_mode") or "").strip().lower() == "websocket":
+        # WebSocket 长连接推送不含 verification token
+        return True
     return token == expected
 
 
@@ -165,7 +168,7 @@ def _parse_im_message_event(event: Dict[str, Any], cfg: Dict[str, Any]) -> Optio
 
 
 def _auto_reply_async(row: Dict[str, Any]) -> None:
-    """后台线程：LLM 生成回复并发送到群（避免阻塞 Webhook 响应）。"""
+    """后台线程：走 Web Agent 同源 chat_stream_v2 编排，回复发回飞书群。"""
     cfg = load_config()
     if not cfg.get("feishu_im_auto_reply"):
         return
@@ -174,35 +177,14 @@ def _auto_reply_async(row: Dict[str, Any]) -> None:
     if not text or not chat_id:
         return
     try:
-        import sys
-        from pathlib import Path
+        from .feishu_chat_bridge import run_feishu_agent_reply_sync
 
-        here = Path(__file__).resolve()
-        for p in here.parents:
-            cand = p / "src" / "agent"
-            if cand.is_dir() and str(cand) not in sys.path:
-                sys.path.insert(0, str(cand))
-        from provider_adapters import invoke_unified
-
-        system = "你是飞书群聊助手，回复须简洁，可直接在群里阅读，避免过长。"
-        result = invoke_unified(
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": text},
-            ],
-            task_type=cfg.get("feishu_im_agent_key") or "qa_orchestrator_agent",
-            max_tokens=800,
-        )
-        reply = ""
-        if isinstance(result, dict):
-            reply = (result.get("content") or result.get("text") or "").strip()
-        else:
-            reply = str(result or "").strip()
+        reply = run_feishu_agent_reply_sync(row)
         if reply:
             send_chat_text(chat_id, reply[:4000])
-            _log("自动回复", ok=True, chat_id=chat_id[:16], reply_len=len(reply))
+            _log("Agent自动回复", ok=True, chat_id=chat_id[:16], reply_len=len(reply))
     except Exception as exc:
-        _log("自动回复失败", ok=False, error_message=str(exc)[:200])
+        _log("Agent自动回复失败", ok=False, error_message=str(exc)[:200])
 
 
 def handle_feishu_event_webhook(raw_body: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,16 +255,26 @@ def list_recent_messages(limit: int = 100) -> List[Dict[str, Any]]:
 
 def event_status() -> Dict[str, Any]:
     cfg = load_config()
+    ws: Dict[str, Any] = {}
+    try:
+        from .feishu_ws_service import ws_status
+
+        ws = ws_status()
+    except Exception:
+        ws = {}
+    ws_ok = bool(ws.get("ws_running"))
     return {
-        "mode": "event",
+        "mode": "websocket" if ws_ok else "event",
         "enabled": bool(cfg.get("feishu_group_trigger_enabled")),
         "chat_id": cfg.get("feishu_group_chat_id") or "",
         "has_app_creds": bool(_get_app_creds(cfg)[0] and _get_app_creds(cfg)[1]),
         "has_verification_token": bool((cfg.get("feishu_verification_token") or "").strip()),
         "has_encrypt_key": bool((cfg.get("feishu_encrypt_key") or "").strip()),
-        "running": bool(cfg.get("feishu_group_trigger_enabled")),
+        "running": bool(cfg.get("feishu_group_trigger_enabled")) and ws_ok,
+        "ws_running": ws_ok,
+        "ws_last_error": ws.get("ws_last_error") or "",
         "last_event_at": _last_event_at,
-        "last_error": _last_event_error,
+        "last_error": _last_event_error or ws.get("ws_last_error") or "",
         "recent_count": len(_recent_messages),
         "webhook_path": "/api/feishu/events/webhook",
     }
@@ -307,9 +299,15 @@ def apply_feishu_group_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             if src in ("feishu_app_secret", "feishu_encrypt_key", "feishu_verification_token") and val == "":
                 continue
             cfg[dst] = val
-    cfg["feishu_im_mode"] = "event"
+    cfg["feishu_im_mode"] = "websocket"
     save_config(cfg)
     _log("配置已保存", ok=True, enabled=bool(cfg.get("feishu_group_trigger_enabled")))
+    try:
+        from .feishu_ws_service import restart_feishu_ws
+
+        restart_feishu_ws()
+    except Exception as exc:
+        _log("WS重启失败", ok=False, error_message=str(exc)[:120])
     return {"ok": True}
 
 

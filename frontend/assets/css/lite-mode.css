@@ -1,0 +1,9 @@
+.sba-lite-mode .sidebar .sb-foot,
+.sba-lite-mode .tab-close-all-btn {
+  display: none !important;
+}
+.sba-lite-mode .sb-b .d::after {
+  content: " · Lite";
+  color: var(--ok, #22c55e);
+  font-weight: 700;
+}

@@ -85,7 +85,7 @@ def test_invoke_speech_to_text_filters_strict_when_missing():
         out = vp.invoke_speech_to_text("/tmp/x.mp4", strict=True)
     assert out is not None
     assert out.get("ok") is False
-    assert out.get("error_code") == "transcript_mock_fallback"
+    assert out.get("error_code") == "T1007"
 
 
 def test_invoke_speech_to_text_retries_when_strict_rejected_at_runtime():
@@ -168,7 +168,7 @@ def test_assess_transcript_rejects_mock():
     text = "这是一段模拟的视频转文字结果。视频内容包括产品介绍。"
     a = assess_transcript(text)
     assert not a.ok
-    assert a.error_code == "transcript_mock_fallback"
+    assert a.error_code == "T1007"
     assert a.is_mock
     assert is_mock_transcript(text)
 

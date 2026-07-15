@@ -221,12 +221,19 @@ def save_agent_routing(rules: Dict) -> Dict:
 
 
 def get_link_pipeline_prefs() -> Dict:
-    """链接文档化页：飞书/HTML 等快捷开关（读写 config.json）。"""
+    """链接文档化页：飞书/HTML、结构化元数据与卡片展示开关（读写 config.json）。"""
+    from .link_meta_extract import normalize_meta_extract_fields
+
     cfg = load_config()
+    fields = normalize_meta_extract_fields(cfg.get("meta_extract_fields"))
     return {
         "feishu_sync_enabled": bool(cfg.get("feishu_sync_enabled")),
         "feishu_default_folder_path": str(cfg.get("feishu_default_folder_path") or ""),
         "longpage_html_enabled": bool(cfg.get("longpage_html_enabled", True)),
+        "meta_card_display_enabled": bool(cfg.get("meta_card_display_enabled", False)),
+        "meta_extract_enabled": bool(cfg.get("meta_extract_enabled", True)),
+        "meta_extract_fields": fields,
+        "meta_extract_prompt": str(cfg.get("meta_extract_prompt") or ""),
     }
 
 
@@ -238,6 +245,14 @@ def save_link_pipeline_prefs(prefs: Dict) -> Dict:
         cfg["feishu_default_folder_path"] = str(prefs.get("feishu_default_folder_path") or "").strip()
     if "longpage_html_enabled" in prefs:
         cfg["longpage_html_enabled"] = bool(prefs.get("longpage_html_enabled"))
+    if "meta_card_display_enabled" in prefs:
+        cfg["meta_card_display_enabled"] = bool(prefs.get("meta_card_display_enabled"))
+    if "meta_extract_enabled" in prefs:
+        cfg["meta_extract_enabled"] = bool(prefs.get("meta_extract_enabled"))
+    if "meta_extract_fields" in prefs:
+        cfg["meta_extract_fields"] = prefs.get("meta_extract_fields")
+    if "meta_extract_prompt" in prefs:
+        cfg["meta_extract_prompt"] = str(prefs.get("meta_extract_prompt") or "").strip()
     save_config(cfg)
     return {"ok": True, **get_link_pipeline_prefs()}
 

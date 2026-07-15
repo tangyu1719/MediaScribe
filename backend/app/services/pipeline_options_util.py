@@ -31,3 +31,11 @@ def whisper_pool(task: Optional[Dict[str, Any]]) -> str:
 
 def task_source(task: Optional[Dict[str, Any]]) -> str:
     return str(pipeline_options(task).get("source") or "").strip()
+
+
+def video_transcript_mode(task: Optional[Dict[str, Any]]) -> str:
+    """audio_only | visual_frames | hybrid"""
+    from .video_visual.link_transcript import normalize_video_transcript_mode
+
+    raw = str(pipeline_options(task).get("video_transcript_mode") or "audio_only")
+    return normalize_video_transcript_mode(raw)

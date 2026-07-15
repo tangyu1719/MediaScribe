@@ -5,7 +5,7 @@
 所有路由都不包含业务逻辑，只做: 参数校验 → 调用 service → 返回 JSON/SSE
 """
 from __future__ import annotations
-import asyncio, json, logging, os, time, uuid
+import asyncio, json, logging, os, sys, time, uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -31,9 +31,10 @@ def _load_project_dotenv() -> None:
 
 
 _load_project_dotenv()
+_LITE_MODE = os.environ.get("SBA_LITE_MODE", "").strip().lower() in ("1", "true", "yes")
 # 默认启用 LangGraph 固定编排（仅当 .env / 系统环境未显式设置时）
 os.environ.setdefault("CHAT_USE_LANGGRAPH", "1")
-from fastapi import FastAPI, HTTPException, Request, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, Query, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -54,23 +55,25 @@ from .services.task_manager import (
     get_task_by_link,
     import_history_task_to_queue,
 )
-from .services.milvus_health import check_milvus
-from .services.vector_connection import get_connection_state, probe_connection, retry_connection, set_connection_params
+if not _LITE_MODE:
+    from .services.milvus_health import check_milvus
+    from .services.vector_connection import get_connection_state, probe_connection, retry_connection, set_connection_params
 from .services.link_hash import coerce_pasted_link, normalize_link_for_hash, url_hash as link_url_hash_fn
 from .services.link_doc_routing import platform_from_url
-from .services.skill_registry import (
-    list_skills as skill_list,
-    get_skill as skill_get,
-    delete_skill as skill_delete,
-    import_skill as skill_import,
-    import_from_markdown as skill_import_md,
-    import_batch_from_roots as skill_import_batch,
-    import_skill_bundle as skill_import_bundle,
-    commit_skill_commands as skill_commit_commands,
-    patch_skill as skill_patch,
-    slash_suggestions as skill_slash_suggestions,
-    expand_message_with_skill_meta,
-)
+if not _LITE_MODE:
+    from .services.skill_registry import (
+        list_skills as skill_list,
+        get_skill as skill_get,
+        delete_skill as skill_delete,
+        import_skill as skill_import,
+        import_from_markdown as skill_import_md,
+        import_batch_from_roots as skill_import_batch,
+        import_skill_bundle as skill_import_bundle,
+        commit_skill_commands as skill_commit_commands,
+        patch_skill as skill_patch,
+        slash_suggestions as skill_slash_suggestions,
+        expand_message_with_skill_meta,
+    )
 from .services.video_pipeline import process_video_pipeline
 from .services.config import (
     load_config,
@@ -88,57 +91,59 @@ from .services.config import (
     agent_config_path,
     runtime_agent_dir,
 )
-from .services.kb_rag import (
-    kb_stats,
-    kb_list_files,
-    kb_add_file,
-    kb_add_folder,
-    kb_search,
-    kb_metadata_options,
-    kb_file_detail,
-    kb_auto_metadata,
-    kb_update_file_metadata,
-    kb_file_chunks,
-    kb_sync_chunk_counts,
-    kb_persisted_inventory,
-    kb_rebuild_catalog_from_persisted,
-    kb_read_persisted_text,
-)
+if not _LITE_MODE:
+    from .services.kb_rag import (
+        kb_stats,
+        kb_list_files,
+        kb_add_file,
+        kb_add_folder,
+        kb_search,
+        kb_metadata_options,
+        kb_file_detail,
+        kb_auto_metadata,
+        kb_update_file_metadata,
+        kb_file_chunks,
+        kb_sync_chunk_counts,
+        kb_persisted_inventory,
+        kb_rebuild_catalog_from_persisted,
+        kb_read_persisted_text,
+    )
 from .services.fs_browse import browse as fs_browse
-from .services import rag_libraries as rag_lib
-from .services.ai_chat import (
-    create_session, list_sessions, delete_session, rename_session,
-    get_session_messages, save_session_state, export_session_markdown,
-    init_chat_persistence,
-    chat_stream as _svc_chat_stream,
-)
-from .services.cache import (
-    cache_query, cache_get_entry, cache_update_entry,
-    cache_create_entry, cache_export_by_task,
-)
-from .services.workflow import (
-    list_workflow_nodes, list_workflow_definitions,
-    save_workflow_definition, delete_workflow_definition,
-    run_workflow, resume_workflow, stop_current_workflow,
-    start_workflow_scheduler, stop_workflow_scheduler, get_workflow_state,
-)
-from .services.feishu import (
-    feishu_get_config,
-    feishu_save_config,
-    feishu_list_records,
-    feishu_handle_event,
-)
-from .services.feishu_group_im import event_status
-from .services.im_robot import (
-    im_robot_list_platforms,
-    im_robot_get_wechat,
-    im_robot_save_wechat,
-    im_robot_wechat_qr_start,
-    im_robot_wechat_qr_poll,
-    im_robot_wechat_refresh_status,
-    im_robot_wechat_disconnect,
-    im_robot_wechat_inbound,
-)
+if not _LITE_MODE:
+    from .services import rag_libraries as rag_lib
+    from .services.ai_chat import (
+        create_session, list_sessions, delete_session, rename_session,
+        get_session_messages, save_session_state, export_session_markdown,
+        init_chat_persistence,
+        chat_stream as _svc_chat_stream,
+    )
+    from .services.cache import (
+        cache_query, cache_get_entry, cache_update_entry,
+        cache_create_entry, cache_export_by_task,
+    )
+    from .services.workflow import (
+        list_workflow_nodes, list_workflow_definitions,
+        save_workflow_definition, delete_workflow_definition,
+        run_workflow, resume_workflow, stop_current_workflow,
+        start_workflow_scheduler, stop_workflow_scheduler, get_workflow_state,
+    )
+    from .services.feishu import (
+        feishu_get_config,
+        feishu_save_config,
+        feishu_list_records,
+        feishu_handle_event,
+    )
+    from .services.feishu_group_im import event_status
+    from .services.im_robot import (
+        im_robot_list_platforms,
+        im_robot_get_wechat,
+        im_robot_save_wechat,
+        im_robot_wechat_qr_start,
+        im_robot_wechat_qr_poll,
+        im_robot_wechat_refresh_status,
+        im_robot_wechat_disconnect,
+        im_robot_wechat_inbound,
+    )
 from .services.ops import (
     ops_get_overview,
     ops_get_events,
@@ -157,10 +162,11 @@ from .services.ops import (
     ops_route_action,
     ops_get_dashboard,
 )
-from .services.builtin_tools import list_builtin_tools as _list_builtin_tools
-from .services import mcp_langchain as mcp_lc
-from .services.mcp_vendor_presets import list_mcp_vendor_presets
-from .services.tools_detail_llm import generate_tool_detail_html
+if not _LITE_MODE:
+    from .services.builtin_tools import list_builtin_tools as _list_builtin_tools
+    from .services import mcp_langchain as mcp_lc
+    from .services.mcp_vendor_presets import list_mcp_vendor_presets
+    from .services.tools_detail_llm import generate_tool_detail_html
 from .services.history_manager import (
     list_history_tasks,
     delete_history_task,
@@ -222,14 +228,14 @@ _AI_CHAT_CFG_PATH = ROOT / "ai_chat_config.json"
 
 CONFIG = load_config()
 _LOG_CHAT = logging.getLogger("sba.chat")
-if CONFIG.get("volcengine_api_key") or (CONFIG.get("api_gateway_nodes")):
+if not _LITE_MODE and (CONFIG.get("volcengine_api_key") or CONFIG.get("api_gateway_nodes")):
     _LOG_CHAT.info(
         "[AI问答-配置|main.startup|config.json|硬编执行|加载] 已加载 LLM 配置; path=%s; model=%s; nodes=%s",
         _CONFIG_PATH,
         CONFIG.get("ai_chat_model") or "",
         len(CONFIG.get("api_gateway_nodes") or []),
     )
-else:
+elif not _LITE_MODE:
     _LOG_CHAT.error(
         "[AI问答-配置|main.startup|config.json|硬编执行|加载] config.json 无 volcengine_api_key/节点池; path=%s",
         _CONFIG_PATH,
@@ -371,6 +377,107 @@ def _startup_auth_and_db():
         init_chat_persistence()
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("chat session persistence init: %s", e)
+    try:
+        import os
+        import threading
+
+        def _skill_services_backfill():
+            if os.environ.get("SKILL_AUTO_SYNC_ON_START", "1").strip().lower() not in ("0", "false", "no"):
+                try:
+                    from .services.skill_registry import (
+                        commit_skill_commands,
+                        default_project_skill_roots,
+                        discover_skill_entries,
+                        import_batch_from_roots,
+                        list_skills,
+                    )
+
+                    roots = default_project_skill_roots()
+                    discovered: set[str] = set()
+                    for root in roots:
+                        for _d, md in discover_skill_entries(root, recursive=True):
+                            discovered.add(str(md.resolve()))
+                    reg_n = len(list_skills())
+                    disc_n = len(discovered)
+                    if reg_n == 0 or (disc_n and reg_n < disc_n):
+                        result = import_batch_from_roots(upsert_by_name=True)
+                        commit_skill_commands()
+                        logging.getLogger("sba.skill_registry").info(
+                            "[工具-SKILL注册|main._startup_auth_and_db|registry|硬编执行|同步] "
+                            "本地 SKILL 已同步; registry_before=%s; discovered=%s; imported=%s; errors=%s",
+                            reg_n,
+                            disc_n,
+                            result.get("count"),
+                            len(result.get("errors") or []),
+                        )
+                except Exception as ex:
+                    logging.getLogger("uvicorn.error").warning("skill registry auto sync: %s", ex)
+            if os.environ.get("SKILL_INTEL_BACKFILL_ON_START", "1").strip().lower() in ("0", "false", "no"):
+                return
+            try:
+                from .services.skill_intelligence_service import get_intelligence_state, schedule_skill_intelligence
+                from .services.skill_registry import list_skills
+
+                n = 0
+                for sk in list_skills():
+                    sid = str(sk.get("id") or "")
+                    if not sid:
+                        continue
+                    st = get_intelligence_state(sid).get("status")
+                    if st in ("done", "pending"):
+                        continue
+                    schedule_skill_intelligence(
+                        sid,
+                        sk.get("name", ""),
+                        sk.get("description", ""),
+                        sk.get("body_md", ""),
+                        command=sk.get("command", ""),
+                    )
+                    n += 1
+                logging.getLogger("sba.skill_intelligence").info(
+                    "[工具-SKILL智能分析|main._startup_auth_and_db|registry|硬编执行|回填] "
+                    "启动回填已调度; scheduled=%s",
+                    n,
+                )
+            except Exception as ex:
+                logging.getLogger("uvicorn.error").warning("skill intelligence backfill: %s", ex)
+            try:
+                from .services.skill_usage_archive_service import sweep_pending_archives
+
+                sweep_pending_archives(force=False)
+            except Exception as ex:
+                logging.getLogger("uvicorn.error").warning("skill usage archive sweep: %s", ex)
+
+        threading.Thread(target=_skill_services_backfill, daemon=True).start()
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("skill services backfill thread: %s", e)
+
+
+@app.on_event("startup")
+def _startup_ffmpeg_path():
+    """进程启动时解析并缓存 ffmpeg/ffprobe 绝对路径，避免转写线程内偶发找不到。"""
+    try:
+        agent = None
+        for p in Path(__file__).resolve().parents:
+            cand = p / "src" / "agent"
+            if cand.is_dir():
+                agent = cand
+                break
+        if agent and str(agent) not in sys.path:
+            sys.path.insert(0, str(agent))
+        from ffmpeg_path import ensure_ffmpeg_path, get_ffmpeg_executables  # type: ignore
+
+        injected = ensure_ffmpeg_path()
+        ff, fp = get_ffmpeg_executables(force=True)
+        logging.getLogger("sba.ffmpeg").info(
+            "[链接沉淀文档-视频转写|main._startup_ffmpeg_path|ffmpeg|硬编执行|探测] "
+            "启动探测; injected=%s; ffmpeg=%s; ffprobe=%s",
+            injected or "",
+            (ff or "")[:120],
+            (fp or "")[:120],
+        )
+    except Exception as ex:
+        logging.getLogger("uvicorn.error").warning("ffmpeg startup probe: %s", ex)
 
 
 @app.on_event("startup")
@@ -596,9 +703,7 @@ def route_link_url_hash(link: str = ""):
 @app.get("/api/process/queue")
 def route_process_queue():
     """内存中当前任务列表（含 url_hash），供链接页队列展示。"""
-    from .services.history_manager import get_task_history
     from .services.pipeline_stages import pipeline_summary
-
     from .services.task_manager import list_queue_tasks
 
     rows = list_queue_tasks()
@@ -617,11 +722,10 @@ def route_process_queue():
         "cover_url",
         "route_type",
         "pipeline_route",
-        "pipeline_stages",
+        "pipeline_steps",
         "failed_stage",
         "failed_stage_label",
         "resume_from",
-        "resume_context",
         "doc_filename",
         "doc_path",
         "html_path",
@@ -637,6 +741,7 @@ def route_process_queue():
         "importance",
         "task_note",
         "task_keywords",
+        "task_meta_hints",
         "extracted_metadata",
         "created_at",
         "updated_at",
@@ -654,30 +759,24 @@ def route_process_queue():
         "summary_char_count",
     ]
     out = []
-    from .services.pipeline_finalize import apply_task_card_metrics
     from .services.task_source_meta import enrich_task_source_fields
 
     for i, t in enumerate(rows):
-        row = enrich_task_source_fields({k: t.get(k) for k in keys})
+        row = {k: t.get(k) for k in keys}
+        needs_enrich = (
+            not str(row.get("import_source") or "").strip()
+            or not str(row.get("source_label") or "").strip()
+            or (
+                str(row.get("subscription_id") or "").strip()
+                and not str(row.get("author_name") or "").strip()
+            )
+        )
+        if needs_enrich:
+            row = enrich_task_source_fields(row)
         row["queue_pos"] = i + 1
-        tid = row.get("task_id")
-        if tid and row.get("status") == "completed":
-            try:
-                live = apply_task_card_metrics(tid, persist=False)
-                row["total_duration_ms"] = live.get("total_duration_ms") or row.get("total_duration_ms") or 0
-                row["total_token_count"] = live.get("total_token_count") or row.get("total_token_count") or 0
-                row["article_char_count"] = live.get("article_char_count") or row.get("article_char_count") or 0
-                row["summary_char_count"] = live.get("summary_char_count") or row.get("summary_char_count") or 0
-            except Exception:
-                pass
-        if not row.get("pipeline_stages"):
-            hist = get_task_history(link=row.get("link"), url_hash=row.get("url_hash"))
-            if hist:
-                for hk in ("pipeline_route", "pipeline_stages", "failed_stage", "failed_stage_label", "resume_from", "resume_context"):
-                    if hist.get(hk) is not None:
-                        row[hk] = hist.get(hk)
-        route = row.get("pipeline_route") or row.get("route_type") or "video"
-        row["pipeline_steps"] = pipeline_summary(row.get("pipeline_stages"), route)
+        if not row.get("pipeline_steps"):
+            route = row.get("pipeline_route") or row.get("route_type") or "video"
+            row["pipeline_steps"] = pipeline_summary(t.get("pipeline_stages"), route)
         out.append(row)
     return {"tasks": out}
 
@@ -689,6 +788,26 @@ def route_queue_search_suggest(q: str = Query("", max_length=200)):
 
     terms = expand_search_terms(q)
     return {"ok": True, "query": q, "expanded_terms": terms[:20]}
+
+
+@app.post("/api/process/queue/ai-search")
+async def route_queue_ai_search(request: Request):
+    """队列 AI 检索：意图解析 + 多字段/MD 正文 GREP。"""
+    body = await request.json()
+    if not isinstance(body, dict):
+        body = {}
+    q = str(body.get("q") or body.get("query") or "").strip()
+    if not q:
+        raise HTTPException(400, "缺少 q / query")
+    use_llm = body.get("use_llm", True)
+    if isinstance(use_llm, str):
+        use_llm = use_llm.strip().lower() not in ("0", "false", "no")
+    from .services.task_manager import list_queue_tasks
+    from .services.task_queue_ai_search import execute_ai_search
+
+    rows = list_queue_tasks()
+    result = execute_ai_search(rows, q, use_llm=bool(use_llm))
+    return {"ok": True, "query": q, **result}
 
 
 @app.get("/api/process/queue/filter")
@@ -790,17 +909,35 @@ def route_queue_cleanup():
 
 @app.post("/api/process/queue/read")
 async def route_queue_mark_read(request: Request):
-    """将已完成任务标记为已读（单向）。"""
+    """记录已完成任务已读（可重复，累计 read_count）。"""
     body = await request.json()
     task_id = (body.get("task_id") or "").strip()
+    note = (body.get("note") or body.get("task_note") or "").strip()
     if not task_id:
         raise HTTPException(400, "缺少 task_id")
-    from .services.task_manager import mark_task_read
+    from .services.task_manager import record_task_read
 
-    ok = mark_task_read(task_id)
-    if not ok:
+    result = record_task_read(task_id, note=note)
+    if not result.get("ok"):
         raise HTTPException(400, "仅已完成的卡片可标记为已读")
-    return {"ok": True, "read_status": "read"}
+    return {
+        "ok": True,
+        "read_status": "read",
+        "read_count": result.get("read_count") or 1,
+        "entries": result.get("entries") or [],
+    }
+
+
+@app.get("/api/process/queue/read-history")
+def route_queue_read_history(task_id: str = Query(..., description="任务 ID")):
+    """查询任务已读记录（时间 + 当时备注快照）。"""
+    from .services.task_manager import get_task_read_history
+
+    tid = (task_id or "").strip()
+    if not tid:
+        raise HTTPException(400, "缺少 task_id")
+    entries = get_task_read_history(tid)
+    return {"ok": True, "task_id": tid, "read_count": len(entries), "entries": entries}
 
 
 @app.post("/api/process/queue/delete")
@@ -831,6 +968,14 @@ async def route_queue_delete_batch(request: Request):
     if result.get("removed", 0) <= 0:
         raise HTTPException(400, "未移除任何卡片")
     return result
+
+
+@app.post("/api/process/queue/restore-from-history")
+def route_queue_restore_from_history():
+    """从历史任务全量重建队列卡片（灾难恢复，不删历史与产出）。"""
+    from .services.task_manager import restore_queue_cards_from_history_full
+
+    return restore_queue_cards_from_history_full()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -894,12 +1039,15 @@ async def route_output_open_local(request: Request):
 
 
 @app.get("/api/output/file")
-def route_output_file_read(file: str = Query(..., description="output 目录内 basename")):
+def route_output_file_read(
+    file: str = Query(..., description="output 目录内 basename"),
+    marks: bool = Query(True, description="是否解析选区标记（首屏预览可传 false 加速）"),
+):
     """读取 output 内 Markdown 正文与选区标记（预览/编辑用）。"""
     from .services.output_file_io import read_output_file
 
     try:
-        return read_output_file(file)
+        return read_output_file(file, with_marks=marks)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except (ValueError, PermissionError) as e:
@@ -977,7 +1125,7 @@ async def route_output_file_save(request: Request):
 
 @app.get("/api/output/file/marks")
 def route_output_file_marks_get(file: str = Query(...)):
-    """读取选区标记侧车 JSON。"""
+    """读取选区标记：优先 MD 文末「标记内容汇总」，无则回退侧车 JSON（只读，不写侧车）。"""
     from .services.output_file_io import enrich_marks_with_labels, read_marks, resolve_output_file
 
     try:
@@ -992,7 +1140,7 @@ def route_output_file_marks_get(file: str = Query(...)):
 
 @app.put("/api/output/file/marks")
 async def route_output_file_marks_put(request: Request):
-    """写入选区标记侧车 JSON（兼容旧版行标记读取）。"""
+    """同步选区标记到 MD 文末 ST3 汇总块（不写侧车 JSON）。"""
     from .services.output_file_io import save_marks
 
     body = await request.json()
@@ -1057,8 +1205,12 @@ async def route_process_start(req: ProcessRequest):
     comments_dict = req.comments.model_dump() if req.comments else {"enabled": False, "count": 10, "sort": "hot"}
     from .services.task_manager import reuse_or_enqueue_task
     from .services.task_source_meta import SOURCE_MANUAL, source_meta_kwargs
+    from .link_meta_extract import parse_task_meta_hints
 
     src_meta = source_meta_kwargs(SOURCE_MANUAL, platform=platform)
+    hints = parse_task_meta_hints(req.task_meta_hints or {})
+    if not hints and (req.task_keywords or "").strip():
+        hints = parse_task_meta_hints(req.task_keywords)
     task_id, reused, conflict = reuse_or_enqueue_task(
         platform,
         link,
@@ -1069,6 +1221,7 @@ async def route_process_start(req: ProcessRequest):
         importance=req.importance,
         task_note=req.task_note,
         task_keywords=req.task_keywords,
+        task_meta_hints=hints,
         dup_action=req.dup_action,
         **src_meta,
     )
@@ -1440,25 +1593,26 @@ def route_history_restore():
 # ═══════════════════════════════════════════════════════════════════
 # 社媒博主订阅（MariaDB）
 # ═══════════════════════════════════════════════════════════════════
-from .services.creator_subscription_api import (
-    health as sub_health,
-    api_create_subscription,
-    api_list_subscriptions,
-    api_get_subscription,
-    api_update_subscription,
-    api_delete_subscription,
-    api_trigger_sync,
-    api_trigger_sync_all,
-    api_list_sync_runs,
-    api_get_digest,
-    api_get_latest_digest,
-    api_run_creator_profile,
-    api_get_latest_creator_profile,
-    api_get_creator_profile_run,
-    api_seed_subscription_catalog,
-    api_list_subscription_blog_notes,
-)
-from .services.creator_scheduler import get_scheduler_status
+if not _LITE_MODE:
+    from .services.creator_subscription_api import (
+        health as sub_health,
+        api_create_subscription,
+        api_list_subscriptions,
+        api_get_subscription,
+        api_update_subscription,
+        api_delete_subscription,
+        api_trigger_sync,
+        api_trigger_sync_all,
+        api_list_sync_runs,
+        api_get_digest,
+        api_get_latest_digest,
+        api_run_creator_profile,
+        api_get_latest_creator_profile,
+        api_get_creator_profile_run,
+        api_seed_subscription_catalog,
+        api_list_subscription_blog_notes,
+    )
+    from .services.creator_scheduler import get_scheduler_status
 
 
 @app.get("/api/subscriptions/health")
@@ -1880,26 +2034,27 @@ def route_subscription_link_cards(
 # ═══════════════════════════════════════════════════════════════════
 # 小红书收藏夹订阅
 # ═══════════════════════════════════════════════════════════════════
-from .services.favorites_subscription_api import (
-    api_ensure_favorites_subscription,
-    api_get_favorites_digest,
-    api_get_favorites_habit,
-    api_get_favorites_catalog,
-    api_get_favorites_latest_sync,
-    api_import_favorite_ups,
-    api_pull_favorite_up_authors,
-    api_refresh_favorites_cookies,
-    api_trigger_favorites_sync,
-    health as fav_health,
-)
-from .services.follow_up_api import (
-    api_list_follow_ups,
-    api_profile_follow_up,
-    api_pull_follow_ups,
-    api_remove_follow_up,
-    api_subscribe_follow_up,
-)
-from .services.favorites_scheduler import get_scheduler_status as get_favorites_scheduler_status
+if not _LITE_MODE:
+    from .services.favorites_subscription_api import (
+        api_ensure_favorites_subscription,
+        api_get_favorites_digest,
+        api_get_favorites_habit,
+        api_get_favorites_catalog,
+        api_get_favorites_latest_sync,
+        api_import_favorite_ups,
+        api_pull_favorite_up_authors,
+        api_refresh_favorites_cookies,
+        api_trigger_favorites_sync,
+        health as fav_health,
+    )
+    from .services.follow_up_api import (
+        api_list_follow_ups,
+        api_profile_follow_up,
+        api_pull_follow_ups,
+        api_remove_follow_up,
+        api_subscribe_follow_up,
+    )
+    from .services.favorites_scheduler import get_scheduler_status as get_favorites_scheduler_status
 
 
 @app.get("/api/favorites/health")
@@ -2317,7 +2472,17 @@ async def route_skills_import_md(request: Request):
     ct = (request.headers.get("content-type") or "").lower()
     if "application/json" in ct:
         body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
         raw = body.get("markdown") or body.get("content") or ""
+        path_raw = (body.get("path") or "").strip()
+        if not raw and path_raw:
+            p = Path(path_raw)
+            if not p.is_file():
+                raise HTTPException(400, f"文件不存在: {path_raw}")
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        if isinstance(raw, dict):
+            raise HTTPException(400, "markdown/content 须为字符串")
     else:
         raw = (await request.body()).decode("utf-8", errors="replace")
     try:
@@ -2383,9 +2548,9 @@ async def route_skills_import_bundle(request: Request):
             if s.get("name") == name:
                 full = skill_get(s.get("id", ""))
                 if full:
-                    from .services.skill_flow_service import schedule_skill_flow
+                    from .services.skill_intelligence_service import schedule_skill_assets
 
-                    schedule_skill_flow(
+                    schedule_skill_assets(
                         full.get("id", ""),
                         full.get("name", ""),
                         full.get("description", ""),
@@ -2453,6 +2618,89 @@ def route_skills_flow_generate(skill_id: str):
         command=sk.get("command", ""),
     )
     return {"ok": True, **get_flow_state(skill_id)}
+
+
+@app.get("/api/skills/{skill_id}/intelligence")
+def route_skills_intelligence_get(skill_id: str):
+    from .services.skill_intelligence_service import get_intelligence_state
+
+    return {"ok": True, **get_intelligence_state(skill_id)}
+
+
+@app.post("/api/skills/{skill_id}/intelligence")
+def route_skills_intelligence_generate(skill_id: str):
+    from .services.skill_intelligence_service import get_intelligence_state, schedule_skill_intelligence
+    from .services.skill_registry import get_skill
+
+    sk = get_skill(skill_id)
+    if not sk:
+        raise HTTPException(404, "SKILL 不存在")
+    schedule_skill_intelligence(
+        skill_id,
+        sk.get("name", ""),
+        sk.get("description", ""),
+        sk.get("body_md", ""),
+        command=sk.get("command", ""),
+    )
+    return {"ok": True, **get_intelligence_state(skill_id)}
+
+
+@app.post("/api/skills/intelligence/batch")
+async def route_skills_intelligence_batch(request: Request):
+    """为尚未生成智能分析的 SKILL 批量触发生成。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    force = bool(body.get("force", False))
+    from .services.skill_intelligence_service import get_intelligence_state, schedule_skill_intelligence
+    from .services.skill_registry import list_skills
+
+    scheduled = 0
+    skipped = 0
+    for sk in list_skills():
+        sid = str(sk.get("id") or "")
+        if not sid:
+            continue
+        st = get_intelligence_state(sid).get("status")
+        if not force and st in ("done", "pending"):
+            skipped += 1
+            continue
+        schedule_skill_intelligence(
+            sid,
+            sk.get("name", ""),
+            sk.get("description", ""),
+            sk.get("body_md", ""),
+            command=sk.get("command", ""),
+        )
+        scheduled += 1
+    return {"ok": True, "scheduled": scheduled, "skipped": skipped}
+
+
+@app.get("/api/skills/{skill_id}/usage-archives")
+def route_skill_usage_archives(skill_id: str, limit: int = Query(20, ge=1, le=100)):
+    from .services.skill_usage_archive_service import list_archives
+
+    return {"ok": True, "archives": list_archives(skill_id=skill_id, limit=limit)}
+
+
+@app.get("/api/skills/usage-archives/{archive_id}")
+def route_skill_usage_archive_detail(archive_id: str):
+    from .services.skill_usage_archive_service import get_archive
+
+    row = get_archive(archive_id)
+    if not row:
+        raise HTTPException(404, "归档不存在")
+    return {"ok": True, "archive": row}
+
+
+@app.post("/api/skills/usage-archives/sweep")
+def route_skill_usage_archives_sweep(force: bool = Query(False)):
+    from .services.skill_usage_archive_service import sweep_pending_archives
+
+    return {"ok": True, **sweep_pending_archives(force=force)}
 
 
 @app.get("/api/skills/{skill_id}/versions")
@@ -2683,6 +2931,170 @@ async def route_orch_delete(request: Request):
 @app.get("/api/orchestration/scheduler/status")
 def route_orch_scheduler():
     return get_workflow_state()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 多 Agent 舰队管理（Codex / Claude Code / Cursor 等）
+# ═══════════════════════════════════════════════════════════════════
+@app.get("/api/agent-fleet/summary")
+def route_agent_fleet_summary():
+    from .services.agent_fleet_service import get_fleet_summary
+
+    return get_fleet_summary()
+
+
+@app.get("/api/agent-fleet/harnesses")
+def route_agent_fleet_harnesses():
+    from .services.agent_fleet_service import probe_harnesses
+
+    return {"harnesses": probe_harnesses()}
+
+
+@app.get("/api/agent-fleet/projects")
+def route_agent_fleet_projects_list():
+    from .services.agent_fleet_service import list_projects
+
+    return {"projects": list_projects()}
+
+
+@app.post("/api/agent-fleet/projects")
+async def route_agent_fleet_projects_add(request: Request):
+    from .services.agent_fleet_service import add_project
+
+    body = await request.json()
+    try:
+        proj = add_project(
+            name=str(body.get("name") or ""),
+            workspace_path=str(body.get("workspace_path") or ""),
+            default_harness=str(body.get("default_harness") or "claude_code"),
+        )
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, "project": proj}
+
+
+@app.delete("/api/agent-fleet/projects/{project_id}")
+def route_agent_fleet_projects_delete(project_id: str):
+    from .services.agent_fleet_service import delete_project
+
+    if not delete_project(project_id):
+        raise HTTPException(404, "项目不存在")
+    return {"ok": True}
+
+
+@app.get("/api/agent-fleet/sessions")
+def route_agent_fleet_sessions(
+    project_id: str = Query("", description="按项目筛选"),
+    status: str = Query("", description="按状态筛选"),
+):
+    from .services.agent_fleet_service import list_sessions
+
+    return {"sessions": list_sessions(project_id=project_id, status=status)}
+
+
+@app.post("/api/agent-fleet/sessions")
+async def route_agent_fleet_sessions_create(request: Request):
+    from .services.agent_fleet_service import create_session
+
+    body = await request.json()
+    try:
+        sess = create_session(
+            project_id=str(body.get("project_id") or ""),
+            harness_id=str(body.get("harness_id") or "claude_code"),
+            role=str(body.get("role") or "implementer"),
+            prompt=str(body.get("prompt") or ""),
+            scope_paths=body.get("scope_paths") if isinstance(body.get("scope_paths"), list) else [],
+            parent_session_id=str(body.get("parent_session_id") or ""),
+            title=str(body.get("title") or ""),
+        )
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, "session": sess}
+
+
+@app.post("/api/agent-fleet/plans")
+async def route_agent_fleet_plans_create(request: Request):
+    from .services.agent_fleet_service import create_orchestration_plan
+
+    body = await request.json()
+    try:
+        plan = create_orchestration_plan(
+            project_id=str(body.get("project_id") or ""),
+            goal=str(body.get("goal") or ""),
+            implement_harness=str(body.get("implement_harness") or "codex"),
+            review_harness=str(body.get("review_harness") or "claude_code"),
+            scope_paths=body.get("scope_paths") if isinstance(body.get("scope_paths"), list) else None,
+        )
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, "plan": plan}
+
+
+@app.post("/api/agent-fleet/sessions/{session_id}/dispatch")
+def route_agent_fleet_session_dispatch(session_id: str):
+    from .services.agent_fleet_service import dispatch_session
+
+    try:
+        return dispatch_session(session_id)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.post("/api/agent-fleet/sessions/{session_id}/cancel")
+def route_agent_fleet_session_cancel(session_id: str):
+    from .services.agent_fleet_service import cancel_session
+
+    try:
+        return cancel_session(session_id)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.post("/api/agent-fleet/sessions/{session_id}/review")
+async def route_agent_fleet_session_review(session_id: str, request: Request):
+    from .services.agent_fleet_service import mark_session_review_done
+
+    body = await request.json()
+    approved = bool(body.get("approved", True))
+    try:
+        return mark_session_review_done(session_id, approved=approved)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.get("/api/agent-fleet/sessions/{session_id}")
+def route_agent_fleet_session_get(session_id: str):
+    from .services.agent_fleet_service import get_session
+
+    sess = get_session(session_id)
+    if not sess:
+        raise HTTPException(404, "会话不存在")
+    return {"session": sess}
+
+
+@app.get("/api/agent-fleet/sessions/{session_id}/logs")
+def route_agent_fleet_session_logs(session_id: str, tail: int = Query(200, ge=1, le=2000)):
+    from .services.agent_fleet_service import read_session_logs
+
+    return {"logs": read_session_logs(session_id, tail=tail)}
+
+
+@app.get("/api/agent-fleet/sessions/{session_id}/stream")
+def route_agent_fleet_session_stream(session_id: str):
+    from .services.agent_fleet_service import iter_session_log_sse
+
+    return StreamingResponse(
+        iter_session_log_sse(session_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/agent-fleet/ownership")
+def route_agent_fleet_ownership(project_id: str = Query("", description="按项目筛选")):
+    from .services.agent_fleet_service import list_ownership
+
+    return {"ownership": list_ownership(project_id=project_id)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3003,27 +3415,24 @@ def route_chat_delete(sid: str):
 
 
 @app.get("/api/chat/sessions/{sid}")
-def route_chat_get(sid: str):
+def route_chat_get(sid: str, background_tasks: BackgroundTasks):
     from .services.chat_context_memory import (
-        normalize_session_document_for_storage,
-        persist_normalized_session_document,
         session_doc_byte_size,
         session_document_has_full_orchestration_io,
         SESSION_DOC_SOFT_BYTES,
+        maybe_migrate_session_document_async,
     )
     from .services.chat_session_store import get_session_document
 
     doc = get_session_document(sid)
     if not doc:
         raise HTTPException(404, "会话不存在")
-    normalized, changed = normalize_session_document_for_storage(doc)
     if (
-        changed
-        or session_document_has_full_orchestration_io(doc)
+        session_document_has_full_orchestration_io(doc)
         or session_doc_byte_size(doc) > SESSION_DOC_SOFT_BYTES
     ):
-        normalized = persist_normalized_session_document(sid, normalized)
-    return normalized
+        background_tasks.add_task(maybe_migrate_session_document_async, sid)
+    return doc
 
 
 @app.patch("/api/chat/sessions/{sid}")
@@ -3687,6 +4096,89 @@ async def route_doc_rag_delete(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# SearchBox SDK（类 ES 多索引搜索框，/api/search-box 为主入口）
+# ═══════════════════════════════════════════════════════════════════
+@app.get("/api/search-box/indices")
+def route_search_box_indices():
+    from .services.ai_search_sdk.http_routes import list_indices
+    return list_indices()
+
+
+@app.post("/api/search-box/_search")
+async def route_search_box_search(request: Request):
+    from .services.ai_search_sdk.http_routes import search_body
+
+    body = await request.json()
+    es_format = isinstance(body, dict) and str(body.get("format") or "").lower() == "es"
+    return await search_body(body if isinstance(body, dict) else {}, es_format=es_format)
+
+
+@app.get("/api/search-box/_suggest")
+def route_search_box_suggest_get(q: str = Query(""), size: int = Query(8)):
+    from .services.ai_search_sdk import get_search_box_sdk
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(400, "缺少 q")
+    result = get_search_box_sdk().suggest(query, size=max(1, min(size, 20)))
+    return {"ok": True, **result.to_dict()}
+
+
+@app.post("/api/search-box/_suggest")
+async def route_search_box_suggest_post(request: Request):
+    from .services.ai_search_sdk.http_routes import suggest
+    return await suggest(request)
+
+
+@app.post("/api/search-box/_facets")
+async def route_search_box_facets(request: Request):
+    from .services.ai_search_sdk.http_routes import facets
+    return await facets(request)
+
+
+@app.post("/api/search-box/indices/{index_id}/_disable")
+def route_search_box_index_disable(index_id: str):
+    from .services.ai_search_sdk.http_routes import index_disable
+    return index_disable(index_id)
+
+
+@app.post("/api/search-box/indices/{index_id}/_enable")
+def route_search_box_index_enable(index_id: str):
+    from .services.ai_search_sdk.http_routes import index_enable
+    return index_enable(index_id)
+
+
+# 向后兼容 /api/ai-search/*
+@app.get("/api/ai-search/providers")
+def route_ai_search_providers():
+    from .services.ai_search_sdk.http_routes import list_indices
+    return list_indices()
+
+
+@app.get("/api/ai-search/ollama/config")
+def route_ai_search_ollama_config_get():
+    from .services.ai_search_sdk.http_routes import ollama_config_get
+    return ollama_config_get()
+
+
+@app.put("/api/ai-search/ollama/config")
+async def route_ai_search_ollama_config_put(request: Request):
+    from .services.ai_search_sdk.http_routes import ollama_config_put
+    return await ollama_config_put(request)
+
+
+@app.get("/api/ai-search/ollama/health")
+def route_ai_search_ollama_health():
+    from .services.ai_search_sdk.http_routes import ollama_health
+    return ollama_health()
+
+
+@app.post("/api/ai-search/query")
+async def route_ai_search_query(request: Request):
+    from .services.ai_search_sdk.http_routes import search as sb_search
+    return await sb_search(request, es_format=False)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # PAGE 5: Redis缓存
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/cache/query")
@@ -3789,7 +4281,7 @@ async def route_settings_wf_save(ak: str, request: Request):
 @app.get("/api/settings/meta-extract-schema")
 def route_meta_extract_schema(lib: str = Query("", description="知识库 ID，留空则返回默认字段")):
     """链接沉淀可配置元数据提取结构；支持从知识库 metadata_json 一键转换。"""
-    from .link_meta_extract import DEFAULT_META_EXTRACT_FIELDS, fields_from_kb_metadata_json, normalize_meta_extract_fields
+    from .link_meta_extract import DEFAULT_META_EXTRACT_FIELDS, fields_for_card_display, fields_from_kb_metadata_json, normalize_meta_extract_fields
     from .config import load_config
 
     cfg = load_config()
@@ -3811,7 +4303,9 @@ def route_meta_extract_schema(lib: str = Query("", description="知识库 ID，�
     return {
         "ok": True,
         "enabled": bool(cfg.get("meta_extract_enabled", True)),
+        "meta_card_display_enabled": bool(cfg.get("meta_card_display_enabled", False)),
         "fields": fields,
+        "card_fields": fields_for_card_display(fields),
         "default_fields": DEFAULT_META_EXTRACT_FIELDS,
     }
 
@@ -4476,17 +4970,18 @@ async def route_ops_rollback(request: Request):
 
 
 # ─── WebReplay 浏览器自动化（脚本库 / 扩展桥接）───
-from .services.webreplay_store import (
-    append_run as webreplay_append_run,
-    delete_script as webreplay_delete_script,
-    export_scripts as webreplay_export_scripts,
-    get_bridge as webreplay_get_bridge,
-    get_script as webreplay_get_script,
-    import_scripts as webreplay_import_scripts,
-    list_scripts as webreplay_list_scripts,
-    save_bridge as webreplay_save_bridge,
-    upsert_script as webreplay_upsert_script,
-)
+if not _LITE_MODE:
+    from .services.webreplay_store import (
+        append_run as webreplay_append_run,
+        delete_script as webreplay_delete_script,
+        export_scripts as webreplay_export_scripts,
+        get_bridge as webreplay_get_bridge,
+        get_script as webreplay_get_script,
+        import_scripts as webreplay_import_scripts,
+        list_scripts as webreplay_list_scripts,
+        save_bridge as webreplay_save_bridge,
+        upsert_script as webreplay_upsert_script,
+    )
 
 
 def _webreplay_user_id(request: Request) -> str:
@@ -4570,14 +5065,15 @@ async def route_webreplay_run_log(request: Request):
     return {"ok": True}
 
 
-from .services.webreplay_cdp import (
-    cdp_status as webreplay_cdp_status,
-    get_cdp_recording_status,
-    media_file_path as webreplay_media_file_path,
-    run_cdp_replay,
-    start_cdp_recording,
-    stop_cdp_recording,
-)
+if not _LITE_MODE:
+    from .services.webreplay_cdp import (
+        cdp_status as webreplay_cdp_status,
+        get_cdp_recording_status,
+        media_file_path as webreplay_media_file_path,
+        run_cdp_replay,
+        start_cdp_recording,
+        stop_cdp_recording,
+    )
 
 
 @app.get("/api/webreplay/cdp/status")
@@ -4652,21 +5148,22 @@ def route_webreplay_media(session_id: str, filename: str, request: Request):
 
 
 # ─── RSS 订阅阅读 ───
-from .services.rss_reader import (
-    add_feed as rss_add_feed,
-    delete_feed as rss_delete_feed,
-    export_opml as rss_export_opml,
-    import_opml as rss_import_opml,
-    list_feeds as rss_list_feeds,
-    list_items as rss_list_items,
-    rss_stats as rss_stats_fn,
-    set_item_read as rss_set_item_read,
-    set_item_starred as rss_set_item_starred,
-    sync_all_feeds as rss_sync_all,
-    sync_feed as rss_sync_feed,
-    enqueue_item_document as rss_enqueue_item_document,
-)
-from .services.rss_scheduler import get_scheduler_status as rss_scheduler_status
+if not _LITE_MODE:
+    from .services.rss_reader import (
+        add_feed as rss_add_feed,
+        delete_feed as rss_delete_feed,
+        export_opml as rss_export_opml,
+        import_opml as rss_import_opml,
+        list_feeds as rss_list_feeds,
+        list_items as rss_list_items,
+        rss_stats as rss_stats_fn,
+        set_item_read as rss_set_item_read,
+        set_item_starred as rss_set_item_starred,
+        sync_all_feeds as rss_sync_all,
+        sync_feed as rss_sync_feed,
+        enqueue_item_document as rss_enqueue_item_document,
+    )
+    from .services.rss_scheduler import get_scheduler_status as rss_scheduler_status
 
 
 def _rss_user_id(request: Request) -> str:
@@ -4951,6 +5448,17 @@ def route_reader_recent_stat(file: str = Query(..., description="output 目录�
         raise HTTPException(404, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/reader/sessions/lookup")
+def route_reader_session_lookup(file: str = Query(..., description="output 目录内 MD basename")):
+    """按文件名查找/迁移辅助阅读 Agent 会话（同文档重开可回看）。"""
+    from .services.reader_session_store import lookup_session_for_file
+
+    name = (file or "").strip()
+    if not name:
+        raise HTTPException(400, "file 不能为空")
+    return lookup_session_for_file(name)
 
 
 @app.get("/api/reader/sessions/{doc_id}")

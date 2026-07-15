@@ -139,6 +139,32 @@ def _occurrence_index_in_body(body: str, start: int, end: int, needle: str = "")
     return 1
 
 
+def _encode_footer_item_text(text: str) -> str:
+    """文末汇总单行编码：保留换行，避免多行选区写入时被拆成多条。"""
+    return (text or "").replace("\\", "\\\\").replace("\r", "").replace("\n", "\\n")
+
+
+def _decode_footer_item_text(text: str) -> str:
+    """解码文末汇总条目中的 \\n / \\\\。"""
+    out: List[str] = []
+    i = 0
+    src = text or ""
+    while i < len(src):
+        if src[i] == "\\" and i + 1 < len(src):
+            nxt = src[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(src[i])
+        i += 1
+    return "".join(out)
+
+
 def parse_st3_summary_items(summary_text: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """解析文末汇总块条目（ColorMarker.parse_summary_items）。"""
     items: List[Dict[str, Any]] = []
@@ -169,7 +195,7 @@ def parse_st3_summary_items(summary_text: str) -> Tuple[List[Dict[str, Any]], Di
                         cnt = None
                     body = body[rb + 1 :].strip()
             if body and body != "暂无标记内容":
-                items.append({"text": body, "cnt": cnt})
+                items.append({"text": _decode_footer_item_text(body), "cnt": cnt})
     return items, meta
 
 
@@ -336,7 +362,7 @@ def build_marks_footer_md(body: str, marks: List[Dict[str, Any]]) -> str:
         exact = _mark_exact_text(body, m)
         raw_items.append(exact)
         cnt = _occurrence_index_in_body(body, int(m["start"]), int(m["end"]), exact)
-        numbered.append(f"{i}. [CNT={cnt}] {exact}")
+        numbered.append(f"{i}. [CNT={cnt}] {_encode_footer_item_text(exact)}")
 
     order_fp = _compute_order_fingerprint(raw_items)
     block_lines.extend([f"COUNT: {len(raw_items)}", f"ORDER_FP: {order_fp}"])
@@ -356,6 +382,7 @@ def _read_file_body(md_abs: Path) -> str:
 
 
 def _write_sidecar(md_abs: Path, marks: List[Dict[str, Any]], body: str) -> Path:
+    """写入侧车 JSON（仅兼容旧数据读取；Web 新写入不再调用）。"""
     cleaned = normalize_marks(marks or [], body or "")
     sidecar_items = [_mark_to_sidecar_item(m, body or "") for m in cleaned]
     sidecar = marks_sidecar_path(md_abs)
@@ -370,13 +397,17 @@ def _write_sidecar(md_abs: Path, marks: List[Dict[str, Any]], body: str) -> Path
     return sidecar
 
 
-def _sync_marks_to_md_file(md_abs: Path, marks: List[Dict[str, Any]], body: Optional[str] = None) -> None:
-    """将标记写入 MD 文件底部并同步侧车。"""
+def _sync_marks_footer_to_md_file(md_abs: Path, marks: List[Dict[str, Any]], body: Optional[str] = None) -> None:
+    """将标记写入 MD 文末「标记内容汇总」块（ST3/ColorMarker 互通）；不写入侧车 JSON。"""
     body = body if body is not None else _read_file_body(md_abs)
     cleaned = normalize_marks(marks or [], body or "")
     full = build_marks_footer_md(body or "", cleaned)
     md_abs.write_text(full, encoding="utf-8")
-    _write_sidecar(md_abs, cleaned, body or "")
+
+
+def _sync_marks_to_md_file(md_abs: Path, marks: List[Dict[str, Any]], body: Optional[str] = None) -> None:
+    """兼容旧调用名：等同 _sync_marks_footer_to_md_file。"""
+    _sync_marks_footer_to_md_file(md_abs, marks, body)
 
 
 def _span_label(text: str, start: int, end: int, max_len: int = 120) -> str:
@@ -475,14 +506,8 @@ def normalize_marks(marks: List[Any], text: str) -> List[Dict[str, Any]]:
     return out
 
 
-def read_marks(md_abs: Path) -> List[Dict[str, Any]]:
-    try:
-        raw = md_abs.read_text(encoding="utf-8")
-    except Exception:
-        raw = ""
-    body, embedded = split_embedded_marks(raw)
-    if embedded:
-        return normalize_marks(embedded, body)
+def _read_marks_sidecar_only(md_abs: Path, body: str) -> List[Dict[str, Any]]:
+    """仅读侧车 JSON，不再重复读 MD 正文。"""
     sidecar = marks_sidecar_path(md_abs)
     if not sidecar.is_file():
         return []
@@ -490,7 +515,7 @@ def read_marks(md_abs: Path) -> List[Dict[str, Any]]:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
     except Exception as e:
         _log.warning(
-            "[链接沉淀文档-MD预览|output_file_io.read_marks|%s|硬编执行|读取] 侧车解析失败; error_type=%s; error_message=%s",
+            "[链接沉淀文档-MD预览|output_file_io._read_marks_sidecar_only|%s|硬编执行|读取] 侧车解析失败; error_type=%s; error_message=%s",
             md_abs.name,
             type(e).__name__,
             e,
@@ -502,18 +527,33 @@ def read_marks(md_abs: Path) -> List[Dict[str, Any]]:
     return normalize_marks(marks, body)
 
 
+def read_marks_from_raw(md_abs: Path, raw: str, body: str) -> List[Dict[str, Any]]:
+    """基于已读入的正文解析标记：优先文末 ST3 汇总，无汇总时只读回退侧车 JSON（不写入侧车）。"""
+    _, embedded = split_embedded_marks(raw or "")
+    if embedded:
+        return normalize_marks(embedded, body)
+    return _read_marks_sidecar_only(md_abs, body)
+
+
+def read_marks(md_abs: Path) -> List[Dict[str, Any]]:
+    try:
+        raw = md_abs.read_text(encoding="utf-8")
+    except Exception:
+        raw = ""
+    body, _ = split_embedded_marks(raw)
+    return read_marks_from_raw(md_abs, raw, body)
+
+
 def write_marks(md_abs: Path, marks: List[Dict[str, Any]]) -> Path:
     body = _read_file_body(md_abs)
     cleaned = normalize_marks(marks or [], body)
-    _sync_marks_to_md_file(md_abs, cleaned, body)
-    sidecar = marks_sidecar_path(md_abs)
+    _sync_marks_footer_to_md_file(md_abs, cleaned, body)
     _log.info(
-        "[链接沉淀文档-MD预览|output_file_io.write_marks|%s|硬编执行|写入] 选区标记已保存; count=%s; sidecar=%s",
+        "[链接沉淀文档-MD预览|output_file_io.write_marks|%s|硬编执行|写入] 选区标记已写入文末汇总; count=%s",
         md_abs.name,
         len(cleaned),
-        sidecar.name,
     )
-    return sidecar
+    return md_abs
 
 
 def _compute_text_edit(old_text: str, new_text: str) -> Optional[Dict[str, int]]:
@@ -559,6 +599,65 @@ def _find_snippet_near(text: str, snip: str, hint: int) -> int:
     return -1
 
 
+def _mark_snippet(text: str, start: int, end: int) -> str:
+    s = max(0, min(int(start), len(text or "")))
+    e = max(0, min(int(end), len(text or "")))
+    if e <= s:
+        return ""
+    return (text or "")[s:e]
+
+
+def _resolve_old_snip(
+    old_text: str,
+    new_text: str,
+    start: int,
+    end: int,
+    name: str,
+) -> str:
+    """取编辑前片段；若 marks 已在 new 坐标系则优先 new 上的片段。"""
+    old_snip = _mark_snippet(old_text, start, end)
+    new_snip = _mark_snippet(new_text, start, end)
+    name = str(name or "").strip()
+    if new_snip and (not old_snip or new_snip != old_snip):
+        if not name or new_snip == name or name in new_snip:
+            old_snip = new_snip
+    if not old_snip and name:
+        pos = _find_snippet_near(new_text, name, start)
+        if pos < 0:
+            pos = _find_snippet_near(old_text, name, start)
+        if pos >= 0:
+            old_snip = _mark_snippet(new_text, pos, pos + len(name)) or _mark_snippet(
+                old_text, pos, pos + len(name)
+            )
+    return old_snip
+
+
+def _reanchor_mark_range(
+    new_text: str,
+    old_snip: str,
+    name: str,
+    hint: int,
+    fallback_start: int,
+    fallback_end: int,
+) -> Optional[Tuple[int, int]]:
+    """按原文片段在新正文中的期望位置重新锚定，防止纯 delta 漂移 1 字。"""
+    ns, ne = int(fallback_start), int(fallback_end)
+    if ne > ns and new_text[ns:ne] == old_snip:
+        return ns, ne
+    hint = max(0, min(int(hint), len(new_text)))
+    pos = _find_snippet_near(new_text, old_snip, hint)
+    if pos < 0 and name:
+        pos = _find_snippet_near(new_text, name, hint)
+    if pos >= 0:
+        if new_text[pos : pos + len(old_snip)] == old_snip:
+            return pos, pos + len(old_snip)
+        if name and new_text[pos : pos + len(name)] == name:
+            return pos, pos + len(name)
+    if ne > ns and new_text[ns:ne] == old_snip:
+        return ns, ne
+    return None
+
+
 def remap_marks_on_text_change(
     old_text: str,
     new_text: str,
@@ -574,33 +673,25 @@ def remap_marks_on_text_change(
     out: List[Dict[str, Any]] = []
     for m in normalize_marks(marks or [], old_text):
         start, end = int(m["start"]), int(m["end"])
-        old_snip = old_text[start:end]
+        name = str(m.get("name") or "").strip()
+        old_snip = _resolve_old_snip(old_text, new_text, start, end, name)
         if not old_snip:
             continue
-        name = str(m.get("name") or "").strip()
+        anchored: Optional[Tuple[int, int]] = None
         if end <= edit["start"]:
-            ns, ne = start, end
+            anchored = _reanchor_mark_range(new_text, old_snip, name, start, start, end)
         elif start >= edit["old_end"]:
-            ns, ne = start + delta, end + delta
+            anchored = _reanchor_mark_range(
+                new_text, old_snip, name, start + delta, start + delta, end + delta
+            )
         else:
             hint = start + delta if start >= edit["old_end"] else edit["start"]
-            pos = _find_snippet_near(new_text, old_snip, hint)
-            if pos < 0 and name:
-                pos = _find_snippet_near(new_text, name, hint)
-            if pos < 0:
-                continue
-            ns, ne = pos, pos + len(old_snip)
-            if new_text[ns:ne] != old_snip and name:
-                pos2 = _find_snippet_near(new_text, name, hint)
-                if pos2 >= 0:
-                    ns, ne = pos2, pos2 + len(name)
+            anchored = _reanchor_mark_range(new_text, old_snip, name, hint, start, end)
+        if not anchored:
+            continue
+        ns, ne = anchored
         if ns < 0 or ne <= ns or ne > len(new_text):
             continue
-        if new_text[ns:ne] != old_snip and name and new_text[ns:ne] != name:
-            pos3 = _find_snippet_near(new_text, old_snip, ns)
-            if pos3 < 0:
-                continue
-            ns, ne = pos3, pos3 + len(old_snip)
         label = name or re.sub(r"\s+", " ", new_text[ns:ne].strip())[:120]
         out.append(
             {
@@ -615,6 +706,10 @@ def remap_marks_on_text_change(
 
 def enrich_marks_with_labels(md_abs: Path, marks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     body = _read_file_body(md_abs)
+    return enrich_marks_with_body(marks, body)
+
+
+def enrich_marks_with_body(marks: List[Dict[str, Any]], body: str) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for m in normalize_marks(marks, body):
         name = str(m.get("name") or "").strip()
@@ -624,13 +719,22 @@ def enrich_marks_with_labels(md_abs: Path, marks: List[Dict[str, Any]]) -> List[
     return out
 
 
-def read_output_file(name: str) -> Dict[str, Any]:
+def read_output_file(name: str, *, with_marks: bool = True) -> Dict[str, Any]:
     abs_p = resolve_output_file(name)
     raw = abs_p.read_text(encoding="utf-8")
     body, _ = split_embedded_marks(raw)
-    marks = enrich_marks_with_labels(abs_p, read_marks(abs_p))
-    full = build_marks_footer_md(body, marks)
-    footer_md = full[len(body) :].lstrip("\n") if marks else ""
+    marks: List[Dict[str, Any]] = []
+    footer_md = ""
+    if with_marks:
+        marks = read_marks_from_raw(abs_p, raw, body)
+        marks = enrich_marks_with_body(marks, body)
+        if marks:
+            full = build_marks_footer_md(body, marks)
+            footer_md = full[len(body) :].lstrip("\n")
+    try:
+        mtime = int(abs_p.stat().st_mtime * 1000)
+    except OSError:
+        mtime = int(time.time() * 1000)
     return {
         "ok": True,
         "file": abs_p.name,
@@ -640,6 +744,7 @@ def read_output_file(name: str) -> Dict[str, Any]:
         "marks_footer": footer_md,
         "marks_sidecar": str(marks_sidecar_path(abs_p)),
         "output_dir": str(get_output_dir().resolve()),
+        "mtime": mtime,
     }
 
 
@@ -687,7 +792,7 @@ def save_output_file(
         mark_list = read_marks(src)
     else:
         mark_list = read_marks(src) if marks_sidecar_path(src).is_file() or src.is_file() else []
-    _sync_marks_to_md_file(target, mark_list, body)
+    _sync_marks_footer_to_md_file(target, mark_list, body)
     enriched = enrich_marks_with_labels(target, mark_list)
     full_md = build_marks_footer_md(body, mark_list)
     base = (body or "").rstrip("\n")
@@ -708,22 +813,28 @@ def save_output_file(
         "marks": enriched,
         "marks_footer": footer_md,
         "marks_sidecar": str(marks_sidecar_path(target)),
+        "mtime": output_file_mtime_ms(target.name) or int(time.time() * 1000),
     }
 
 
-def save_marks(name: str, marks: List[Dict[str, Any]]) -> Dict[str, Any]:
+def save_marks(name: str, marks: List[Dict[str, Any]], *, content: Optional[str] = None) -> Dict[str, Any]:
     abs_p = resolve_output_file(name)
-    sidecar = write_marks(abs_p, marks)
-    body = _read_file_body(abs_p)
-    enriched = enrich_marks_with_labels(abs_p, read_marks(abs_p))
+    if isinstance(content, str) and content:
+        body, _ = split_embedded_marks(content)
+    else:
+        body = _read_file_body(abs_p)
+    cleaned = normalize_marks(marks or [], body)
+    _sync_marks_footer_to_md_file(abs_p, cleaned, body)
+    enriched = enrich_marks_with_body(cleaned, body)
     full = build_marks_footer_md(body, enriched)
-    footer_md = full[len(body) :].lstrip("\n") if enriched else ""
+    base = (body or "").rstrip("\n")
+    footer_md = full[len(base) :].lstrip("\n") if base else full.lstrip("\n")
     return {
         "ok": True,
         "file": abs_p.name,
-        "marks": enriched,
+        "marks": normalize_marks(enriched, body),
         "marks_footer": footer_md,
-        "marks_sidecar": str(sidecar),
+        "marks_sidecar": str(marks_sidecar_path(abs_p)),
     }
 
 

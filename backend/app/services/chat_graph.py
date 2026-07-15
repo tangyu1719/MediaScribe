@@ -71,6 +71,13 @@ def route_after_rewrite_confirm(state: Dict[str, Any]) -> str:
     return "slot_fill"
 
 
+def route_after_rewrite_summary(state: Dict[str, Any]) -> str:
+    r = _route(state)
+    if r == "rewrite_confirm":
+        return "rewrite_confirm"
+    return "slot_fill"
+
+
 def route_after_slot_confirm(state: Dict[str, Any]) -> str:
     r = _route(state)
     if r == "paused":
@@ -184,7 +191,14 @@ def build_chat_orchestration_graph():
         },
     )
 
-    g.add_edge("rewrite_summary", "slot_fill")
+    g.add_conditional_edges(
+        "rewrite_summary",
+        route_after_rewrite_summary,
+        {
+            "rewrite_confirm": "rewrite_confirm",
+            "slot_fill": "slot_fill",
+        },
+    )
     g.add_conditional_edges(
         "slot_fill",
         route_after_slot_fill,

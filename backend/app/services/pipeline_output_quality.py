@@ -2,22 +2,51 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# ── 结构化报错码（运维 Agent 按码定位 SPAN 环节）──
-PIPE_INVALID_INPUT_EMPTY = "PIPE_INVALID_INPUT_EMPTY"
-PIPE_SUMMARY_REJECTED = "PIPE_SUMMARY_REJECTED"
-PIPE_LINK_NOT_FOUND = "PIPE_LINK_NOT_FOUND"
-PIPE_TITLE_REJECTED = "PIPE_TITLE_REJECTED"
-PIPE_TITLE_HIGH_REPETITION = "PIPE_TITLE_HIGH_REPETITION"
-PIPE_ASR_EMPTY = "PIPE_ASR_EMPTY"
-XHS_EXTRACT_EMPTY = "XHS_EXTRACT_EMPTY"
-XHS_ASSEMBLE_EMPTY = "XHS_ASSEMBLE_EMPTY"
-XHS_CONTENT_JUNK = "XHS_CONTENT_JUNK"
-LLM_INPUT_REJECTED = "LLM_INPUT_REJECTED"
-LLM_INPUT_TOO_SHORT = "LLM_INPUT_TOO_SHORT"
-DELIVERY_REVIEW_FAILED = "DELIVERY_REVIEW_FAILED"
+from .llm_reject_guard import looks_like_llm_reject_text
+
+for _p in Path(__file__).resolve().parents:
+    _cand = _p / "src" / "agent"
+    if _cand.is_dir() and str(_cand) not in sys.path:
+        sys.path.insert(0, str(_cand.resolve()))
+        break
+
+from error_code_registry import (  # noqa: E402
+        K1001,
+        L1001,
+        L1002,
+        P1001,
+        P1002,
+        P1003,
+        P1004,
+        P1005,
+        P1006,
+        W1001,
+        X1001,
+        X1002,
+        X1003,
+        X1004,
+)
+
+# ── 结构化报错码（标准码：模块字母+四位序号；下列名为兼容别名）──
+PIPE_INVALID_INPUT_EMPTY = P1001
+PIPE_SUMMARY_REJECTED = P1002
+PIPE_LINK_NOT_FOUND = P1003
+PIPE_TITLE_REJECTED = P1004
+PIPE_TITLE_HIGH_REPETITION = P1005
+PIPE_ASR_EMPTY = P1006
+XHS_EXTRACT_EMPTY = X1001
+XHS_ASSEMBLE_EMPTY = X1002
+XHS_OCR_ALL_FAILED = X1003
+XHS_CONTENT_JUNK = X1004
+WEB_FETCH_EMPTY = W1001
+LLM_INPUT_REJECTED = L1001
+LLM_INPUT_TOO_SHORT = L1002
+DELIVERY_REVIEW_FAILED = K1001
 
 
 class LLMInputRejectedError(Exception):
@@ -42,7 +71,25 @@ _JUNK_BODY_EXACT: Tuple[str, ...] = (
 )
 
 # 标题/摘要中的拒答式占位片段（子串匹配）
+_OCR_UNRECOGNIZED_MARKER = "（OCR未识别到文本）"
+
+# 小红书页脚/导航壳（非笔记正文）
+_XHS_PAGE_SHELL_MARKERS: Tuple[str, ...] = (
+    "创作中心",
+    "业务合作",
+    "发现",
+    "发布",
+    "通知",
+    "RED直播",
+    "沪ICP备",
+    "行吟信息科技",
+    "加载中",
+)
+
 _REJECT_TITLE_MARKERS: Tuple[str, ...] = (
+    "statusreject",
+    "reject_code",
+    "INPUT_TOO_SHORT",
     "未提供有效待整理文本内容",
     "未提供有效",
     "无有效待整理",
@@ -155,6 +202,15 @@ def assess_extracted_title(
     """
     t = (title or "").strip()
     lt = (link_title or "").strip()
+    if looks_like_llm_reject_text(t):
+        fb = lt or "未命名文档"
+        return TitleAssessment(
+            ok=False,
+            error_code=PIPE_TITLE_REJECTED,
+            error_message="标题为 LLM 拒答 JSON 片段",
+            span_stage="ai_analysis",
+            title=fb,
+        )
     if not t or t in ("内容分析", "未知标题", "未命名文档"):
         code = PIPE_INVALID_INPUT_EMPTY
         if _match_any(lt, _LINK_NOT_FOUND_MARKERS) or "不见了" in lt:
@@ -231,6 +287,42 @@ class ContentAssessment:
         }
 
 
+def _strip_xhs_shell_noise(text: str) -> str:
+    """去除小红书页面壳噪声，估算有效正文字数。"""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    for marker in _XHS_PAGE_SHELL_MARKERS:
+        s = s.replace(marker, " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def effective_xhs_body_chars(text: str) -> int:
+    """去除页脚/导航壳与 OCR 占位后的有效正文字数。"""
+    s = (text or "").replace(_OCR_UNRECOGNIZED_MARKER, " ")
+    s = _strip_xhs_shell_noise(s)
+    s = re.sub(r"#+\s*", "", s)
+    s = re.sub(r"\[图片\d+\]", "", s)
+    s = re.sub(r"来源：\S+", "", s)
+    s = re.sub(r"\s+", "", s)
+    return len(s)
+
+
+def is_xhs_page_shell_body(text: str) -> bool:
+    """正文主要为页面壳（含导航/备案关键词且有效字极少）。"""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    if not any(m in raw for m in _XHS_PAGE_SHELL_MARKERS):
+        return False
+    return effective_xhs_body_chars(raw) < _MIN_XHS_BODY_CHARS * 3
+
+
+def count_ocr_unrecognized(text: str) -> int:
+    return (text or "").count(_OCR_UNRECOGNIZED_MARKER)
+
+
 def is_junk_body_text(text: str) -> bool:
     """检测仅平台名/标题壳等无效正文占位。"""
     s = (text or "").strip()
@@ -283,20 +375,40 @@ def assess_xhs_extractor_result(
                 for img in ((result or {}).get("image_analysis") or [])
                 if isinstance(img, dict)
             )).strip()
-        if is_junk_body_text(combined) or len(combined.strip()) < _MIN_XHS_BODY_CHARS:
-            if image_links > 0 and ocr_text_len == 0:
+        effective_len = effective_xhs_body_chars(combined)
+        body_is_shell = is_xhs_page_shell_body(body) or is_junk_body_text(combined)
+        ocr_all_failed = image_links > 0 and ocr_text_len == 0
+
+        if ocr_all_failed and (body_is_shell or effective_len < _MIN_XHS_BODY_CHARS * 2):
+            msg = (
+                f"笔记含 {image_links} 张图但 OCR 全部失败（ocr_text_len=0）；"
+                f"HTML 正文为页壳/过短（text_len={text_len}; effective={effective_len}）"
+            )
+            return ContentAssessment(
+                ok=False,
+                error_code=XHS_OCR_ALL_FAILED,
+                error_message=msg,
+                span_stage=stage,
+                text_len=text_len,
+                image_links=image_links,
+                ocr_text_len=ocr_text_len,
+            )
+        if is_junk_body_text(combined) or effective_len < _MIN_XHS_BODY_CHARS:
+            if ocr_all_failed:
                 msg = (
                     f"笔记含 {image_links} 张图但 OCR 未识别到文本，"
-                    f"且 HTML 正文无效（text_len={text_len}）"
+                    f"且 HTML 正文无效（text_len={text_len}; effective={effective_len}）"
                 )
+                code = XHS_OCR_ALL_FAILED
             else:
                 msg = (
                     f"抓取结果无有效正文（text_len={text_len}; "
                     f"image_links={image_links}; ocr_text_len={ocr_text_len}）"
                 )
+                code = XHS_EXTRACT_EMPTY if image_links == 0 else XHS_ASSEMBLE_EMPTY
             return ContentAssessment(
                 ok=False,
-                error_code=XHS_EXTRACT_EMPTY if image_links == 0 else XHS_ASSEMBLE_EMPTY,
+                error_code=code,
                 error_message=msg,
                 span_stage=stage,
                 text_len=text_len,
@@ -347,6 +459,26 @@ def assess_assembled_source_text(source_text: str) -> ContentAssessment:
             error_code=XHS_ASSEMBLE_EMPTY,
             error_message="原文装配结果为空",
             span_stage="assemble",
+        )
+    ocr_miss = count_ocr_unrecognized(s)
+    eff = effective_xhs_body_chars(s)
+    if ocr_miss >= 2 and eff < _MIN_XHS_BODY_CHARS * 2:
+        return ContentAssessment(
+            ok=False,
+            error_code=XHS_OCR_ALL_FAILED,
+            error_message=(
+                f"原文装配含 {ocr_miss} 处 OCR 未识别且有效正文过短（effective={eff}）"
+            ),
+            span_stage="assemble",
+            text_len=len(s),
+        )
+    if is_xhs_page_shell_body(s) and eff < _MIN_XHS_BODY_CHARS * 2:
+        return ContentAssessment(
+            ok=False,
+            error_code=XHS_CONTENT_JUNK,
+            error_message=f"原文装配主要为页面壳文本（effective={eff}）",
+            span_stage="assemble",
+            text_len=len(s),
         )
     if is_junk_body_text(s):
         return ContentAssessment(

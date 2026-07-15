@@ -1,13 +1,18 @@
 """任务管理服务 —— 纯内存存储，无外部依赖"""
 from __future__ import annotations
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .link_hash import normalize_link_for_hash, url_hash as link_url_hash
-from .link_meta_extract import clamp_importance
+from .link_meta_extract import clamp_importance, parse_task_meta_hints
+
+
+def _normalize_task_meta_hints(raw: Any) -> Dict[str, Any]:
+    return parse_task_meta_hints(raw if raw is not None else {})
 
 _HERE = Path(__file__).resolve()
 # 向上找到 web_rebuild_v2 根目录（包含 frontend/ 的那个目录）
@@ -28,6 +33,7 @@ _QUEUE_PERSIST_FILE = _OUTPUT_ROOT / ".web_queue_cards.json"
 _dismissed_task_ids: set = set()
 _dismissed_url_hashes: set = set()
 _read_status_map: Dict[str, str] = {}
+_read_history_map: Dict[str, List[Dict[str, Any]]] = {}
 _queue_persist_loaded = False
 
 # 仍在执行中的状态（同 url_hash 禁止再开新卡片）
@@ -40,11 +46,51 @@ _PIPELINE_ACTIVE_STATUSES = frozenset({
 _PIPELINE_RUNNING_STATUSES = _PIPELINE_ACTIVE_STATUSES - {"pending"}
 # 终态（completed / failed / cancelled）
 _PIPELINE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+# 队列卡片持久化/API 列表不需携带的大字段（断点上下文由 history 权威存储）
+_QUEUE_PERSIST_STRIP_KEYS = frozenset({
+    "logs",
+    "pipeline_stages",
+    "resume_context",
+    "link_analyzer_prefetch",
+    "delivery_review",
+    "comments",
+})
+
+
+def _sync_pipeline_steps_field(task: Dict[str, Any]) -> None:
+    """将 pipeline_stages 压缩为轻量 pipeline_steps，供卡片/列表展示。"""
+    route = task.get("pipeline_route") or task.get("route_type") or "video"
+    stages = task.get("pipeline_stages")
+    if stages:
+        from .pipeline_stages import pipeline_summary
+
+        task["pipeline_steps"] = pipeline_summary(stages, route)
+        return
+    if not task.get("pipeline_steps"):
+        from .pipeline_stages import pipeline_summary
+
+        task["pipeline_steps"] = pipeline_summary({}, route)
+
+
+def _strip_queue_card_heavy_fields(task: Dict[str, Any]) -> bool:
+    """从内存卡片剥离大字段；返回是否发生变更。"""
+    changed = False
+    if task.get("pipeline_stages"):
+        _sync_pipeline_steps_field(task)
+        changed = True
+    elif not task.get("pipeline_steps"):
+        _sync_pipeline_steps_field(task)
+        changed = True
+    for key in _QUEUE_PERSIST_STRIP_KEYS:
+        if key in task:
+            task.pop(key, None)
+            changed = True
+    return changed
 
 
 def _task_for_persist(task: Dict[str, Any]) -> Dict[str, Any]:
-    """持久化队列卡片（不含 logs，避免文件过大）。"""
-    row = {k: v for k, v in task.items() if k != "logs"}
+    """持久化队列卡片（不含 logs / 断点大对象，避免文件过大）。"""
+    row = {k: v for k, v in task.items() if k not in _QUEUE_PERSIST_STRIP_KEYS}
     tid = str(row.get("task_id") or "")
     if tid and tid in _read_status_map:
         row["read_status"] = _read_status_map[tid]
@@ -52,7 +98,7 @@ def _task_for_persist(task: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ensure_queue_persistence_loaded() -> None:
-    global _queue_persist_loaded, _dismissed_task_ids, _dismissed_url_hashes, _read_status_map
+    global _queue_persist_loaded, _dismissed_task_ids, _dismissed_url_hashes, _read_status_map, _read_history_map
     if _queue_persist_loaded:
         return
     _queue_persist_loaded = True
@@ -68,6 +114,11 @@ def _ensure_queue_persistence_loaded() -> None:
             for k, v in (data.get("read_status") or {}).items()
             if str(v) in ("read", "unread")
         }
+        _read_history_map = {
+            str(k): [e for e in (v or []) if isinstance(e, dict)]
+            for k, v in (data.get("read_history") or {}).items()
+        }
+        loaded_needs_compact = False
         for tid, card in (data.get("cards") or {}).items():
             tid = str(tid or "").strip()
             if not tid or tid in _dismissed_task_ids or not isinstance(card, dict):
@@ -81,12 +132,18 @@ def _ensure_queue_persistence_loaded() -> None:
                 restored["logs"] = []
                 if tid in _read_status_map:
                     restored["read_status"] = _read_status_map[tid]
+                if _strip_queue_card_heavy_fields(restored):
+                    loaded_needs_compact = True
                 _task_store[tid] = restored
+        if loaded_needs_compact:
+            _save_queue_persistence()
     except Exception:
         pass
 
 
 def _save_queue_persistence() -> None:
+    if os.environ.get("SBA_SKIP_QUEUE_PERSIST") == "1":
+        return
     _ensure_queue_persistence_loaded()
     try:
         cards = {
@@ -99,6 +156,7 @@ def _save_queue_persistence() -> None:
             "dismissed_task_ids": sorted(_dismissed_task_ids),
             "dismissed_url_hashes": sorted(_dismissed_url_hashes),
             "read_status": dict(_read_status_map),
+            "read_history": _read_history_map,
             "cards": cards,
         }
         _QUEUE_PERSIST_FILE.write_text(
@@ -129,6 +187,12 @@ def _apply_read_status_to_task(task: Dict[str, Any]) -> None:
         rs = "unread"
     if rs:
         task["read_status"] = rs
+    entries = _read_history_map.get(tid) or []
+    if entries:
+        task["read_history"] = entries[-20:]
+        task["read_count"] = len(entries)
+    elif rs == "read":
+        task["read_count"] = int(task.get("read_count") or 1)
 
 
 def _set_task_read_status(task_id: str, status: str) -> None:
@@ -153,20 +217,33 @@ def apply_read_status_to_history_row(task: Dict[str, Any]) -> None:
         rs = "unread"
     if rs:
         task["read_status"] = rs
+    entries = _read_history_map.get(tid) or []
+    if entries:
+        task["read_history"] = entries[-20:]
+        task["read_count"] = len(entries)
+    elif rs == "read":
+        task["read_count"] = int(task.get("read_count") or 1)
 
 
-def mark_task_read(task_id: str) -> bool:
-    """将已完成任务标记为已读（单向，不可撤销）；队列卡片与历史列表共用。"""
+def get_task_read_history(task_id: str) -> List[Dict[str, Any]]:
     _ensure_queue_persistence_loaded()
     tid = (task_id or "").strip()
     if not tid:
-        return False
-    if _read_status_map.get(tid) == "read":
-        return True
+        return []
+    return list(_read_history_map.get(tid) or [])
+
+
+def record_task_read(task_id: str, *, note: str = "") -> Dict[str, Any]:
+    """记录一次已读（可重复）；附带当时备注快照与版本号。"""
+    _ensure_queue_persistence_loaded()
+    tid = (task_id or "").strip()
+    if not tid:
+        return {"ok": False, "read_count": 0, "entries": []}
     task = _task_store.get(tid)
+    hist = None
     if task:
         if (task.get("status") or "") != "completed":
-            return False
+            return {"ok": False, "read_count": 0, "entries": []}
     else:
         try:
             from .history_manager import get_history_task_by_id
@@ -175,10 +252,34 @@ def mark_task_read(task_id: str) -> bool:
         except Exception:
             hist = None
         if not hist or (hist.get("status") or "") != "completed":
-            return False
+            return {"ok": False, "read_count": 0, "entries": []}
+    note_text = str(note or "").strip()
+    if not note_text and task:
+        note_text = str(task.get("task_note") or "").strip()
+    versions = list((task or hist or {}).get("task_note_versions") or [])
+    note_ver = int(versions[-1].get("version") or len(versions)) if versions else (1 if note_text else 0)
+    entry = {
+        "read_at": datetime.now().isoformat(timespec="seconds"),
+        "note": note_text,
+        "note_version": note_ver,
+    }
+    entries = list(_read_history_map.get(tid) or [])
+    entries.append(entry)
+    if len(entries) > 50:
+        entries = entries[-50:]
+    _read_history_map[tid] = entries
     _set_task_read_status(tid, "read")
+    if task:
+        task["read_count"] = len(entries)
+        task["read_history"] = entries[-20:]
     _save_queue_persistence()
-    return True
+    return {"ok": True, "read_count": len(entries), "entries": entries}
+
+
+def mark_task_read(task_id: str, *, note: str = "") -> bool:
+    """将已完成任务标记为已读；重复调用累计 read_count。"""
+    result = record_task_read(task_id, note=note)
+    return bool(result.get("ok"))
 
 
 def dismiss_queue_task(task_id: str) -> bool:
@@ -195,6 +296,7 @@ def dismiss_queue_task(task_id: str) -> bool:
             _dismissed_url_hashes.add(uh)
     existed = _task_store.pop(tid, None) is not None
     _read_status_map.pop(tid, None)
+    _read_history_map.pop(tid, None)
     _save_queue_persistence()
     return existed or tid in _dismissed_task_ids
 
@@ -289,6 +391,7 @@ def create_task(
     importance: Optional[int] = None,
     task_note: str = "",
     task_keywords: str = "",
+    task_meta_hints: Optional[Dict] = None,
     import_source: str = "",
     source_label: str = "",
     author_name: str = "",
@@ -397,6 +500,7 @@ def create_task(
         "importance": clamp_importance(importance, 5),
         "task_note": (task_note or "").strip(),
         "task_keywords": (task_keywords or "").strip(),
+        "task_meta_hints": _normalize_task_meta_hints(task_meta_hints),
         "extracted_metadata": {},
         "queue_seq": 0,
         "created_at": now,
@@ -465,6 +569,8 @@ def update_task(task_id: str, **kwargs):
             for k in ("stage", "progress", "failed_stage", "failed_stage_label", "resume_from"):
                 kwargs.pop(k, None)
         task.update(kwargs)
+        if any(k in kwargs for k in ("pipeline_stages", "pipeline_route", "route_type")):
+            _sync_pipeline_steps_field(task)
         new_status = (task.get("status") or "").strip()
         task["updated_at"] = datetime.now().isoformat()
         if new_status == "completed" and old_status != "completed":
@@ -909,6 +1015,7 @@ def import_history_task_to_queue(hist: Dict[str, Any]) -> Optional[str]:
         "importance": clamp_importance(hist.get("importance"), 5),
         "task_note": str(hist.get("task_note") or "").strip(),
         "task_keywords": str(hist.get("task_keywords") or "").strip(),
+        "task_meta_hints": _normalize_task_meta_hints(hist.get("task_meta_hints")),
         "extracted_metadata": dict(hist.get("extracted_metadata") or {}),
         "import_source": str(hist.get("import_source") or "").strip(),
         "source_label": str(hist.get("source_label") or "").strip(),
@@ -964,6 +1071,58 @@ def init_queue_from_history() -> int:
     return n
 
 
+def restore_queue_cards_from_history_full(*, limit: int = _QUEUE_HISTORY_MERGE_LIMIT) -> Dict[str, Any]:
+    """
+    从历史/MariaDB 全量重建队列卡片（含 completed/failed/cancelled）。
+    用于灾难恢复：清空 dismiss 与内存卡片后，按历史 updated_at 顺序逐条导入。
+    保留既有 read_status，不删除历史记录与产出文件。
+    """
+    import logging
+
+    _ensure_queue_persistence_loaded()
+    preserved_read = dict(_read_status_map)
+    rows = sorted(
+        _list_history_rows_for_queue(limit),
+        key=lambda h: str(h.get("updated_at") or h.get("created_at") or ""),
+    )
+    _task_store.clear()
+    _dismissed_task_ids.clear()
+    _dismissed_url_hashes.clear()
+    _read_status_map.clear()
+    _read_status_map.update(preserved_read)
+
+    imported = 0
+    skipped = 0
+    for hist in rows:
+        tid = import_history_task_to_queue(hist)
+        if tid:
+            imported += 1
+            task = _task_store.get(tid)
+            if task:
+                _strip_queue_card_heavy_fields(task)
+        else:
+            skipped += 1
+
+    _normalize_queue_seqs()
+    _save_queue_persistence()
+    total = len(_task_store)
+    logging.getLogger("sba.task_manager").info(
+        "[链接沉淀-队列|task_manager.restore_queue_cards_from_history_full|task_queue|硬编执行|全量恢复] "
+        "完成; ok=true; imported=%s; skipped=%s; total=%s; read_status_kept=%s",
+        imported,
+        skipped,
+        total,
+        len(preserved_read),
+    )
+    return {
+        "ok": True,
+        "imported": imported,
+        "skipped": skipped,
+        "total": total,
+        "read_status_kept": len(preserved_read),
+    }
+
+
 _last_reconcile_ts: float = 0.0
 _RECONCILE_THROTTLE_SEC = 120.0
 
@@ -977,8 +1136,13 @@ def list_queue_tasks() -> list:
         reconcile_queue_with_history(save=True)
         _last_reconcile_ts = now_ts
     tasks = list_tasks()
+    meta_dirty = False
     for t in tasks:
+        if sync_task_metadata_from_doc(t):
+            meta_dirty = True
         _apply_read_status_to_task(t)
+    if meta_dirty:
+        _save_queue_persistence()
     return tasks
 
 
@@ -1085,14 +1249,26 @@ def set_task_note_keywords(
     task_note: Optional[str] = None,
     task_keywords: Optional[str] = None,
 ) -> bool:
-    """更新任务备注与关键词。备注任意状态可改；关键词仅非终态可改。"""
+    """更新任务备注与关键词。备注任意状态可改并追加版本；关键词仅非终态可改。"""
     task = _task_store.get(task_id)
     if not task:
         return False
     changed = False
     if task_note is not None:
-        task["task_note"] = str(task_note or "").strip()
-        changed = True
+        new_note = str(task_note or "").strip()
+        old_note = str(task.get("task_note") or "").strip()
+        if new_note != old_note:
+            versions = list(task.get("task_note_versions") or [])
+            versions.append(
+                {
+                    "version": len(versions) + 1,
+                    "text": new_note,
+                    "saved_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            task["task_note_versions"] = versions[-50:]
+            task["task_note"] = new_note
+            changed = True
     if task_keywords is not None:
         st = (task.get("status") or "").strip()
         if st not in ("completed", "cancelled", "failed"):
@@ -1102,6 +1278,50 @@ def set_task_note_keywords(
         return False
     task["updated_at"] = datetime.now().isoformat()
     _save_queue_persistence()
+    return True
+
+
+def sync_task_metadata_from_doc(task: Dict[str, Any]) -> bool:
+    """从 output MD 的 structured JSON 块同步 extracted_metadata（文档编辑后卡片关键词刷新）。"""
+    if (task.get("status") or "") != "completed":
+        return False
+    from pathlib import Path
+
+    from .file_naming import resolve_output_abs
+    from .link_meta_extract import parse_meta_json_from_md
+
+    path = str(task.get("doc_path") or "").strip()
+    if not path:
+        fn = str(task.get("doc_filename") or "").strip()
+        if fn:
+            abs_p = resolve_output_abs(fn)
+            if abs_p:
+                path = str(abs_p)
+    if not path:
+        return False
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        mtime = int(p.stat().st_mtime * 1000)
+    except OSError:
+        mtime = 0
+    cached_mtime = int(task.get("_meta_md_mtime") or 0)
+    if cached_mtime == mtime and isinstance(task.get("extracted_metadata"), dict) and task.get("extracted_metadata"):
+        return False
+    try:
+        text = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    meta = parse_meta_json_from_md(text)
+    if not meta:
+        task["_meta_md_mtime"] = mtime
+        return False
+    task["extracted_metadata"] = meta
+    task["_meta_md_mtime"] = mtime
+    author = str(meta.get("author_name") or "").strip()
+    if author and not str(task.get("author_name") or "").strip():
+        task["author_name"] = author
     return True
 
 
@@ -1185,6 +1405,7 @@ def restart_existing_task(
     importance: Optional[int] = None,
     task_note: Optional[str] = None,
     task_keywords: Optional[str] = None,
+    task_meta_hints: Optional[Dict] = None,
     import_source: str = "",
     source_label: str = "",
     author_name: str = "",
@@ -1209,10 +1430,31 @@ def restart_existing_task(
 
     norm = normalize_link_for_hash(link)
     uh = link_url_hash(link)
+
+    # 网页/公众号链接复用失败卡片时，从旧 video 路由迁移到 web_article（避免再走 yt-dlp）
+    try:
+        from .link_doc_routing import is_web_article_link, resolve_task_platform
+        from .pipeline_stages import init_pipeline_stages
+
+        if is_web_article_link(link):
+            platform = resolve_task_platform(link, platform or str(task.get("platform") or ""))
+            old_route = (task.get("pipeline_route") or "video").strip() or "video"
+            st = (task.get("status") or "").strip()
+            if full_rerun or (old_route != "web_article" and st in ("failed", "cancelled")):
+                pipeline_route = "web_article"
+                pipeline_stages = init_pipeline_stages("web_article")
+                resume_from = ""
+                resume_context = {}
+                failed_stage = ""
+                failed_stage_label = ""
+                full_rerun = True
+    except Exception:
+        pass
+
     if full_rerun:
         resume_from = ""
         resume_context = {}
-        pipeline_stages = {}
+        pipeline_stages = pipeline_stages if pipeline_stages is not None else {}
         failed_stage = ""
         failed_stage_label = ""
     else:
@@ -1248,6 +1490,8 @@ def restart_existing_task(
         task["task_note"] = str(task_note or "").strip()
     if task_keywords is not None:
         task["task_keywords"] = str(task_keywords or "").strip()
+    if task_meta_hints is not None:
+        task["task_meta_hints"] = _normalize_task_meta_hints(task_meta_hints)
     if any([import_source, source_label, author_name, author_id, subscription_id]):
         from .task_source_meta import apply_task_source_meta
 
@@ -1369,12 +1613,14 @@ def reuse_or_enqueue_task(
     importance: Optional[int] = None,
     task_note: str = "",
     task_keywords: str = "",
+    task_meta_hints: Optional[Dict] = None,
     import_source: str = "",
     source_label: str = "",
     author_name: str = "",
     author_id: str = "",
     subscription_id: str = "",
     dup_action: str = "",
+    pipeline_options: Optional[Dict] = None,
 ) -> Tuple[str, bool, Optional[Dict]]:
     """
     同链接复用同一卡片：返回 (task_id, reused, conflict_info)。
@@ -1406,8 +1652,10 @@ def reuse_or_enqueue_task(
             platform, link, user_prompt, comments,
             resume_from=resume_from, resume_context=resume_context,
             pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            pipeline_options=pipeline_options,
             skip_bootstrap_meta=fast_enqueue, skip_done_hist_check=True, skip_dedup=True,
             importance=importance, task_note=task_note, task_keywords=task_keywords,
+            task_meta_hints=task_meta_hints,
             import_source=import_source, source_label=source_label,
             author_name=author_name, author_id=author_id,
             subscription_id=subscription_id,
@@ -1430,8 +1678,10 @@ def reuse_or_enqueue_task(
             tid, platform=platform, link=link, user_prompt=user_prompt,
             comments=comments, resume_from=resume_from, resume_context=resume_context,
             pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            pipeline_options=pipeline_options,
             full_rerun=full_rerun, import_source=import_source, source_label=source_label,
             author_name=author_name, author_id=author_id, subscription_id=subscription_id,
+            task_meta_hints=task_meta_hints,
         )
         return tid, True, None
 
@@ -1451,8 +1701,10 @@ def reuse_or_enqueue_task(
             mtid, platform=platform, link=link, user_prompt=user_prompt,
             comments=comments, resume_from=resume_from, resume_context=resume_context,
             pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+            pipeline_options=pipeline_options,
             full_rerun=full_rerun, import_source=import_source, source_label=source_label,
             author_name=author_name, author_id=author_id, subscription_id=subscription_id,
+            task_meta_hints=task_meta_hints,
         )
         return mtid, True, None
 
@@ -1471,6 +1723,7 @@ def reuse_or_enqueue_task(
         platform, link, user_prompt, comments,
         resume_from=resume_from, resume_context=resume_context,
         pipeline_stages=pipeline_stages, pipeline_route=pipeline_route,
+        pipeline_options=pipeline_options,
         skip_bootstrap_meta=fast_enqueue, skip_done_hist_check=fast_enqueue,
         importance=importance, task_note=task_note, task_keywords=task_keywords,
         import_source=import_source, source_label=source_label,

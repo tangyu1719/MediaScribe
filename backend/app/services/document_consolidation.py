@@ -43,6 +43,7 @@ from .json_llm_output import (
     parse_llm_json_object,
 )
 from .pipeline_output_quality import LLMInputRejectedError
+from .llm_reject_guard import looks_like_llm_reject_text, safe_plain_text_fallback
 
 _JSON_OUTPUT_RULE_ARTICLE = _JSON_OUTPUT_RULE_ARTICLE_WITH_SIGNAL
 _JSON_OUTPUT_RULE_SUMMARY = _JSON_OUTPUT_RULE_SUMMARY_WITH_SIGNAL
@@ -192,6 +193,10 @@ def _normalize_extracted_title(raw: str) -> str:
 def extract_title_from_summary(summary: str, link: str = "", log_cb=None) -> str:
     """从AI摘要中提取标题（video_gui.py:11508 原样搬运）"""
     try:
+        if summary and looks_like_llm_reject_text(summary):
+            if log_cb:
+                log_cb("摘要为 LLM 拒答 JSON，跳过标题提取")
+            return "内容分析"
         if summary:
             lines = summary.split('\n')
             # 优先：摘要首段一级标题 # xxx
@@ -476,7 +481,10 @@ def run_document_consolidation(
             "WARNING",
             error_code=last_code,
         )
-        return normalize_llm_string_escapes(plain_text_fallback(raw_out)), meta
+        return safe_plain_text_fallback(
+            raw_out,
+            fallback_fn=lambda raw: normalize_llm_string_escapes(plain_text_fallback(raw)),
+        ), meta
 
     def do_summarize(input_text: str, is_retry: bool = False) -> str:
         role_label = "摘要Agent" + ("(二次)" if is_retry else "")
@@ -799,10 +807,11 @@ def run_document_consolidation(
 
     extracted_metadata: Dict = {}
     try:
-        from .link_meta_extract import extract_link_metadata, get_meta_extract_config
+        from .link_meta_extract import extract_link_metadata, get_meta_extract_config, merge_extracted_metadata, parse_task_meta_hints
 
         meta_cfg = get_meta_extract_config(llm_cfg)
         if meta_cfg.get("enabled") and meta_cfg.get("fields"):
+            hints = parse_task_meta_hints(llm_cfg.get("_task_meta_hints"))
             extracted_metadata = extract_link_metadata(
                 body_text=article_text or raw_text,
                 summary_text=ai_summary or "",
@@ -810,7 +819,13 @@ def run_document_consolidation(
                 fields=meta_cfg.get("fields") or [],
                 task_note=str(llm_cfg.get("_task_note") or ""),
                 task_keywords=str(llm_cfg.get("_task_keywords") or ""),
+                task_meta_hints=hints,
                 log_cb=log_cb,
+            )
+            extracted_metadata = merge_extracted_metadata(
+                extracted_metadata,
+                task_author_name=str(llm_cfg.get("_author_name") or ""),
+                task_meta_hints=hints,
             )
             if extracted_metadata:
                 _plog("元数据", "结构化元数据提取完成", field_count=len(extracted_metadata))

@@ -127,6 +127,8 @@ def _render_summarized_md(
         transcribe_source=pipeline or "multimodal",
         link_title=source_name,
         doc_title=doc_title,
+        author_name=str((extracted_metadata or {}).get("author_name") or "").strip(),
+        extracted_metadata=extracted_metadata,
         comments_section=comments_section,
         comments_analysis="",
         comments_file_link=format_comments_file_link(""),

@@ -43,6 +43,7 @@ from .file_naming import (
     build_output_md_path,
     output_basename,
     render_output_template,
+    resolve_output_author_name,
     preview_from_analyzer_result,
 )
 from .ops import ops_monitor_task
@@ -234,7 +235,7 @@ def _extract_xiaohongshu_content(
         return None
 
 
-# ─── 节点2: OCR 补偿（参照原项目 OCR补偿段） ───
+# ─── 节点2: OCR 补偿 ───
 
 def _ocr_compensation(result: Dict, task_id: str) -> Dict:
     image_links = list(result.get("image_links", []) or [])
@@ -243,28 +244,20 @@ def _ocr_compensation(result: Dict, task_id: str) -> Dict:
     if image_links and not image_analysis:
         import time as _time
 
+        from .xhs_image_ocr import run_xhs_ocr_compensation
+
+        note_url = str(result.get("url") or "").strip()
         _log(task_id, f"[小红书图文沉淀] 检测到 image_links={len(image_links)} 但 image_analysis=0，开始OCR补偿...")
         t_ocr_all = _time.perf_counter()
-        analyzer = LinkAnalyzer()
-        recovered = []
-        for idx, img_url in enumerate(image_links, 1):
-            try:
-                _log(task_id, f"[小红书图文沉淀][OCR] start idx={idx} url={img_url}")
-                img_data = analyzer.download_image(img_url)
-                if not img_data: continue
-                ocr_result = analyzer.ocr_image(img_data)
-                if not ocr_result: continue
-                img_text = (analyzer.extract_text_from_ocr(ocr_result) or "").strip()
-                if not img_text: continue
-                recovered.append({"url": img_url, "text": img_text, "index": idx})
-                if idx < len(image_links): time.sleep(1.0)
-            except Exception as e:
-                _log(task_id, f"[小红书图文沉淀] OCR补偿失败 idx={idx}: {e}", "WARNING")
+        recovered, diagnostics = run_xhs_ocr_compensation(image_links, note_url=note_url)
         if recovered:
             result["image_analysis"] = recovered
+        result["ocr_diagnostics"] = diagnostics
         _log(
             task_id,
-            f"[小红书图文沉淀] OCR补偿结束; ok={len(recovered)}; "
+            f"[小红书图文沉淀] OCR补偿结束; ok={diagnostics.get('ok')}/{diagnostics.get('total')}; "
+            f"methods={diagnostics.get('methods')}; baidu_errors={diagnostics.get('baidu_errors')}; "
+            f"fail_stats={diagnostics.get('fail_stats')}; "
             f"elapsed_ms={int((_time.perf_counter() - t_ocr_all) * 1000)}",
         )
     return result
@@ -354,6 +347,8 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
         transcribe_source=transcribe_source,
         link_title=link_title,
         doc_title=title,
+        author_name=str(result_data.get("author_name") or "").strip(),
+        extracted_metadata=result_data.get("extracted_metadata") or {},
         comments_section=comments_section,
         comments_analysis=comments_viewpoint,
         comments_file_link=format_comments_file_link(comments_file_path),
@@ -378,6 +373,7 @@ def _generate_md(result_data: Dict, link: str, platform: str, task_id: str, cfg:
 - 原始链接: {link}
 - 平台: {platform}
 - 类型: {content_type}
+- 作者: {resolve_output_author_name(author_name=str(result_data.get("author_name") or "").strip(), extracted_metadata=result_data.get("extracted_metadata") or {})}
 - 转写链路: {transcribe_source}
 
 ## 原始内容
@@ -524,6 +520,9 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                     "ocr_text_len": ocr_gate.ocr_text_len,
                 },
             )
+            from app.schemas.mm_document_resources import attach_link_external_resources
+
+            attach_link_external_resources(result, platform="小红书", source_link=link)
             tracker.complete("ocr", {"title": link_title}, persist_payload=result)
         else:
             tracker.log_skip("extract")
@@ -649,6 +648,8 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
                         "_log_chain": "链接沉淀文档-小红书图文",
                         "_task_note": str(task_snap.get("task_note") or ""),
                         "_task_keywords": str(task_snap.get("task_keywords") or ""),
+                        "_task_meta_hints": task_snap.get("task_meta_hints") or {},
+                        "_author_name": str(task_snap.get("author_name") or ""),
                     },
                     user_prompt=user_prompt,
                     stage_label="小红书图文沉淀",
@@ -664,6 +665,13 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             extracted_metadata = consolidation.get("extracted_metadata") or {}
             if extracted_metadata:
                 _tm.update_task(task_id, extracted_metadata=extracted_metadata)
+                em_author = str(extracted_metadata.get("author_name") or "").strip()
+                if em_author and not (task_snap.get("author_name") or "").strip():
+                    from .task_source_meta import apply_task_source_meta
+                    t = _tm.get_task(task_id)
+                    if t:
+                        apply_task_source_meta(t, author_name=em_author)
+                        _tm.update_task(task_id, author_name=em_author)
             block_code = str(consolidation.get("error_code") or "").strip()
             if block_code and consolidation.get("article_source") == "blocked":
                 err_msg = f"[{block_code}] {consolidation.get('error_message') or '文档沉淀前校验失败'}"
@@ -762,26 +770,29 @@ async def process_xiaohongshu_article_pipeline(task_id: str, user_prompt: str = 
             tracker.start("generate_md")
             _tm.update_task(task_id, status="generating", stage="生成Markdown", progress=90)
             task_snap_md = _tm.get_task(task_id) or {}
+            from app.schemas.mm_document_resources import apply_resources_to_md_payload
+
+            md_payload = apply_resources_to_md_payload(
+                {
+                    "ai_summary": ai_summary,
+                    "article": article_text or source_text,
+                    "title": title,
+                    "link_title": link_title,
+                    "content_type": (task.get("content_type") or "图文"),
+                    "comments_viewpoint": comments_viewpoint,
+                    "comments_file_path": (task.get("comments") or {}).get("comments_file_path") or "",
+                    "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
+                    "author_name": task_snap_md.get("author_name") or "",
+                    "task_note": task_snap_md.get("task_note") or "",
+                    "task_keywords": task_snap_md.get("task_keywords") or "",
+                },
+                result,
+                platform="小红书",
+                source_link=link,
+            )
             doc_path = await loop.run_in_executor(
                 _io_executor(),
-                lambda: _generate_md(
-                    {
-                        "ai_summary": ai_summary,
-                        "article": article_text or source_text,
-                        "title": title,
-                        "link_title": link_title,
-                        "content_type": (task.get("content_type") or "图文"),
-                        "comments_viewpoint": comments_viewpoint,
-                        "comments_file_path": (task.get("comments") or {}).get("comments_file_path") or "",
-                        "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
-                        "task_note": task_snap_md.get("task_note") or "",
-                        "task_keywords": task_snap_md.get("task_keywords") or "",
-                    },
-                    link,
-                    "小红书",
-                    task_id,
-                    cfg=cfg,
-                ),
+                lambda p=md_payload: _generate_md(p, link, "小红书", task_id, cfg=cfg),
             )
             if not doc_path:
                 _end_span(md_span, status="failed", error_code="XHS_MD_FAILED", error_message="文档生成失败", task_id=task_id)

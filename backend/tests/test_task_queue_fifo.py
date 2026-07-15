@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ tm = importlib.import_module("app.services.task_manager")
 
 
 def setup_function():
+    os.environ["SBA_SKIP_QUEUE_PERSIST"] = "1"
     tm._task_store.clear()
     tm._queue_tick = 0
 

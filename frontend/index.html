@@ -4,7 +4,84 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=58">
+<link rel="stylesheet" href="/assets/css/app.css?v=63">
+<link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
+<link rel="preload" href="/vendor/vue.global.prod.js" as="script">
+<link rel="preload" href="/assets/js/app.js?v=142" as="script">
+<!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
+<script src="/assets/js/auth.js?v=8"></script>
+<script>
+if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
+  AuthManager.router.init();
+}
+(function(){
+  var path = window.location.pathname;
+  var isLoginPage = path === '/login.html' || path.endsWith('/login.html');
+  if (!localStorage.getItem('sba_token') && !isLoginPage) {
+    window.location.replace('/login.html?next=' + encodeURIComponent(path + window.location.search));
+  }
+})();
+</script>
+<script src="/vendor/vue.global.prod.js" defer></script>
+<script src="/assets/js/app.js?v=142" defer></script>
+<script src="/vendor/marked.min.js" defer></script>
+<script src="/vendor/purify.min.js" defer></script>
+<script src="/vendor/mermaid.min.js" defer></script>
+<script src="/assets/js/diagram_style_presets.js?v=3" defer></script>
+<script src="/assets/js/orch_catalog.js?v=1" defer></script>
+<script src="/assets/js/reader_hub.js?v=6" defer></script>
+<script src="/assets/js/reader.js?v=4" defer></script>
+<script src="/assets/js/rich_content.js?v=4" defer></script>
+<script>
+(function(){
+  window.__SBA_BOOT_T0=Date.now();
+  function bootFail(msg){
+    if(window.__SBA_VUE_MOUNTED__)return;
+    var app=document.getElementById('app');
+    var ld=document.getElementById('sba-boot-loading');
+    if(ld)ld.classList.add('sba-boot-done');
+    if(!app)return;
+    app.removeAttribute('v-cloak');
+    app.innerHTML='<div style="padding:32px 20px;max-width:520px;margin:24px auto;font-family:system-ui,sans-serif;line-height:1.55;color:#1e293b;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0"><h2 style="font-size:18px;margin:0 0 12px">应用加载失败</h2><p style="margin:0 0 10px;font-size:14px;color:#475569">'+msg+'</p><p style="margin:0;font-size:13px;color:#64748b"><a href="/login.html">重新登录</a> · Ctrl+F5 强刷 · 若控制台有 fetch-interceptor 报错可尝试无痕窗口</p></div>';
+  }
+  setTimeout(function(){
+    if(window.__SBA_VUE_MOUNTED__)return;
+    var ld=document.getElementById('sba-boot-loading');
+    if(ld&&!ld.classList.contains('sba-boot-done')){
+      var sec=Math.round((Date.now()-window.__SBA_BOOT_T0)/1000);
+      ld.textContent='正在加载应用（'+sec+'秒）…';
+    }
+  },3000);
+  setTimeout(function(){
+    if(window.__SBA_VUE_MOUNTED__)return;
+    bootFail('Vue 未在 30 秒内完成挂载。请 Ctrl+F5 强刷；若控制台有 fetch-interceptor 报错请用无痕窗口。');
+  },30000);
+  document.addEventListener('DOMContentLoaded',function(){
+    var token=localStorage.getItem('sba_token');
+    var userStr=localStorage.getItem('sba_user');
+    var bar=document.getElementById('auth-debug-bar');
+    var msg=document.getElementById('auth-debug-msg');
+    if(!token){
+      if(bar){bar.style.display='block';msg.textContent='localStorage 中无 sba_token，请先登录';}
+      var ld=document.getElementById('sba-boot-loading');
+      if(ld)ld.classList.add('sba-boot-done');
+      return;
+    }
+    if(!userStr){
+      if(bar){bar.style.display='block';msg.textContent='缺少 sba_user，将由应用自动拉取用户信息';}
+    }else{
+      try{
+        var user=JSON.parse(userStr);
+        if(user&&user.id){if(bar)bar.style.display='none';}
+        else if(bar){bar.style.display='block';msg.textContent='用户数据无效，将由应用自动刷新';}
+      }catch(e){
+        if(bar){bar.style.display='block';msg.textContent='sba_user 解析失败，将由应用自动刷新';}
+        localStorage.removeItem('sba_user');
+      }
+    }
+  });
+})();
+</script>
 </head>
 <body>
 <div id="sba-boot-loading" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#ebe8e2);color:#64748b;font:14px/1.5 system-ui,sans-serif;z-index:99998">正在加载…</div>
@@ -30,13 +107,13 @@
 <symbol id="icon-sched" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
 <symbol id="icon-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></symbol>
 </svg>
-<div id="app" v-cloak>
+<div id="app" v-cloak :class="{'sba-m-portrait': mobilePortrait}">
   <div v-if="sidePanelFs.open" class="rss-panel-fs-backdrop" @click="closeSidePanelFs" aria-hidden="true"></div>
   <div id="auth-debug-bar" style="display:none;background:#dc2626;color:#fff;padding:8px 16px;font-size:12px;text-align:center;position:sticky;top:0;z-index:99999">
     ! 认证状态异常: <span id="auth-debug-msg"></span>
     <button onclick="window.location.href='/login.html'" style="margin-left:12px;padding:4px 12px;border:1px solid rgba(255,255,255,.4);border-radius:8px;background:transparent;color:#fff;cursor:pointer;font-size:11px">重新登录</button>
   </div>
-<div class="nav-rail">
+<div class="nav-rail" v-show="!mobilePortrait">
 <aside class="sidebar" :class="{collapsed:navCollapsed}">
   <div class="sb-b"><h1>SuperBizAgent</h1><div class="d">Multimodal Doc Assistant</div></div>
   <div class="sb-scroll">
@@ -48,6 +125,7 @@
   </button>
   </div>
   <div class="sb-foot">
+  <div class="sb-foot-label" v-show="!navCollapsed">工具 · 设置</div>
   <div class="ni-grp subscribe-grp" :class="{expanded:subscribeOpen&&!navCollapsed}">
     <button type="button" class="ni ni-parent" :class="{on:page==='subscribe',expanded:subscribeOpen}" :title="navCollapsed?'订阅':'订阅（展开子项）'" @click="onSubscribeNavClick">
       <span class="ni-ic" aria-hidden="true">
@@ -126,17 +204,47 @@
         <button v-if="isAdmin" type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='agent'}" @click="openSettingsSec('agent')"><span class="ni-txt">网关与路由</span></button>
         <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='link'}" @click="openSettingsSec('link')"><span class="ni-txt">链接分析配置</span></button>
         <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='im'}" @click="openSettingsSec('im')"><span class="ni-txt">IM 机器人</span></button>
+        <button type="button" class="ni ni-sub" :class="{on:page==='settings'&&st.sec==='ui'}" @click="openSettingsSec('ui')"><span class="ni-txt">界面</span></button>
       </div>
     </div>
   </div>
   </div>
 </aside>
-<button type="button" class="sb-toggle" :class="{collapsed:navCollapsed}" @click="toggleNav" :aria-expanded="!navCollapsed" :title="navCollapsed?'展开侧栏':'收起侧栏'">
+<button type="button" class="sb-toggle" v-show="!mobilePortrait" :class="{collapsed:navCollapsed}" @click="toggleNav" :aria-expanded="!navCollapsed" :title="navCollapsed?'展开侧栏':'收起侧栏'">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
 </button>
 </div>
-<main class="main">
-  <header class="app-topbar app-topbar--main" :class="{'is-compact':navTabCompact&&uiPrefs.navDynamicIsland,'is-expanded':navTabExpanded}" aria-label="顶栏" @mouseenter="onNavIslandEnter" @mouseleave="onNavIslandLeave">
+<div class="app-body" :class="{'app-body--mobile': mobilePortrait}">
+<header v-if="mobilePortrait" class="mobile-top-bar" aria-label="顶栏">
+  <button type="button" class="mobile-top-iconbtn" aria-label="打开菜单" @click="mobileNavOpen=true">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+  </button>
+  <button v-if="page==='chat' && c.chatPanelTab==='room'" type="button" class="mobile-top-iconbtn mobile-top-sessions-btn" :class="{on:!chatSbCollapsed}" aria-label="会话列表" @click="toggleChatSb">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+  </button>
+  <h1 class="mobile-top-title">{{ mobilePageTitle }}</h1>
+  <details v-if="authUser" class="user-dd user-dd--pill mobile-top-user">
+    <summary class="user-dd-sum">
+      <span class="user-ava user-ava-lg" :class="{'user-ava-img':!!userAvatarUrl}" :title="authDisplayName">
+        <img v-if="userAvatarUrl" :src="userAvatarUrl" alt=""/>
+        <template v-else>{{ authAvatarChar }}</template>
+      </span>
+    </summary>
+    <div class="user-dd-pop" role="menu" @click.stop>
+      <div class="user-dd-hd">
+        <div class="user-dd-t1">{{ authDisplayName }}</div>
+        <div class="user-dd-t2">@{{ authUser.username }}</div>
+      </div>
+      <button type="button" class="user-dd-li" role="menuitem" @click="pickUserAvatar">更换头像</button>
+      <input ref="userAvatarInp" type="file" accept="image/*" class="sr-only" @change="onUserAvatarFile"/>
+      <button type="button" class="user-dd-li" role="menuitem" @click="goPersonalSettings">个人信息设置</button>
+      <button type="button" class="user-dd-li user-dd-li-danger" role="menuitem" @click="doLogout">退出登录</button>
+    </div>
+  </details>
+  <a v-else class="mobile-top-login" href="/login.html">登录</a>
+</header>
+<main class="main" :class="{'main--mobile': mobilePortrait}">
+  <header v-show="!mobilePortrait" class="app-topbar app-topbar--main" :class="{'is-compact':navTabCompact&&uiPrefs.navDynamicIsland,'is-expanded':navTabExpanded}" aria-label="顶栏" @mouseenter="onNavIslandEnter" @mouseleave="onNavIslandLeave">
     <nav class="app-tab-nav" aria-label="页面导航">
       <button v-for="tab in appTabs" :key="tab.key" 
               type="button" 
@@ -185,89 +293,125 @@
   <div v-if="page!=='chat'" class="p-60">
 
   <!-- ═══ PAGE 1: 链接文档化 ═══ -->
-  <div v-show="page==='video'">
-    <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg></div>流程与链接输入</div>
-      <div class="fr link-link-row"><span class="fl">视频链接</span><input class="gi" v-model="v.link" placeholder="粘贴链接或整段分享口令（自动识别 URL）…" @keyup.enter="startProc"/></div>
-      
-      <!-- 任务备注与关键词 -->
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>任务备注与关键词</div>
-        <div class="fr" style="flex-wrap:wrap;gap:8px">
-          <label class="link-inline-check" style="align-items:center;gap:6px">重要度
-            <input class="gi" type="number" min="1" max="10" v-model.number="v.importance" style="width:52px;text-align:center" title="1-10，仅排队等待时影响执行顺序"/>
-          </label>
-          <div class="q-importance-bar q-importance-bar--inline" :title="'重要度 '+clampImportance(v.importance)+'/10'">
-            <div class="q-importance-fill" :style="{width:taskImportancePct(v.importance)}"></div>
-            <span class="q-importance-num">{{ clampImportance(v.importance) }}</span>
+  <div v-show="page==='video'" class="link-pipeline-page">
+    <div class="glass link-pipeline-card">
+      <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg></div>链接输入</div>
+
+      <div class="lp-primary">
+        <input id="lp-link-inp" class="gi lp-input" v-model="v.link" placeholder="粘贴链接或分享口令（小红书 / 抖音 / B站 / 公众号等）" title="支持整段分享口令，自动识别 URL；回车提交" @keyup.enter="startProc"/>
+        <button type="button" class="btn btn-p lp-submit" :class="{pulse:v.submitPulse}" :disabled="!v.link.trim()||v.submitting" @click="startProc"><span class="sp" v-if="v.submitting"></span>{{ v.submitting ? '提交中…' : '开始处理' }}</button>
+      </div>
+
+      <div class="lp-quick" role="group" aria-label="常用选项">
+        <label class="lp-check" title="评论单独送摘要 Agent"><input type="checkbox" v-model="v.comments.enabled"/><span>评论</span></label>
+        <template v-if="v.comments.enabled">
+          <select class="gi lp-select lp-select--xs" v-model="v.comments.count" title="评论条数">
+            <option :value="10">10条</option>
+            <option :value="20">20条</option>
+            <option :value="50">50条</option>
+            <option :value="0">全量</option>
+          </select>
+          <select class="gi lp-select lp-select--xs" v-model="v.comments.sort" title="排序方式">
+            <option value="hot">热度</option>
+            <option value="time">时间</option>
+            <option value="default">默认</option>
+          </select>
+        </template>
+        <i class="lp-quick-sep" aria-hidden="true"></i>
+        <label class="lp-check"><input type="checkbox" v-model="v.fs" @change="persistLinkPipelinePrefs"/><span>飞书</span></label>
+        <label class="lp-check"><input type="checkbox" v-model="v.html" @change="persistLinkPipelinePrefs"/><span>HTML</span></label>
+        <i class="lp-quick-sep" aria-hidden="true"></i>
+        <select class="gi lp-select lp-select--mode" v-model="v.videoTranscriptMode" title="视频转写：课件/PPT 建议「画面 OCR」，口播用「仅音频」">
+          <option value="audio_only">仅音频</option>
+          <option value="visual_frames">画面 OCR</option>
+          <option value="hybrid">音频+画面</option>
+        </select>
+        <button type="button" class="btn btn-o btn-xs lp-adv-toggle" :class="{on:v.lpAdv}" :aria-expanded="v.lpAdv" @click="v.lpAdv=!v.lpAdv">{{ v.lpAdv ? '收起' : '高级' }}</button>
+        <button type="button" class="btn btn-o btn-xs" @click="openSettingsSec('link')">配置</button>
+      </div>
+
+      <div class="lp-adv" v-show="v.lpAdv">
+        <div class="lp-grid lp-grid-3">
+          <div class="lp-field">
+            <label class="lp-label" for="lp-importance">重要度</label>
+            <div class="lp-importance" title="仅排队中生效，数值越大越优先">
+              <input id="lp-importance" class="lp-importance-num-inp" type="number" min="1" max="10" v-model.number="v.importance"/>
+              <div class="lp-importance-track"><i :style="{width:taskImportancePct(v.importance),background:taskImportanceColor(v.importance)}"></i></div>
+              <span class="lp-importance-badge">{{ clampImportance(v.importance) }}/10</span>
+            </div>
+          </div>
+          <div class="lp-field" :class="linkMetaSchema.enabled?'lp-field--span2':''">
+            <label class="lp-label" :for="linkMetaSchema.enabled?'lp-meta-hints':'lp-keywords'">{{ linkMetaSchema.enabled ? '额外 JSON 提示' : '关键词' }}</label>
+            <textarea v-if="linkMetaSchema.enabled" id="lp-meta-hints" class="gta lp-textarea lp-textarea--sm" rows="3" v-model="v.taskMetaHintsJson" placeholder='{"keyword1":"Agent, RAG","domain":"AI","author_name":""}' spellcheck="false"></textarea>
+            <input v-else id="lp-keywords" class="gi lp-input" v-model="v.taskKeywords" placeholder="逗号或空格分隔"/>
+            <p v-if="linkMetaSchema.enabled" class="lp-hint">键名须与「链接分析配置 → 结构化元数据」中字段 key 一致；提交后参与 AI 提取并写入文档 JSON。</p>
+          </div>
+          <div class="lp-field">
+            <label class="lp-label" for="lp-note">备注</label>
+            <input id="lp-note" class="gi lp-input" v-model="v.taskNote" placeholder="可选"/>
           </div>
         </div>
-        <div class="fr"><span class="fl">备注</span><input class="gi" v-model="v.taskNote" placeholder="可选，便于区分同批任务"/></div>
-        <div class="fr"><span class="fl">关键词</span><input class="gi" v-model="v.taskKeywords" placeholder="逗号或空格分隔，参与元数据提取"/></div>
-        <p style="font-size:10px;color:var(--t3);margin-top:6px">重要度仅对<strong>排队中</strong>任务生效：数值越大越先执行；同级按提交先后。开始执行后不再参与排序。</p>
+        <div class="lp-field lp-field--full lp-adv-prompt">
+          <div class="lp-label-row">
+            <label class="lp-label" for="lp-prompt">User Prompt</label>
+            <button type="button" class="btn btn-o btn-xs" @click="v.sp=!v.sp">{{ v.sp ? '单行' : '展开' }}</button>
+          </div>
+          <textarea id="lp-prompt" v-if="v.sp" class="gta lp-textarea" rows="2" v-model="v.pr" placeholder="自定义提示词（可选）"></textarea>
+          <input v-else id="lp-prompt" class="gi lp-input" v-model="v.pr" placeholder="自定义提示词（可选，点展开编辑）"/>
+        </div>
+        <div v-if="v.fs" class="lp-field lp-field--full">
+          <label class="lp-label" for="lp-feishu-path">飞书路径</label>
+          <input id="lp-feishu-path" class="gi lp-input" v-model="v.fp" placeholder="留空用 config 默认" @blur="persistLinkPipelinePrefs"/>
+        </div>
       </div>
 
-      <!-- User Prompt -->
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></div>User Prompt<span style="font-size:10px;color:var(--t3);font-weight:400;margin-left:8px">最多 10000 字符，将同时发送给摘要和原文 Agent</span><button class="btn btn-o btn-xs" style="margin-left:auto" @click="v.sp=!v.sp">{{v.sp?'收起':'展开编辑'}}</button></div>
-        <textarea class="gta" rows="3" v-model="v.pr" v-if="v.sp" placeholder="自定义提示词（可选）：对内容的特殊要求、关注重点、输出格式等..."></textarea>
-        <input class="gi" v-model="v.pr" v-else placeholder="点击展开编辑大文本框"/>
-      </div>
-      
-      <!-- 评论读取设置 -->
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>评论读取设置</div>
-        <div class="fr" style="flex-wrap:wrap;gap:12px">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="checkbox" v-model="v.comments.enabled" style="width:16px;height:16px"/>
-            <span>读取评论</span>
-          </label>
-          <template v-if="v.comments.enabled">
-            <select v-model="v.comments.count" style="padding:6px 10px;border-radius:var(--r2);border:1px solid var(--border);background:var(--bg2);font-size:12px">
-              <option :value="10">10 条</option>
-              <option :value="20">20 条</option>
-              <option :value="50">50 条</option>
-              <option :value="0">全量</option>
-            </select>
-            <select v-model="v.comments.sort" style="padding:6px 10px;border-radius:var(--r2);border:1px solid var(--border);background:var(--bg2);font-size:12px">
-              <option value="hot">按热度排序</option>
-              <option value="time">按时间排序</option>
-              <option value="default">默认排序</option>
-            </select>
-          </template>
-        </div>
-        <p style="font-size:10px;color:var(--t3);margin-top:6px">评论将单独发送给摘要 Agent 分析，原文 Agent 不接收评论内容。评论文件将保存为独立文件并在 MD 中引用。</p>
-      </div>
-
-      <!-- 飞书写入 -->
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="st" style="margin-bottom:8px">
-          <div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></div>
-          飞书写入
-          <button type="button" class="btn btn-o btn-xs" style="margin-left:auto" @click="openSettingsSec('link');st.lk='fei'">更多设置</button>
-        </div>
-        <div class="fr link-feishu-row" style="flex-wrap:wrap;gap:12px">
-          <label class="link-inline-check"><input type="checkbox" v-model="v.fs" @change="persistLinkPipelinePrefs"/> 处理完成后同步到飞书</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="v.html" @change="persistLinkPipelinePrefs"/> 自动生成 HTML 长页</label>
-        </div>
-        <div class="fr"><span class="fl">飞书路径</span><input class="gi" v-model="v.fp" placeholder="可选，知识库/文件夹路径" @blur="persistLinkPipelinePrefs"/></div>
-        <p style="font-size:10px;color:var(--t3);margin-top:6px">MD 生成完成后飞书在后台上传，不阻塞任务完成；路径留空则使用 config 默认目录。</p>
-      </div>
-      
-      <div class="btns">
-        <button type="button" class="btn btn-p" :class="{pulse:v.submitPulse}" :disabled="!v.link.trim()||v.submitting" @click="startProc"><span class="sp" v-if="v.submitting"></span>{{ v.submitting ? '提交中…' : '开始处理' }}</button>
+      <div class="lp-footer">
         <button type="button" class="btn btn-o btn-xs" @click="alert('批量导入: 选择 Excel/CSV 文件, 每行一个链接')">批量导入</button>
         <button type="button" class="btn btn-o btn-xs" @click="openHistPanel()">历史查询</button>
         <button type="button" class="btn btn-d btn-xs" @click="clrV">清空</button>
-        <button type="button" class="btn btn-o btn-xs" style="margin-left:auto" @click="openOut">打开输出文件夹</button>
-        <button type="button" class="btn btn-o btn-xs" @click="configureOutputFolder">配置输出文件夹</button>
+        <div class="lp-footer-r">
+          <button type="button" class="btn btn-o btn-xs" @click="openOut">打开输出文件夹</button>
+          <button type="button" class="btn btn-o btn-xs" @click="configureOutputFolder">配置输出目录</button>
+        </div>
       </div>
       <input ref="outDirInp" type="file" style="display:none" webkitdirectory directory multiple @change="onOutDirNative"/>
     </div>
     <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>队列中的任务</div>
       <div class="task-queue-filter">
         <div class="task-queue-filter-row">
-          <input class="gi" v-model="taskQueueFilter.query" placeholder="标题检索：智能体 / 面试 / Java …（近义词）" @input="onTaskQueueFilterQueryInput" @keydown.enter.prevent="onTaskQueueFilterQueryInput"/>
-          <input class="gi" v-model="taskQueueFilter.author" placeholder="作者筛选" style="max-width:140px"/>
+          <div class="task-queue-search-inp-wrap task-queue-search-box">
+            <input class="gi task-queue-search-inp" :class="{ 'task-queue-search-inp--ai-loading': taskQueueFilter.useAiSearch && taskQueueFilter.aiSearchLoading }" v-model="taskQueueFilter.query" :placeholder="taskQueueFilter.useAiSearch?'AI 检索：备注含待看 未读 / 正文提到智能体 / 标题 Java …':'快速检索：智能体 / 面试 / Java …（近义词）'" @input="onTaskQueueFilterQueryInput" @keydown.enter.prevent="onTaskQueueSearchEnter" @focus="onTaskQueueSearchFocus" @blur="onTaskQueueSearchBlur"/>
+            <span v-if="taskQueueFilter.useAiSearch&&taskQueueFilter.aiSearchLoading" class="task-queue-ai-spin" title="AI 解析中"></span>
+            <label class="link-inline-check task-queue-ai-search-toggle" :class="{ on: taskQueueFilter.useAiSearch }" title="启用 SearchBox SDK：规则近义词 + LLM 语义扩展">
+              <input type="checkbox" v-model="taskQueueFilter.useAiSearch" @change="onTaskQueueAiSearchToggle"/> AI检索
+            </label>
+            <div v-if="taskQueueSearchDropdownOpen" class="task-queue-search-dropdown" @mousedown.prevent>
+              <div v-if="taskQueueSearchTags.length" class="task-queue-search-dd-sec">
+                <div class="task-queue-search-dd-head">我的标签</div>
+                <div class="task-queue-search-tag-list">
+                  <button v-for="tag in taskQueueSearchTags" :key="'tag-'+tag.id" type="button" class="task-queue-search-tag-chip" @click="applyTaskQueueSearchTag(tag)">
+                    <span>{{ tag.label }}</span>
+                    <span v-if="tag.useAiSearch" class="task-queue-ai-badge">AI</span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="taskQueueRecentSearches.length" class="task-queue-search-dd-sec">
+                <div class="task-queue-search-dd-head">最近搜索</div>
+                <div v-for="(item,idx) in taskQueueRecentSearches" :key="'recent-'+idx+'-'+item.query" class="task-queue-search-recent-row">
+                  <button type="button" class="task-queue-search-recent-main" @click="applyTaskQueueRecentSearch(item)">
+                    <span class="task-queue-search-recent-text">{{ item.query }}</span>
+                    <span v-if="item.useAiSearch" class="task-queue-ai-badge">AI</span>
+                  </button>
+                  <button v-if="!taskQueueSearchTagExists(item.query)" type="button" class="btn btn-o btn-xs task-queue-search-promote-btn" title="保存为标签，下次一键复用" @click="promoteTaskQueueSearchToTag(item)">标签化</button>
+                  <span v-else class="task-queue-search-promoted-hint">已标签</span>
+                </div>
+              </div>
+              <div v-if="!taskQueueRecentSearches.length&&!taskQueueSearchTags.length" class="task-queue-search-dd-empty">暂无最近搜索，输入关键词后回车即可记录</div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-o btn-xs task-queue-advanced-btn" :class="{on:taskQueueFilter.advancedOpen||taskQueueAdvancedActive()}" @click="toggleTaskQueueAdvanced">
+            高级<span v-if="taskQueueAdvancedActive()" class="task-queue-advanced-badge">{{ taskQueueAdvancedActiveCount() }}</span>
+          </button>
           <select class="gi" v-model="taskQueueFilter.sort" style="max-width:130px">
             <option value="default">默认顺序（导入/执行）</option>
             <option value="updated">更新时间</option>
@@ -277,28 +421,72 @@
           <button type="button" class="btn btn-o btn-xs task-queue-read-filter-btn" :class="{on:taskQueueFilter.enableRead&&taskQueueFilter.readStatus==='read'}" @click="toggleTaskQueueReadFilter('read')">仅已读</button>
           <button type="button" class="btn btn-o btn-xs" @click="resetTaskQueueFilter">重置</button>
         </div>
-        <div class="task-queue-filter-row task-queue-filter-checks">
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableTitle"/> 标题</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableAuthor"/> 作者</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.enableSource"/> 导入渠道</label>
+        <div v-if="taskQueueFilter.advancedOpen" class="task-queue-advanced-panel">
+          <div class="task-queue-advanced-head">
+            <span class="task-queue-suggest-label">联合方式</span>
+            <label class="link-inline-check"><input type="radio" value="and" v-model="taskQueueFilter.advancedLogic"/> 全部满足（AND）</label>
+            <label class="link-inline-check"><input type="radio" value="or" v-model="taskQueueFilter.advancedLogic"/> 任一满足（OR）</label>
+            <span class="task-queue-advanced-hint">类似 SQL 的 AND / OR，下方每行是一条字段条件</span>
+          </div>
+          <div class="task-queue-advanced-conds">
+            <div v-for="(cond,ci) in taskQueueFilter.conditions" :key="cond.id" class="task-queue-advanced-cond-row">
+              <span v-if="ci>0" class="task-queue-advanced-join">{{ taskQueueFilter.advancedLogic==='or' ? '或' : '且' }}</span>
+              <select class="gi gi-xs" v-model="cond.field" @change="onTaskQueueCondFieldChange(cond)">
+                <option v-for="f in TASK_QUEUE_COND_FIELDS" :key="f.id" :value="f.id">{{ f.label }}</option>
+              </select>
+              <select class="gi gi-xs" v-model="cond.mode">
+                <option v-for="m in taskQueueCondModes(cond.field)" :key="m.id" :value="m.id">{{ m.label }}</option>
+              </select>
+              <template v-if="cond.field==='read'">
+                <select class="gi gi-xs" v-model="cond.value">
+                  <option value="unread">未读</option>
+                  <option value="read">已读</option>
+                </select>
+              </template>
+              <template v-else-if="cond.field==='source'">
+                <select class="gi gi-xs" v-model="cond.value">
+                  <option v-for="s in TASK_QUEUE_SOURCE_OPTIONS" :key="s.id" :value="s.id">{{ s.label }}</option>
+                </select>
+              </template>
+              <input v-else class="gi gi-xs task-queue-advanced-val" v-model="cond.value" :placeholder="taskQueueCondValuePlaceholder(cond.field)"/>
+              <button type="button" class="btn btn-o btn-xs" title="删除条件" @click="removeTaskQueueCondition(cond.id)">×</button>
+            </div>
+            <button type="button" class="btn btn-o btn-xs" @click="addTaskQueueCondition()">+ 添加条件</button>
+          </div>
+          <div class="task-queue-advanced-sec">
+            <span class="task-queue-suggest-label">导入渠道（多选，与上方条件联合）</span>
+            <div class="task-queue-filter-row task-queue-filter-checks">
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.manual"/> 手动导入</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_creator"/> 订阅博主</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_favorites"/> 订阅收藏夹</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.link_scan"/> 链接扫描</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.chat"/> 对话导入</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.catalog_seed"/> 目录摘录</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.rss"/> RSS 订阅</label>
+              <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.other"/> 其他</label>
+            </div>
+          </div>
+          <div v-if="taskQueueAuthorFacets.length" class="task-queue-advanced-sec task-queue-author-picks">
+            <span class="task-queue-suggest-label">作者筛选（勾选后仅显示对应作者）</span>
+            <label class="link-inline-check task-queue-author-expand-all">
+              <input type="checkbox" v-model="taskQueueFilter.authorExpandAll"/> 全部展开
+            </label>
+            <label v-for="a in displayedTaskQueueAuthorFacets" :key="'auth-'+a.author_name" class="link-inline-check">
+              <input type="checkbox" :checked="!!taskQueueFilter.authorPicks[a.author_name]" @change="toggleTaskQueueAuthorPick(a.author_name,$event)"/>
+              {{a.author_name}} ({{a.count}})
+            </label>
+            <span v-if="taskQueueAuthorFacetsHiddenCount()" class="task-queue-author-more-hint">还有 {{ taskQueueAuthorFacetsHiddenCount() }} 位作者</span>
+          </div>
         </div>
-        <div v-if="taskQueueFilter.enableSource" class="task-queue-filter-row task-queue-filter-checks">
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.manual"/> 手动导入</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_creator"/> 订阅博主</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.subscription_favorites"/> 订阅收藏夹</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.link_scan"/> 链接扫描</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.chat"/> 对话导入</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.catalog_seed"/> 目录摘录</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.rss"/> RSS 订阅</label>
-          <label class="link-inline-check"><input type="checkbox" v-model="taskQueueFilter.sources.other"/> 其他</label>
+        <div v-if="taskQueueAiSearchStatusVisible()" class="task-queue-ai-status" :class="taskQueueAiSearchStatusClass()">
+          <span v-if="taskQueueFilter.aiSearchLoading" class="task-queue-ai-spin task-queue-ai-spin--inline"></span>
+          <span class="task-queue-ai-status-text">{{ taskQueueFilter.aiSearchMessage || (taskQueueFilter.aiSearchLoading ? 'AI 解析中…' : 'AI 检索已启用，请输入关键词') }}</span>
+          <span v-if="taskQueueFilter.useAiSearch&&taskQueueFilter.aiSearchPowered&&!taskQueueFilter.aiSearchLoading" class="task-queue-ai-badge">LLM</span>
         </div>
         <div v-if="taskQueueFilter.expandedTerms&&taskQueueFilter.expandedTerms.length" class="task-queue-suggest">
-          <span class="task-queue-suggest-label">推荐检索词：</span>
-          <button v-for="term in taskQueueFilter.expandedTerms" :key="'tq-'+term" type="button" class="btn btn-o btn-xs task-queue-suggest-chip" @click="taskQueueFilter.query=term;onTaskQueueFilterQueryInput()">{{term}}</button>
-        </div>
-        <div v-if="taskQueueAuthorFacets.length" class="task-queue-author-facets">
-          <span class="task-queue-suggest-label">作者归类：</span>
-          <button v-for="a in taskQueueAuthorFacets.slice(0,12)" :key="'auth-'+a.author_name" type="button" class="btn btn-o btn-xs task-queue-suggest-chip" :class="{on:taskQueueFilter.author===a.author_name}" @click="pickTaskQueueAuthor(a.author_name)">{{a.author_name}} ({{a.count}})</button>
+          <span class="task-queue-suggest-label">{{ taskQueueFilter.useAiSearch ? 'AI推荐检索词' : '推荐检索词' }}：</span>
+          <span v-if="taskQueueFilter.useAiSearch&&taskQueueFilter.aiSearchPowered" class="task-queue-ai-badge">LLM</span>
+          <button v-for="term in taskQueueFilter.expandedTerms" :key="'tq-'+term" type="button" class="btn btn-o btn-xs task-queue-suggest-chip" :class="{on:taskQueueFilter.query===term,'task-queue-suggest-chip--ai':taskQueueFilter.useAiSearch&&taskQueueFilter.aiExpandedTerms.includes(term)}" @click="taskQueueFilter.query=term;onTaskQueueFilterQueryInput()">{{term}}</button>
         </div>
         <p v-if="taskQueueFilterActive()||taskQueue.length" class="task-queue-filter-meta">显示 {{ displayedTaskQueue.length }} / {{ filteredTaskQueue.length }} 条{{ filteredTaskQueue.length!==taskQueue.length ? '（总 '+taskQueue.length+'）' : '' }}</p>
       </div>
@@ -334,21 +522,36 @@
             <input type="checkbox" :checked="isQueueBatchSelected(t.task_id)" @change="toggleQueueBatchSel(t.task_id,$event)"/>
           </label>
           <button v-if="!queueBatchMode" type="button" class="q-card-close" title="移除此卡片" aria-label="移除此卡片" @click.stop="deleteQueueTask(t.task_id)">×</button>
-          <div class="qt">
-            <span class="q-title-main">{{ taskCardHeadTitle(t) }}</span>
-            <span v-if="t.platform" class="q-platform">· {{ t.platform }}</span>
+          <div class="qt q-title-row">
+            <span class="q-head-prefix" :title="'执行优先级 '+clampImportance(t.importance)+'/10'">
+              <span v-if="taskCardPlatform(t)" class="q-head-platform">{{ taskCardPlatform(t) }}</span>
+              <span v-if="taskCardPlatform(t)" class="q-head-sep">·</span>
+              <span class="q-head-imp" :style="{color:taskImportanceColor(t.importance)}">{{ clampImportance(t.importance) }}</span>
+            </span>
+            <span class="q-title-main">{{ taskCardPureTitle(t) }}</span>
+            <input v-if="t.status==='pending'" class="q-importance-input q-importance-input--inline" type="number" min="1" max="10" :value="clampImportance(t.importance)" @click.stop @change="updateQueueImportance(t,$event)" title="1-10，仅 pending 可改"/>
           </div>
-          <div v-if="taskSourceLabel(t)||taskAuthorName(t)" class="q-subtitle q-source-line" :title="(taskSourceLabel(t)||'')+(taskAuthorName(t)?(' · 作者：'+taskAuthorName(t)):'')">
-            <span v-if="taskSourceLabel(t)">来源：{{ taskSourceLabel(t) }}</span>
-            <span v-if="taskAuthorName(t)"> · 作者：{{ taskAuthorName(t) }}</span>
+          <div v-if="linkMetaCardDisplayEnabled && taskCardMetaRows(t).length" class="q-meta-json-block">
+            <div v-for="row in taskCardMetaRows(t)" :key="t.task_id+'-meta-'+row.key" class="q-meta-json-row" :class="{'q-meta-json-row--kw': row.key.startsWith('keyword')}">
+              <span class="q-meta-json-label">{{ row.label }}:</span>
+              <a v-if="row.isAuthor && row.profileUrl" :href="row.profileUrl" target="_blank" rel="noopener noreferrer" class="q-meta-json-val q-source-author-link" @click.stop>{{ row.display }}</a>
+              <span v-else class="q-meta-json-val" :title="row.display">{{ row.display }}</span>
+            </div>
+          </div>
+          <div v-else-if="taskCardExtractedKeywordsLine(t)" class="q-extracted-kw q-kw-line2" :title="taskCardExtractedKeywordsLine(t)">{{ taskCardExtractedKeywordsLine(t) }}</div>
+          <div v-if="taskActionLabel(t)" class="q-subtitle q-action-line">产生动作：{{ taskActionLabel(t) }}</div>
+          <div v-if="!linkMetaCardDisplayEnabled && taskAuthorName(t)" class="q-subtitle q-author-line">
+            作者:
+            <a v-if="taskAuthorProfileUrl(t)" :href="taskAuthorProfileUrl(t)" target="_blank" rel="noopener noreferrer" class="q-source-author-link" @click.stop>{{ taskAuthorName(t) }}</a>
+            <span v-else>{{ taskAuthorName(t) }}</span>
           </div>
           <div class="q-meta-row">
+            <span v-if="taskCardStatusInline(t)" class="q-status-inline" :style="{color:taskCardStatusColor(t)}">{{ taskCardStatusInline(t) }}</span>
             <span v-if="t.updated_at" class="q-updated" :title="t.updated_at">更新 {{ taskQueueFmtTime(t.updated_at) }}</span>
-            <button v-if="taskShowReadBadge(t)" type="button" class="q-read-badge" :class="taskIsUnread(t)?'q-read-unread':'q-read-done'" :disabled="!taskIsUnread(t)" :title="taskIsUnread(t)?'点击标记为已读':'已读'" @click.stop.prevent="markQueueTaskRead(t)">{{ taskReadLabel(t) }}</button>
+            <button v-if="taskShowReadBadge(t)" type="button" class="q-read-badge" :class="taskIsUnread(t)?'q-read-unread':'q-read-done'" :title="taskIsUnread(t)?'左键标记已读 · 右键查看已读记录':'左键累计已读 · 右键查看已读记录'" @click.stop.prevent="onQueueReadBadgeClick(t)" @contextmenu.prevent="onQueueReadBadgeContext(t,$event)">{{ taskReadLabel(t) }}</button>
           </div>
-          <div class="qs">
+          <div v-if="t.status==='failed'" class="qs">
             <span
-              v-if="t.status==='failed'"
               class="q-status-jump"
               :style="{color:taskCardStatusColor(t)}"
               role="link"
@@ -357,28 +560,34 @@
               @click.stop="jumpToTaskErrorLog(t.task_id)"
               @keydown.enter.stop.prevent="jumpToTaskErrorLog(t.task_id)"
             >{{ taskCardStatusText(t) }}</span>
-            <span v-else :style="{color:taskCardStatusColor(t)}">{{ taskCardStatusText(t) }}</span>
+            <button
+              v-if="taskOpsReportId(t)"
+              type="button"
+              class="q-ops-report-link"
+              title="查看运维 Agent 失败分析报告"
+              @click.stop="openTaskOpsReport(t)"
+            >失败分析</button>
+          </div>
+          <div v-else-if="taskCardStatusExtra(t)" class="qs">
+            <span :style="{color:taskCardStatusColor(t)}">{{ taskCardStatusExtra(t) }}</span>
           </div>
           <div v-if="taskCardMetricsLine(t)" class="q-metrics">{{ taskCardMetricsLine(t) }}</div>
           <div v-if="taskFeishuHint(t)" class="q-feishu-hint">{{ taskFeishuHint(t) }}</div>
-          <div v-if="taskCardExtractedKeywordsLine(t)" class="q-extracted-kw" :title="taskCardExtractedKeywordsLine(t)">{{ taskCardExtractedKeywordsLine(t) }}</div>
-          <div class="q-importance-row" @click.stop>
-            <span class="q-importance-label">重要度</span>
-            <span class="q-importance-badge" :style="{color:taskImportanceColor(t.importance),borderColor:taskImportanceColor(t.importance),background:taskImportanceBg(t.importance)}" :title="'执行优先级 '+clampImportance(t.importance)+'/10'+(t.status!=='pending'?'（已开始，仅展示）':'')">{{ clampImportance(t.importance) }}</span>
-            <input v-if="t.status==='pending'" class="q-importance-input" type="number" min="1" max="10" :value="clampImportance(t.importance)" @change="updateQueueImportance(t,$event)" title="1-10，仅 pending 可改"/>
-          </div>
           <div v-if="queueTaskHasNote(t) || isQueueTaskNoteOpen(t)" class="q-note-panel" @click.stop>
             <div v-if="queueTaskHasNote(t) && !isQueueTaskNoteOpen(t)" class="q-note-display" :title="getQueueNoteDraft(t)"><span class="q-note-display-label">备注</span>{{ getQueueNoteDraft(t) }}</div>
             <template v-else>
               <textarea class="q-note-inp" :value="getQueueNoteDraft(t)" placeholder="填写备注…" rows="3" @input="setQueueNoteDraft(t,$event.target.value)"></textarea>
-              <div class="q-note-actions"><button type="button" class="btn btn-p btn-xs" @click.stop="saveQueueTaskMeta(t,'note',$event);closeQueueTaskNoteEdit(t)">保存备注</button></div>
+              <div class="q-note-actions">
+                <button type="button" class="btn btn-o btn-xs" @click.stop="cancelQueueTaskNoteEdit(t)">取消</button>
+                <button type="button" class="btn btn-p btn-xs" @click.stop="saveQueueTaskMeta(t,'note',$event);closeQueueTaskNoteEdit(t)">保存</button>
+              </div>
             </template>
           </div>
           <div v-if="taskShowProgress(t)" class="qp"><i :style="{width:(t.progress||0)+'%'}"></i></div>
           <a v-if="taskCardLinkUrl(t)" :href="taskCardLinkUrl(t)" target="_blank" rel="noopener noreferrer" class="q-link" :title="taskCardLinkUrl(t)" @click.stop>{{ shortLink(taskCardLinkUrl(t), 64) }}</a>
           <div class="q-artifacts" @click.stop>
-            <button type="button" class="btn btn-xs btn-artifact" :class="taskHasMd(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHasMd(t)" title="浏览器预览 Markdown（淡黄色主题渲染）" @click.stop="openTaskMd(t)">MD</button>
-            <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :title="taskHtmlClickTitle(t)" @click.stop="onTaskHtmlClick(t)">HTML</button>
+            <button type="button" class="btn btn-xs btn-artifact" :class="taskHasMd(t)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!taskHasMd(t)" :title="uiPrefs.openArtifactInNewTab?'新标签页打开 MD 编辑/预览':'当前页打开 MD（左上角可返回）'" @click.stop="openTaskMd(t)">MD</button>
+            <button type="button" class="btn btn-xs btn-artifact" :class="taskHtmlReady(t)?'btn-artifact-ready':'btn-artifact-off'" :title="taskHtmlClickTitle(t)+(uiPrefs.openArtifactInNewTab?' · 新标签页打开':' · 当前页打开')" @click.stop="onTaskHtmlClick(t)">HTML</button>
             <button type="button" class="btn btn-xs btn-o" :disabled="!taskHasMd(t)&&!taskHasHtml(t)" title="资源管理器中显示 MD/HTML 位置" @click.stop="openTaskArtifactsLocation(t)">位置</button>
             <button type="button" class="btn btn-xs btn-artifact" :class="queueTaskNoteBtnClass(t)" :title="queueTaskNoteBtnTitle(t)" @click.stop="toggleQueueTaskNote(t)">备注</button>
           </div>
@@ -845,10 +1054,10 @@
             <option value="90d">近 90 天</option>
           </select>
           <select class="gi orch-board-filter" v-model="orchBoardSort" title="排序方式">
+            <option value="heat_desc">排序 · 使用热度（默认）</option>
             <option value="default">排序 · 默认分类</option>
             <option value="join_desc">加入时间 · 最新</option>
             <option value="join_asc">加入时间 · 最早</option>
-            <option value="heat_desc">使用热度 · 高→低</option>
             <option value="heat_asc">使用热度 · 低→高</option>
           </select>
           <span class="orch-board-stat">显示 {{ orchBoardFilteredItems.length }} / {{ orchBoardTotalCount }}</span>
@@ -1062,7 +1271,7 @@
           <button type="button" class="btn btn-p btn-xs" @click="openSkillImport">导入 SKILL…</button>
         </div>
         <div class="orch-dk-grid orch-dk-grid-compact">
-          <article v-for="s in skills" :key="s.id" class="orch-dk-card orch-dk-card-skill" :class="{sel:orchRail.key===('skill:'+s.id),off:!isOrchOn('skill',s.id)}" @click="selectOrchSkill(s)">
+          <article v-for="s in skillsSorted" :key="s.id" class="orch-dk-card orch-dk-card-skill" :class="{sel:orchRail.key===('skill:'+s.id),off:!isOrchOn('skill',s.id)}" @click="selectOrchSkill(s)">
             <div class="orch-dk-ico orch-dk-ico-skill" aria-hidden="true">{{ (s.name||'?').slice(0,1) }}</div>
             <div class="orch-dk-body orch-dk-body-col">
               <div class="orch-dk-card-main">
@@ -1231,6 +1440,59 @@
                 <section class="orch-rail-field"><h4 class="orch-rail-field-hd">输出</h4><pre class="orch-rail-pre">{{ orchRail.outText }}</pre></section>
               </div>
               
+              <!-- 智能分析 -->
+              <div v-show="orchRail.tab==='intel'" class="orch-rail-pane orch-rail-pane-read">
+                <p v-if="orchRail.intelligence.status==='pending'" class="orch-hint">智能分析生成中…</p>
+                <p v-else-if="orchRail.intelligence.status==='error'" class="orch-hint err">{{ orchRail.intelligence.error || '生成失败' }}
+                  <span class="orch-flow-empty-act"><button type="button" class="btn btn-p btn-xs" @click="refreshSkillIntelligence(orchRail.skillId)">重新生成</button></span>
+                </p>
+                <div v-else-if="orchRail.intelligence.analysis" class="orch-intel-board">
+                  <section class="orch-intel-sec"><h4 class="orch-intel-hd">侧重</h4><p>{{ orchRail.intelligence.analysis.focus }}</p></section>
+                  <section class="orch-intel-sec"><h4 class="orch-intel-hd">意义</h4><p>{{ orchRail.intelligence.analysis.meaning }}</p></section>
+                  <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.primary_scenarios||[]).length">
+                    <h4 class="orch-intel-hd">主要场景</h4>
+                    <div v-for="(sc,si) in orchRail.intelligence.analysis.primary_scenarios" :key="'ps'+si" class="orch-intel-card"><strong>{{ sc.title }}</strong><p>{{ sc.detail }}</p></div>
+                  </section>
+                  <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.other_scenarios||[]).length">
+                    <h4 class="orch-intel-hd">其他场景</h4>
+                    <div v-for="(sc,si) in orchRail.intelligence.analysis.other_scenarios" :key="'os'+si" class="orch-intel-card"><strong>{{ sc.title }}</strong><p>{{ sc.detail }}</p></div>
+                  </section>
+                  <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.how_others_use||[]).length">
+                    <h4 class="orch-intel-hd">他人怎么用</h4>
+                    <ul class="orch-intel-list"><li v-for="(h,hi) in orchRail.intelligence.analysis.how_others_use" :key="'hu'+hi">{{ h }}</li></ul>
+                  </section>
+                  <section class="orch-intel-sec" v-if="orchRail.intelligence.analysis.example && (orchRail.intelligence.analysis.example.user_says || orchRail.intelligence.analysis.example.agent_does)">
+                    <h4 class="orch-intel-hd">简单示例</h4>
+                    <p v-if="orchRail.intelligence.analysis.example.user_says"><em>用户：</em>{{ orchRail.intelligence.analysis.example.user_says }}</p>
+                    <p v-if="orchRail.intelligence.analysis.example.agent_does"><em>Agent：</em>{{ orchRail.intelligence.analysis.example.agent_does }}</p>
+                  </section>
+                  <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.triggers||[]).length">
+                    <h4 class="orch-intel-hd">触发关键词</h4>
+                    <div class="orch-intel-tags"><span v-for="(t,ti) in orchRail.intelligence.analysis.triggers" :key="'tr'+ti" class="orch-tag">{{ t }}</span></div>
+                  </section>
+                  <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.cautions||[]).length">
+                    <h4 class="orch-intel-hd">注意事项</h4>
+                    <ul class="orch-intel-list"><li v-for="(c,ci) in orchRail.intelligence.analysis.cautions" :key="'ca'+ci">{{ c }}</li></ul>
+                  </section>
+                  <div class="orch-flow-empty-act"><button type="button" class="btn btn-o btn-xs" @click="refreshSkillIntelligence(orchRail.skillId)">重新生成</button></div>
+                </div>
+                <div v-else class="orch-hint">
+                  <p>尚未生成智能分析。</p>
+                  <div class="orch-flow-empty-act"><button type="button" class="btn btn-p btn-xs" @click="refreshSkillIntelligence(orchRail.skillId)">生成智能分析</button></div>
+                </div>
+              </div>
+
+              <!-- 使用归档 -->
+              <div v-show="orchRail.tab==='archives'" class="orch-rail-pane orch-rail-pane-read">
+                <div v-if="(orchRail.usageArchives||[]).length" class="orch-intel-arch-list">
+                  <article v-for="ar in orchRail.usageArchives" :key="ar.archive_id" class="orch-intel-card">
+                    <div class="orch-intel-arch-meta">{{ ar.archived_at }} · 满意度 {{ ar.satisfaction || '—' }} / 采纳 {{ ar.adoption || '—' }}</div>
+                    <p>{{ ar.task_scene || '—' }}</p>
+                  </article>
+                </div>
+                <p v-else class="orch-hint">暂无使用归档（SKILL 被调用且静默约 90 秒后会自动生成）</p>
+              </div>
+
               <!-- 正文 -->
               <div v-show="orchRail.tab==='body'" class="orch-rail-pane orch-rail-pane-read orch-rail-pane-body">
                 <article class="orch-md-body orch-rail-body-md orch-skill-doc" v-html="orchRail.skillBodyHtml"></article>
@@ -1370,6 +1632,41 @@
                       <p v-if="!orchRail.skillDescZh && !orchRail.skillDescEn">{{ orchRail.docText }}</p>
                     </div>
                   </section>
+                  <section id="orch-dsec-intel" class="orch-stage-sec glass-inset orch-stage-sec-read">
+                    <h3 class="orch-stage-sec-title">智能分析</h3>
+                    <p v-if="orchRail.intelligence.status==='pending'" class="orch-hint">智能分析生成中…</p>
+                    <p v-else-if="orchRail.intelligence.status==='error'" class="orch-hint err">{{ orchRail.intelligence.error || '生成失败' }}</p>
+                    <div v-else-if="orchRail.intelligence.analysis" class="orch-intel-board orch-intel-board--stage">
+                      <section class="orch-intel-sec"><h4 class="orch-intel-hd">侧重</h4><p>{{ orchRail.intelligence.analysis.focus }}</p></section>
+                      <section class="orch-intel-sec"><h4 class="orch-intel-hd">意义</h4><p>{{ orchRail.intelligence.analysis.meaning }}</p></section>
+                      <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.primary_scenarios||[]).length">
+                        <h4 class="orch-intel-hd">主要场景</h4>
+                        <div v-for="(sc,si) in orchRail.intelligence.analysis.primary_scenarios" :key="'stg-ps'+si" class="orch-intel-card"><strong>{{ sc.title }}</strong><p>{{ sc.detail }}</p></div>
+                      </section>
+                      <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.other_scenarios||[]).length">
+                        <h4 class="orch-intel-hd">其他场景</h4>
+                        <div v-for="(sc,si) in orchRail.intelligence.analysis.other_scenarios" :key="'stg-os'+si" class="orch-intel-card"><strong>{{ sc.title }}</strong><p>{{ sc.detail }}</p></div>
+                      </section>
+                      <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.how_others_use||[]).length">
+                        <h4 class="orch-intel-hd">他人怎么用</h4>
+                        <ul class="orch-intel-list"><li v-for="(h,hi) in orchRail.intelligence.analysis.how_others_use" :key="'stg-hu'+hi">{{ h }}</li></ul>
+                      </section>
+                      <section class="orch-intel-sec" v-if="orchRail.intelligence.analysis.example && (orchRail.intelligence.analysis.example.user_says || orchRail.intelligence.analysis.example.agent_does)">
+                        <h4 class="orch-intel-hd">简单示例</h4>
+                        <p v-if="orchRail.intelligence.analysis.example.user_says"><em>用户：</em>{{ orchRail.intelligence.analysis.example.user_says }}</p>
+                        <p v-if="orchRail.intelligence.analysis.example.agent_does"><em>Agent：</em>{{ orchRail.intelligence.analysis.example.agent_does }}</p>
+                      </section>
+                      <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.triggers||[]).length">
+                        <h4 class="orch-intel-hd">触发关键词</h4>
+                        <div class="orch-intel-tags"><span v-for="(t,ti) in orchRail.intelligence.analysis.triggers" :key="'stg-tr'+ti" class="orch-tag">{{ t }}</span></div>
+                      </section>
+                      <section class="orch-intel-sec" v-if="(orchRail.intelligence.analysis.cautions||[]).length">
+                        <h4 class="orch-intel-hd">注意事项</h4>
+                        <ul class="orch-intel-list"><li v-for="(c,ci) in orchRail.intelligence.analysis.cautions" :key="'stg-ca'+ci">{{ c }}</li></ul>
+                      </section>
+                    </div>
+                    <p v-else class="orch-hint">尚未生成智能分析。</p>
+                  </section>
                   <section id="orch-dsec-io" class="orch-stage-sec glass-inset">
                     <h3 class="orch-stage-sec-title">输入 / 输出</h3>
                     <div class="orch-stage-io-grid">
@@ -1386,6 +1683,16 @@
                   <section id="orch-dsec-body" class="orch-stage-sec glass-inset orch-stage-sec-read">
                     <h3 class="orch-stage-sec-title">正文</h3>
                     <article class="orch-md-body orch-md-body-lg orch-skill-doc" v-html="orchRail.skillBodyHtml"></article>
+                  </section>
+                  <section id="orch-dsec-archives" class="orch-stage-sec glass-inset orch-stage-sec-read">
+                    <h3 class="orch-stage-sec-title">使用归档</h3>
+                    <div v-if="(orchRail.usageArchives||[]).length" class="orch-intel-arch-list">
+                      <article v-for="ar in orchRail.usageArchives" :key="ar.archive_id" class="orch-intel-card">
+                        <div class="orch-intel-arch-meta">{{ ar.archived_at }} · 满意度 {{ ar.satisfaction || '—' }} / 采纳 {{ ar.adoption || '—' }}</div>
+                        <p>{{ ar.task_scene || '—' }}</p>
+                      </article>
+                    </div>
+                    <p v-else class="orch-hint">暂无使用归档（SKILL 被调用且静默约 90 秒后会自动生成）</p>
                   </section>
                   <section id="orch-dsec-versions" class="orch-stage-sec glass-inset">
                     <h3 class="orch-stage-sec-title">版本</h3>
@@ -1512,8 +1819,14 @@
       </details>
     </header>
 
+    <nav v-if="mobilePortrait" class="agpz-mobile-steps" aria-label="个性化分步">
+      <button type="button" class="agpz-mobile-step" :class="{on:mobileAgpzStep==='tpl'}" @click="setMobileAgpzStep('tpl')">模板库</button>
+      <button type="button" class="agpz-mobile-step" :class="{on:mobileAgpzStep==='edit'}" @click="setMobileAgpzStep('edit')">编辑</button>
+      <button type="button" class="agpz-mobile-step" :class="{on:mobileAgpzStep==='hist'}" @click="setMobileAgpzStep('hist')">历史</button>
+    </nav>
+
     <div class="agpz-grid">
-      <aside class="glass agpz-side">
+      <aside class="glass agpz-side" v-show="!mobilePortrait || mobileAgpzStep==='tpl'">
         <div class="agpz-side-h">
           <h2 class="agpz-h2">模板库</h2>
           <p class="agpz-side-sub">选择一项后在中间编辑</p>
@@ -1546,7 +1859,7 @@
         </div>
       </aside>
 
-      <section class="glass agpz-main">
+      <section class="glass agpz-main" v-show="!mobilePortrait || mobileAgpzStep==='edit'">
         <div class="agpz-editor-head">
           <div>
             <h2 class="agpz-h2 agpz-h2-plain">编辑分层 Prompt</h2>
@@ -1662,7 +1975,7 @@
         </details>
       </section>
 
-      <aside class="glass agpz-hist">
+      <aside class="glass agpz-hist" v-show="!mobilePortrait || mobileAgpzStep==='hist'">
         <div class="agpz-hist-head">
           <h2 class="agpz-h2">版本历史</h2>
           <p class="agpz-side-sub">点击卡片加载到编辑器</p>
@@ -1690,11 +2003,12 @@
         任务中心
         <span v-if="c.taskHistTotal" class="chat-task-hist-count" style="margin-left:8px">{{ c.taskHistTotal }}</span>
       </div>
-      <p class="chat-task-hist-hint" style="margin:0 0 12px">聚合 AI 问答主任务（task_*）与链接沉淀流水线；数据来自 Redis 热缓存，MySQL 可补全持久化。</p>
+      <p class="chat-task-hist-hint" style="margin:0 0 12px">聚合 AI 问答主任务（task_*）、链接沉淀流水线与多 Agent 舰队会话；数据来自 Redis 热缓存、MySQL 与 agent_fleet 本地存储。</p>
       <div class="chat-task-hist-tabs">
         <button type="button" class="chat-task-hist-tab" :class="{on:c.taskHistFilterKind==='all'}" @click="setTaskHistKindFilter('all')">全部</button>
         <button type="button" class="chat-task-hist-tab" :class="{on:c.taskHistFilterKind==='main'}" @click="setTaskHistKindFilter('main')">AI 主任务</button>
         <button type="button" class="chat-task-hist-tab" :class="{on:c.taskHistFilterKind==='pipeline'}" @click="setTaskHistKindFilter('pipeline')">链接流水线</button>
+        <button type="button" class="chat-task-hist-tab" :class="{on:c.taskHistFilterKind==='fleet'}" @click="setTaskHistKindFilter('fleet')">多 Agent</button>
       </div>
       <div class="chat-task-hist-toolbar">
         <input class="chat-task-hist-inp" type="search" v-model="c.taskHistSearchId" placeholder="按任务 ID 筛选" autocomplete="off" @input="scheduleTaskRegistryReload" />
@@ -1725,7 +2039,7 @@
         </div>
       </div>
       <p v-if="c.taskHistStats" class="chat-task-hist-stats">
-        主任务 {{ c.taskHistStats.main||0 }} · 流水线 {{ c.taskHistStats.pipeline||0 }} · 合计 {{ c.taskHistTotal||0 }}
+        主任务 {{ c.taskHistStats.main||0 }} · 流水线 {{ c.taskHistStats.pipeline||0 }} · 多 Agent {{ c.taskHistStats.fleet||0 }} · 合计 {{ c.taskHistTotal||0 }}
       </p>
       <p v-if="c.taskHistLoading" class="chat-task-hist-empty">正在加载任务列表…</p>
       <p v-else-if="!c.taskHistRemoteList.length" class="chat-task-hist-empty">暂无匹配任务。提交链接分析或在 AI 问答中发起复杂任务后会出现于此。</p>
@@ -1760,6 +2074,164 @@
           <button type="button" class="btn btn-o btn-xs" :disabled="c.taskHistSyncingId===h.task_id" @click="syncTaskToMysql(h)">{{ c.taskHistSyncingId===h.task_id ? '同步中…' : '同步 MySQL' }}</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══ 多 Agent 管理（Codex / CC / Cursor 舰队）═══ -->
+  <div v-show="page==='fleet'" class="fleet-page">
+    <section class="glass fleet-hero">
+      <div class="st">
+        <div class="ico"><svg class="ic ic-18"><use href="#icon-tasks"/></svg></div>
+        多 Agent 管理
+        <span v-if="fleet.summary" class="fleet-hero-badge">{{ fleet.summary.sessions_count||0 }} 会话</span>
+      </div>
+      <p class="fleet-lede">注册工作区项目，按角色（规划/实现/审查）向本机 Claude Code、Codex、Cursor 等 CLI 派发真实任务；状态与日志持久化，并汇入任务中心。</p>
+      <div v-if="fleet.harnesses.length" class="fleet-harness-row">
+        <span v-for="h in fleet.harnesses" :key="h.harness_id" class="fleet-harness-chip" :class="{ok:h.available,no:!h.available}">
+          {{ h.label }}<span class="fleet-h-chip-st">{{ h.available ? '可用' : '未安装' }}</span>
+        </span>
+      </div>
+      <div class="fleet-hero-actions">
+        <button type="button" class="btn btn-o btn-sm" :disabled="fleet.loading" @click="ldFleetAll">{{ fleet.loading ? '加载中…' : '刷新' }}</button>
+        <button type="button" class="btn btn-o btn-sm" @click="switchPage('tasks');setTaskHistKindFilter('fleet')">在任务中心查看</button>
+      </div>
+      <p v-if="fleet.err" class="fleet-err">{{ fleet.err }}</p>
+    </section>
+
+    <div class="fleet-layout">
+      <aside class="fleet-side glass">
+        <h3 class="fleet-h3">项目注册</h3>
+        <div class="fleet-form">
+          <input class="fleet-inp" v-model="fleet.projName" placeholder="项目名称" autocomplete="off" />
+          <input class="fleet-inp" v-model="fleet.projPath" placeholder="工作区绝对路径" autocomplete="off" />
+          <select class="fleet-inp" v-model="fleet.projHarness">
+            <option v-for="h in fleet.harnesses" :key="'ph-'+h.harness_id" :value="h.harness_id">{{ h.label }}</option>
+          </select>
+          <button type="button" class="btn btn-p btn-sm fleet-btn-full" :disabled="fleet.projBusy||!fleet.projName||!fleet.projPath" @click="fleetAddProject">{{ fleet.projBusy ? '注册中…' : '注册项目' }}</button>
+        </div>
+        <ul v-if="fleet.projects.length" class="fleet-proj-list">
+          <li v-for="p in fleet.projects" :key="p.project_id" class="fleet-proj-item">
+            <div class="fleet-proj-main">
+              <strong>{{ p.name }}</strong>
+              <span class="fleet-proj-path" :title="p.workspace_path">{{ p.workspace_path }}</span>
+            </div>
+            <button type="button" class="btn btn-o btn-xs" :disabled="fleet.actionBusy===p.project_id" @click="fleetDeleteProject(p.project_id)">删除</button>
+          </li>
+        </ul>
+        <p v-else class="fleet-empty">尚未注册项目。请先添加本机代码仓库路径。</p>
+
+        <h3 class="fleet-h3">单会话派发</h3>
+        <div class="fleet-form">
+          <select class="fleet-inp" v-model="fleet.sessProjectId">
+            <option value="">选择项目</option>
+            <option v-for="p in fleet.projects" :key="'sp-'+p.project_id" :value="p.project_id">{{ p.name }}</option>
+          </select>
+          <select class="fleet-inp" v-model="fleet.sessHarness">
+            <option v-for="h in fleet.harnesses" :key="'sh-'+h.harness_id" :value="h.harness_id">{{ h.label }}</option>
+          </select>
+          <select class="fleet-inp" v-model="fleet.sessRole">
+            <option v-for="r in FLEET_ROLES" :key="r.key" :value="r.key">{{ r.label }}</option>
+          </select>
+          <input class="fleet-inp" v-model="fleet.sessTitle" placeholder="标题（可选）" autocomplete="off" />
+          <textarea class="fleet-ta" rows="3" v-model="fleet.sessPrompt" placeholder="任务提示词（必填）"></textarea>
+          <textarea class="fleet-ta" rows="2" v-model="fleet.sessScopes" placeholder="作用域路径，每行一个"></textarea>
+          <button type="button" class="btn btn-p btn-sm fleet-btn-full" :disabled="fleet.sessBusy" @click="fleetCreateSession">{{ fleet.sessBusy ? '创建中…' : '创建会话' }}</button>
+        </div>
+
+        <h3 class="fleet-h3">三角色编排</h3>
+        <p class="fleet-hint">Planner(Claude Code) → Implementer → Reviewer，跨厂商协作。</p>
+        <div class="fleet-form">
+          <select class="fleet-inp" v-model="fleet.planProjectId">
+            <option value="">选择项目</option>
+            <option v-for="p in fleet.projects" :key="'pp-'+p.project_id" :value="p.project_id">{{ p.name }}</option>
+          </select>
+          <textarea class="fleet-ta" rows="3" v-model="fleet.planGoal" placeholder="目标描述（必填）"></textarea>
+          <select class="fleet-inp" v-model="fleet.planImplHarness">
+            <option v-for="h in fleet.harnesses" :key="'pi-'+h.harness_id" :value="h.harness_id">实现：{{ h.label }}</option>
+          </select>
+          <select class="fleet-inp" v-model="fleet.planReviewHarness">
+            <option v-for="h in fleet.harnesses" :key="'pr-'+h.harness_id" :value="h.harness_id">审查：{{ h.label }}</option>
+          </select>
+          <textarea class="fleet-ta" rows="2" v-model="fleet.planScopes" placeholder="作用域路径"></textarea>
+          <button type="button" class="btn btn-p btn-sm fleet-btn-full" :disabled="fleet.planBusy" @click="fleetCreatePlan">{{ fleet.planBusy ? '编排中…' : '创建编排计划' }}</button>
+        </div>
+      </aside>
+
+      <main class="fleet-main">
+        <div class="fleet-toolbar glass">
+          <select class="fleet-inp fleet-inp-inline" v-model="fleet.filterProjectId" @change="ldFleetAll()">
+            <option value="">全部项目</option>
+            <option v-for="p in fleet.projects" :key="'fp-'+p.project_id" :value="p.project_id">{{ p.name }}</option>
+          </select>
+          <select class="fleet-inp fleet-inp-inline" v-model="fleet.filterStatus" @change="ldFleetAll()">
+            <option value="">全部状态</option>
+            <option v-for="col in FLEET_STATUS_COLUMNS" :key="'fs-'+col.key" :value="col.key">{{ col.label }}</option>
+          </select>
+        </div>
+
+        <div class="fleet-board">
+          <div v-for="col in FLEET_STATUS_COLUMNS" :key="col.key" class="fleet-col glass">
+            <header class="fleet-col-head">
+              <span>{{ col.label }}</span>
+              <span class="fleet-col-count">{{ fleetSessionsByStatus(col.key).length }}</span>
+            </header>
+            <div class="fleet-col-body">
+              <article v-for="s in fleetSessionsByStatus(col.key)" :key="s.session_id"
+                class="fleet-card" :class="{sel:fleet.selSessionId===s.session_id}" @click="selectFleetSession(s)">
+                <div class="fleet-card-top">
+                  <span class="fleet-card-id" :title="s.session_id">{{ s.session_id }}</span>
+                  <span class="fleet-role-badge">{{ fleetRoleLabel(s.role) }}</span>
+                </div>
+                <p class="fleet-card-title">{{ s.title || s.prompt }}</p>
+                <div class="fleet-card-meta">
+                  <span>{{ s.harness_label || fleetHarnessLabel(s.harness_id) }}</span>
+                  <span v-if="s.project_name">{{ s.project_name }}</span>
+                </div>
+                <div class="fleet-card-actions" @click.stop>
+                  <button v-if="s.status==='pending'" type="button" class="btn btn-p btn-xs" :disabled="!!fleet.actionBusy" @click="fleetDispatchSession(s.session_id)">派发</button>
+                  <button v-if="s.status==='running'" type="button" class="btn btn-o btn-xs" :disabled="!!fleet.actionBusy" @click="fleetCancelSession(s.session_id)">取消</button>
+                </div>
+              </article>
+              <p v-if="!fleetSessionsByStatus(col.key).length" class="fleet-col-empty">无</p>
+            </div>
+          </div>
+        </div>
+
+        <section v-if="fleet.selSession" class="glass fleet-detail">
+          <header class="fleet-detail-head">
+            <div>
+              <h3 class="fleet-h3">{{ fleet.selSession.title || fleet.selSession.session_id }}</h3>
+              <p class="fleet-detail-sub">
+                <span class="fleet-status-badge" :class="fleetStatusClass(fleet.selSession.status)">{{ fleetStatusLabel(fleet.selSession.status) }}</span>
+                {{ fleetRoleLabel(fleet.selSession.role) }} · {{ fleet.selSession.harness_label }}
+              </p>
+            </div>
+            <div class="fleet-detail-actions">
+              <button v-if="fleet.selSession.status==='pending'" type="button" class="btn btn-p btn-sm" :disabled="!!fleet.actionBusy" @click="fleetDispatchSession()">派发 CLI</button>
+              <button v-if="fleet.selSession.status==='running'" type="button" class="btn btn-o btn-sm" :disabled="!!fleet.actionBusy" @click="fleetCancelSession()">取消</button>
+              <template v-if="fleet.selSession.status==='review'">
+                <button type="button" class="btn btn-p btn-sm" :disabled="!!fleet.actionBusy" @click="fleetReviewSession(true)">审查通过</button>
+                <button type="button" class="btn btn-o btn-sm" :disabled="!!fleet.actionBusy" @click="fleetReviewSession(false)">不通过</button>
+              </template>
+              <button type="button" class="btn btn-o btn-sm" @click="fleetRefreshLogs()">刷新日志</button>
+            </div>
+          </header>
+          <pre class="fleet-prompt-block">{{ fleet.selSession.prompt }}</pre>
+          <div v-if="fleet.selSession.scope_paths&&fleet.selSession.scope_paths.length" class="fleet-scopes">
+            作用域：<span v-for="(sp,i) in fleet.selSession.scope_paths" :key="i" class="fleet-scope-chip">{{ sp }}</span>
+          </div>
+          <div class="fleet-log-panel">
+            <div class="fleet-log-head">
+              <span>运行日志</span>
+              <span v-if="fleet.streamOpen" class="fleet-stream-live">SSE 实时</span>
+            </div>
+            <p v-if="fleet.logsLoading" class="fleet-empty">加载日志…</p>
+            <pre v-else-if="fleet.logs.length" class="fleet-log-pre"><template v-for="(ln,i) in fleet.logs" :key="i"><span :class="'log-'+ln.stream">{{ ln.ts }} [{{ ln.stream }}] {{ ln.line }}
+</span></template></pre>
+            <p v-else class="fleet-empty">暂无日志。派发后将写入真实 CLI 输出。</p>
+          </div>
+        </section>
+      </main>
     </div>
   </div>
 
@@ -2223,6 +2695,27 @@
 ├── manifest.json        # 图片元数据 JSON
 └── images/
     └── img_{0001..N}.{png|jpg|…}</pre>
+            <p><strong>结构化元数据（链接沉淀）</strong>：除 domain/module 等 LLM 字段外，含 <code>external_resources</code>（三方资源预标记，见下）。</p>
+            <p><strong>external_resources（三方资源 · 链接导入预标记）</strong>：</p>
+            <pre>{
+  "schema_version": "1.0",
+  "source_platform": "小红书",
+  "source_link": "https://…",
+  "resource_count": 2,
+  "processing_note": "link_prefetch | link_ocr",
+  "resources": [{
+    "resource_id": "img_0001",
+    "media_type": "image",
+    "ordinal_in_doc": 1,
+    "source_url": "https://cdn…/a.jpg",
+    "public_url": "https://cdn…/a.jpg",
+    "picture_id": "图1-img_0001",
+    "literal_content": "",
+    "description": "",
+    "processing_stage": "prefetch"
+  }]
+}</pre>
+            <p>链接导入 OCR 后会写入元数据，并在正文追加 <code>## 图片资源</code> picture 块（url 可为远程链接，前端 rich_content 直接渲染）。完整标准化后字段与 manifest.images 对齐（ocr_text / vlm_description）。</p>
             <p><strong>manifest.json 顶层</strong>：</p>
             <pre>{
   "ok": true,
@@ -2428,8 +2921,11 @@ description:
     <div class="glass reader-hub-card">
       <header class="reader-hub-head">
         <h1 class="reader-hub-title">文本阅读</h1>
-        <p class="reader-hub-sub">点击后在独立页面打开 Markdown 阅读器；左上角「返回」可回到此处原位置。</p>
-        <button type="button" class="btn btn-p" @click="readerPickLocalFile">打开本地文件</button>
+        <details class="reader-hub-help">
+          <summary>使用说明</summary>
+          <p class="reader-hub-sub">点击后在新标签页打开 Markdown 阅读器；原页面保持不动。可在「设置 → 界面」关闭此行为并改用当前页跳转 + 左上角返回。</p>
+        </details>
+        <button type="button" class="btn btn-p reader-hub-open-btn" @click="readerPickLocalFile">打开本地文件</button>
       </header>
       <section class="reader-hub-recent">
         <h2 class="reader-hub-h2">最近打开</h2>
@@ -2445,12 +2941,23 @@ description:
   </div>
 
   <!-- ═══ PAGE 6: Redis 缓存 ═══ -->
-  <div v-show="page==='cache'">
+  <div v-show="page==='cache'" class="cache-page">
     <div class="glass">
       <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.6 4 3 9 3s9-1.4 9-3V5"/><path d="M3 11v6c0 1.6 4 3 9 3s9-1.4 9-3v-6"/></svg></div>Redis 中间产物缓存</div>
       <p style="font-size:10px;color:var(--t2);margin-bottom:8px">{{ca.st}}</p>
       <div class="fr"><span class="fl">过滤</span><input class="gi" v-model="ca.qf.a" placeholder="artifact"/><input class="gi" v-model="ca.qf.s" placeholder="source"/><input class="gi" v-model="ca.qf.kw" placeholder="keyword"/><button class="btn btn-o btn-xs" @click="caQ">查询</button><button class="btn btn-p btn-xs" @click="caSel">选中</button></div>
-      <div style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:var(--r3);margin-top:10px"><table class="dtbl"><thead><tr><th>ID</th><th>时间</th><th>Artifact</th><th>Source</th><th>Producer</th><th>Task Key</th></tr></thead><tbody><tr v-for="r in ca.rs" :key="r.id" :class="{sel:ca.eid===r.id}" style="cursor:pointer" @click="caPickRow(r)"><td>{{r.id}}</td><td>{{r.ts_text}}</td><td>{{r.artifact_name}}</td><td>{{r.source}}</td><td>{{r.producer}}</td><td style="font-size:10px">{{r.task_key}}</td></tr></tbody></table></div>
+      <div class="cache-table-wrap" style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:var(--r3);margin-top:10px"><table class="dtbl"><thead><tr><th>ID</th><th>时间</th><th>Artifact</th><th>Source</th><th>Producer</th><th>Task Key</th></tr></thead><tbody><tr v-for="r in ca.rs" :key="r.id" :class="{sel:ca.eid===r.id}" style="cursor:pointer" @click="caPickRow(r)"><td>{{r.id}}</td><td>{{r.ts_text}}</td><td>{{r.artifact_name}}</td><td>{{r.source}}</td><td>{{r.producer}}</td><td style="font-size:10px">{{r.task_key}}</td></tr></tbody></table></div>
+      <div class="cache-card-list">
+        <article v-for="r in ca.rs" :key="'c'+r.id" class="cache-card" :class="{sel:ca.eid===r.id}" @click="caPickRow(r)">
+          <div class="cache-card-row"><span class="cache-card-k">ID</span><span class="cache-card-v">{{ r.id }}</span></div>
+          <div class="cache-card-row"><span class="cache-card-k">时间</span><span class="cache-card-v">{{ r.ts_text }}</span></div>
+          <div class="cache-card-row"><span class="cache-card-k">Artifact</span><span class="cache-card-v">{{ r.artifact_name }}</span></div>
+          <div class="cache-card-row"><span class="cache-card-k">Source</span><span class="cache-card-v">{{ r.source }}</span></div>
+          <div class="cache-card-row"><span class="cache-card-k">Producer</span><span class="cache-card-v">{{ r.producer }}</span></div>
+          <div class="cache-card-row"><span class="cache-card-k">Task Key</span><span class="cache-card-v">{{ r.task_key }}</span></div>
+        </article>
+        <p v-if="!ca.rs.length" style="font-size:12px;color:var(--t3);padding:12px 4px">暂无缓存条目</p>
+      </div>
       <div class="chips" style="margin-top:10px"><span v-for="k in ca.gs" :key="k" class="chip" :class="{on:ca.qf.g===k}" @click="ca.qf.g=k;caQ()">{{k}}</span></div>
     </div>
     <div class="glass"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></div>详情</div><textarea class="gta" rows="7" v-model="ca.dt" style="font-family:var(--font-mono)"></textarea><div class="btns"><button class="btn btn-p btn-xs" @click="caSv">保存修改</button><input class="gi" v-model="ca.ek" placeholder="task_key" style="width:180px"/><button class="btn btn-o btn-xs" @click="caEx">导出全链路 JSON</button></div></div>
@@ -2575,70 +3082,91 @@ description:
   </div>
 
   <!-- ═══ PAGE 7: 设置（AGENT / 链接分析）═══ -->
-  <div v-show="page==='settings'">
-    <div class="sn" style="margin-bottom:12px">
+  <div v-show="page==='settings'" class="settings-shell">
+    <nav class="sn sn--primary" aria-label="设置分类">
       <div class="sn-i" v-if="isAdmin" :class="{on:st.sec==='agent'}" @click="st.sec='agent'">网关与路由</div>
       <div class="sn-i" :class="{on:st.sec==='link'}" @click="st.sec='link'">链接分析配置</div>
       <div class="sn-i" :class="{on:st.sec==='im'}" @click="st.sec='im';ldImPlatforms()">IM 机器人</div>
       <div class="sn-i" :class="{on:st.sec==='ui'}" @click="st.sec='ui'">界面</div>
-    </div>
+    </nav>
     <div v-show="st.sec==='ui'" class="glass" style="margin-bottom:12px">
       <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12h8"/></svg></div>界面与导航</div>
       <label class="chat-cfg-row"><input type="checkbox" v-model="uiPrefs.navDynamicIsland" @change="onUiPrefsChange"/> 顶栏灵动岛（闲置 3 秒或页面向下滚动时收起，悬停展开）</label>
+      <label class="chat-cfg-row"><input type="checkbox" v-model="uiPrefs.openArtifactInNewTab" @change="onUiPrefsChange"/> 任务卡片 MD/HTML 在新标签页打开（原页面保持不动，无需左上角「返回」）</label>
     </div>
 
     <template v-if="st.sec==='agent'">
-      <p style="font-size:11px;color:var(--t3);margin-bottom:10px">API 节点池与各内部 Agent 的<strong>任务路由</strong>。各 Agent 的<strong>工作指令、输出控制字段与规范 Markdown</strong>请在主导航「内部 Agent 配置」中按 7 类分别维护。</p>
-      <div class="sn">
+      <p class="settings-intro">API 节点池与各内部 Agent 的<strong>任务路由</strong>。各 Agent 的<strong>工作指令、输出控制字段与规范 Markdown</strong>请在主导航「内部 Agent 配置」中按 7 类分别维护。</p>
+      <nav class="sn sn--secondary" aria-label="网关子项">
         <div class="sn-i" :class="{on:st.sub==='gw'}" @click="st.sub='gw'">节点池</div>
         <div class="sn-i" :class="{on:st.sub==='rt'}" @click="st.sub='rt'">任务路由</div>
         <div class="sn-i" :class="{on:st.sub==='th'}" @click="st.sub='th';ldThCfg()">系统线程</div>
         <div class="sn-i" :class="{on:st.sub==='ai'}" @click="st.sub='ai';ldAiCfg()">AI 全局</div>
         <div class="sn-i" :class="{on:st.sub==='fs'}" @click="st.sub='fs';ldFsCfg()">飞书后台</div>
+      </nav>
+    <div class="glass gw-pool" v-show="st.sub==='gw'">
+      <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>AI API 节点池</div>
+      <p class="gw-pool-lead">选择厂商后表单字段与 API 协议自动切换；验证连接会按对应格式发起真实探测。</p>
+      <div class="gw-prov-grid" role="listbox" aria-label="API 厂商">
+        <button v-for="p in GW_PROVIDERS" :key="p.id" type="button" class="gw-prov-card" :class="{on:st.nf.provider===p.id}" :style="gwProvCardStyle(p)" @click="pickGwProvider(p.id)">
+          <span class="gw-prov-brand">{{p.brand}}</span>
+          <span class="gw-prov-name">{{p.label}}</span>
+          <span class="gw-prov-fmt">{{p.apiFormat}}</span>
+        </button>
       </div>
-    <div class="glass" v-show="st.sub==='gw'"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>AI API 节点池</div>
-      <!-- Provider Selector -->
-      <div class="fr"><span class="fl">Provider</span>
-        <select class="gi" v-model="st.nf.provider" style="min-width:160px;font-weight:600">
-          <option value="ark">ARK (火山引擎)</option>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
+      <div class="gw-form-panel" :data-provider="st.nf.provider">
+        <div class="gw-form-head">
+          <span class="gw-form-badge">{{gwProvMeta(st.nf.provider).apiFormat}}</span>
+          <button type="button" class="btn btn-o btn-xs" @click="resetGwForm">清空表单</button>
+        </div>
+        <p class="gw-form-desc">{{gwProvMeta(st.nf.provider).desc}}</p>
+        <div v-for="(sec,si) in gwFormSections(st.nf.provider)" :key="st.nf.provider+'-'+si" class="gw-form-section" :class="'gw-form-section--'+(sec.tone||'default')">
+          <div class="gw-form-section-head">
+            <span class="gw-form-section-title">{{sec.title}}</span>
+            <p v-if="sec.desc" class="gw-form-section-desc">{{sec.desc}}</p>
+          </div>
+          <div class="gw-form-section-body" :class="'gw-form-section-body--'+(sec.layout||'grid-2')">
+            <div v-for="f in sec.fields" :key="f.key" class="gw-field-card" :class="{'gw-field-card--wide':f.wide,'gw-field-card--mono':f.mono,'gw-field-card--secret':f.type==='password'}">
+              <label class="gw-fl">
+                {{f.label}}
+                <span v-if="f.required" class="gw-req">*</span>
+                <span v-else-if="f.optional" class="gw-opt">（可选）</span>
+              </label>
+              <input v-if="f.type!=='select'" class="gi" :class="{'gi-mono':f.mono}" v-model="st.nf[f.key]" :type="f.type||'text'" :inputmode="f.type==='number'?'numeric':undefined" autocomplete="off" :placeholder="gwFieldPlaceholder(f,st.nf.provider)"/>
+              <select v-else class="gi" v-model="st.nf[f.key]">
+                <option value="active">active · 参与路由</option>
+                <option value="inactive">inactive · 暂停使用</option>
+              </select>
+              <p v-if="f.hint" class="gw-field-hint">{{f.hint}}</p>
+              <p v-if="f.source" class="gw-field-source"><span class="gw-field-source-label">获取途径</span>{{f.source}}</p>
+            </div>
+          </div>
+        </div>
       </div>
-      <!-- Provider-specific fields -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
-        <div v-if="st.nf.provider==='ark'">
-          <div class="fl">Endpoint ID *</div><input class="gi" v-model="st.nf.endpoint_id" placeholder="ep-2024xxxxx"/>
-        </div>
-        <div v-else>
-          <div class="fl">Model *</div><input class="gi" v-model="st.nf.endpoint_id" :placeholder="st.nf.provider==='openai'?'gpt-4o / gpt-4-turbo':'claude-sonnet-4-20250514'"/>
-        </div>
-        <div><div class="fl">Base URL</div><input class="gi" v-model="st.nf.base_url" :placeholder="st.nf.provider==='ark'?'https://ark.cn-beijing.volces.com/api/v3':st.nf.provider==='openai'?'https://api.openai.com/v1':'https://api.anthropic.com'"/></div>
-        <div><div class="fl">API Key *</div><input class="gi" v-model="st.nf.api_key" type="password" placeholder="sk-..."/></div>
-        <div><div class="fl">名称</div><input class="gi" v-model="st.nf.name" placeholder="节点名称"/></div>
-        <div style="display:flex;gap:8px">
-          <div style="flex:1"><div class="fl">优先级</div><input class="gi" v-model="st.nf.priority" type="number" placeholder="10"/></div>
-          <div style="flex:1"><div class="fl">权重</div><input class="gi" v-model="st.nf.weight" type="number" placeholder="100"/></div>
-        </div>
-        <div><div class="fl">ID</div><input class="gi" v-model="st.nf.id" placeholder="node_primary"/></div>
-      </div>
-      <!-- Test Connection + 状态显示 -->
-      <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
-        <button class="btn btn-p btn-xs" @click="testConn()">
+      <div class="gw-test-row">
+        <button type="button" class="btn btn-p btn-xs" :disabled="st.tcBusy" @click="testConn()">
           <span class="sp" v-if="st.tcBusy" style="width:10px;height:10px;border-width:2px"></span>
           {{st.tcBusy?'验证中…':'验证连接'}}
         </button>
-        <span v-if="st.tcResult" :style="{color:st.tcResult.ok?'var(--ok)':'var(--err)',fontSize:'12px'}">
-          {{st.tcResult.ok?st.tcResult.status+' ('+st.tcResult.elapsed_ms+'ms)':st.tcResult.status+': '+st.tcResult.error}}
+        <span v-if="st.tcResult" class="gw-test-status" :class="st.tcResult.ok?'ok':'err'">
+          {{st.tcResult.ok?st.tcResult.status+' ('+st.tcResult.elapsed_ms+'ms)':(st.tcResult.status||'error')+': '+(st.tcResult.error||'')}}
         </span>
-        <span v-if="st.tcResult&&st.tcResult.test_response" style="font-size:11px;color:var(--t3);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-          回复: {{st.tcResult.test_response}}
-        </span>
+        <span v-if="st.tcResult&&st.tcResult.test_response" class="gw-test-reply">回复: {{st.tcResult.test_response}}</span>
       </div>
-      <!-- Node list -->
-      <div style="display:flex;gap:10px;margin-top:12px">
-        <div class="nodes-list" style="flex:2"><div v-for="(n,i) in st.nds" :key="i" class="nr" :class="{sel:st.ni===i}" @click="st.ni=i;ldNf(n)">{{n.status==='active'?'':'[停]'}} {{n.name||n.id}} <span style="color:var(--t3);font-size:10px">({{n.provider}})</span></div></div>
-        <div><button class="btn btn-o btn-xs" style="display:block;margin:2px 0" @click="ndUp">&uarr;</button><button class="btn btn-o btn-xs" style="display:block;margin:2px 0" @click="ndDn">&darr;</button><button class="btn btn-d btn-xs" style="display:block;margin:2px 0" @click="ndDel">&times;</button></div>
+      <div class="gw-nodes-layout">
+        <div class="gw-nodes-list">
+          <div v-for="(n,i) in st.nds" :key="n.id||i" class="gw-node-row" :class="{sel:st.ni===i}" :style="{'--gw-accent':gwNodeAccent(n)}" @click="st.ni=i;ldNf(n)">
+            <span class="gw-node-badge">{{providerBadge(n)}}</span>
+            <span class="gw-node-name">{{n.status==='active'?'':'[停] '}}{{n.name||n.id}}</span>
+            <span class="gw-node-meta">{{n.endpoint_id||'—'}}</span>
+          </div>
+          <div v-if="!st.nds.length" class="gw-nodes-empty">暂无节点，填写上方表单后点「新增 / 更新」</div>
+        </div>
+        <div class="gw-nodes-ops">
+          <button type="button" class="btn btn-o btn-xs" title="上移" @click="ndUp">&uarr;</button>
+          <button type="button" class="btn btn-o btn-xs" title="下移" @click="ndDn">&darr;</button>
+          <button type="button" class="btn btn-d btn-xs" title="删除" @click="ndDel">&times;</button>
+        </div>
       </div>
       <div class="btns"><button class="btn btn-p" @click="ndUpSert">新增 / 更新</button><button class="btn btn-o" @click="ndPoolSv">保存节点池</button></div></div>
     <div class="glass" v-show="st.sub==='rt'"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>内部 Agent 任务路由</div>
@@ -2728,6 +3256,32 @@ description:
 </div>
 </div>
         </template>
+        <template v-else-if="st.imDetail==='wechat'">
+<div class="glass">
+<div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>微信对话接入</div>
+            <p style="font-size:11px;color:var(--t3);margin-bottom:10px">当前采用“微信桥接网关 + 本服务 webhook”模式，只做最小对话闭环：收消息、调 AI、回文本消息。</p>
+            <div class="fr"><span class="fl">桥接地址</span><input class="gi" v-model="st.imWx.bridge_url" placeholder="如 http://127.0.0.1:2531"/></div>
+            <div class="fr"><span class="fl">Bridge Token</span><input class="gi" v-model="st.imWx.bridge_token" type="password" :placeholder="st.imWx.has_bridge_token?'已保存，留空则不覆盖':'可选'"/></div>
+            <div class="fr"><span class="fl">Webhook Secret</span><input class="gi" v-model="st.imWx.webhook_secret" type="password" :placeholder="st.imWx.has_webhook_secret?'已保存，留空则不覆盖':'给桥接回调验签用'"/></div>
+            <div class="fr"><span class="fl">回调地址</span><input class="gi" :value="imWxInboundUrl" readonly style="flex:1;min-width:0"/><button type="button" class="btn btn-o btn-xs" @click="imWxCopyInbound">复制</button></div>
+            <div class="fr"><span class="fl">回复模式</span><select class="gi" v-model="st.imWx.reply_mode"><option value="mention_only">群聊仅 @ 时回复</option><option value="all">收到即回复</option></select></div>
+            <div class="fr"><span class="fl">Agent Key</span><input class="gi" v-model="st.imWx.agent_key" placeholder="qa_orchestrator_agent"/></div>
+            <div class="fr"><span class="fl">群白名单</span><textarea class="gta" rows="4" v-model="st.imWx.group_whitelist_text" placeholder="每行一个 chat_id / roomid，留空表示不限制"></textarea></div>
+            <div class="fr"><label style="display:flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" v-model="st.imWx.enabled"/> 启用微信机器人</label></div>
+            <p style="font-size:11px;color:var(--t3);margin-bottom:8px">连接状态：<span :style="{color:st.imWx.connected?'var(--ok)':'var(--warn)'}">{{st.imWx.connected?'已连接':'未连接'}}</span><span v-if="st.imWx.nickname"> · {{st.imWx.nickname}}</span><span v-if="st.imWx.wxid"> · {{st.imWx.wxid}}</span></p>
+            <p v-if="st.imWx.last_connected_at" style="font-size:10px;color:var(--t3);margin-bottom:8px">最近连接：{{st.imWx.last_connected_at}}</p>
+            <div class="btns"><button class="btn btn-p" @click="imWxSave">保存配置</button><button class="btn btn-o" @click="imWxRefreshStatus">刷新状态</button><button class="btn btn-w" @click="imWxStartQr">扫码登录</button><button class="btn btn-d" @click="imWxDisconnect">断开</button></div>
+            <div v-if="st.imWxQr.qr_image" style="margin-top:12px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+              <img :src="st.imWxQr.qr_image" alt="微信登录二维码" style="width:180px;height:180px;object-fit:contain;border:1px solid var(--border);border-radius:8px;background:#fff;padding:8px"/>
+              <div style="font-size:12px;color:var(--t2)">
+                <p style="margin:0 0 8px">扫码状态：{{st.imWxQr.status}}</p>
+                <p style="margin:0 0 8px">先保存桥接地址，再点“扫码登录”。扫码后会自动轮询，成功后回填微信账号信息。</p>
+                <p v-if="st.imWxQr.error" style="margin:0;color:var(--err)">{{st.imWxQr.error}}</p>
+              </div>
+            </div>
+            <p style="font-size:10px;color:var(--t3);margin-top:10px">推荐做法：本地启动一个 GeWeChat / OpenClaw 一类桥接网关，把网关消息回调指向上面的回调地址。本地开发如果桥接不在同机，需要把当前 8000 端口暴露出来。</p>
+</div>
+        </template>
         <div v-else class="glass"><p style="font-size:12px;color:var(--t2)">该平台即将上线，敬请期待。</p></div>
       </div>
     </template>
@@ -2738,6 +3292,7 @@ description:
         <div class="sn-i" :class="{on:st.lk==='fei'}" @click="st.lk='fei'">飞书写入</div>
         <div class="sn-i" :class="{on:st.lk==='cap'}" @click="st.lk='cap'">抓取与字幕</div>
         <div class="sn-i" :class="{on:st.lk==='prm'}" @click="st.lk='prm'">默认 Prompt</div>
+        <div class="sn-i" :class="{on:st.lk==='meta'}" @click="st.lk='meta';refreshLinkMetaFieldsEdit()">结构化元数据</div>
       </div>
       <div class="glass" v-show="st.lk==='run'"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg></div>执行流程默认</div>
         <p style="font-size:11px;color:var(--t3);margin-bottom:10px">在「链接文档化」页开始处理时使用的默认工作流（本机 localStorage 同步）。</p>
@@ -2755,6 +3310,22 @@ description:
       </div>
       <div class="glass" v-show="st.lk==='prm'"><div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></div>默认 User Prompt</div>
         <textarea class="gta" rows="8" v-model="v.pr" placeholder="链接文档化页的默认自定义提示词（最多约 10000 字）"></textarea>
+      </div>
+      <div class="glass" v-show="st.lk==='meta'">
+        <div class="st"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>结构化元数据与卡片展示</div>
+        <p style="font-size:11px;color:var(--t3);margin-bottom:10px">定义 AI 从正文提取的 JSON 字段（<code>key</code> 必填且完整）；卡片展示以 <code>extracted_metadata</code> 为准。与「内部 Agent 配置 → 摘要 Agent」共用同一套字段定义。</p>
+        <label class="chat-cfg-row" style="margin-bottom:8px"><input type="checkbox" v-model="linkMetaSchema.enabled"/> 启用结构化元数据提取（真实 LLM）</label>
+        <label class="chat-cfg-row" style="margin-bottom:10px"><input type="checkbox" v-model="linkMetaSchema.cardDisplay"/> 任务卡片按 JSON 字段逐行展示（关闭则回退关键词/作者旧样式）</label>
+        <div class="btns" style="margin:0 0 8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-o btn-xs" @click="linkApplyKbMetaSchema">同步知识库 metadata 模板</button>
+          <button type="button" class="btn btn-o btn-xs" @click="resetLinkMetaFieldsExample">载入示例</button>
+        </div>
+        <label class="iag-label-s">字段定义 JSON（meta_extract_fields）</label>
+        <textarea class="gta ta-mono" rows="12" v-model="linkMetaSchema.fieldsJson" spellcheck="false" :placeholder="LINK_META_FIELDS_EXAMPLE"></textarea>
+        <p style="font-size:10px;color:var(--t3);margin:6px 0 10px">示例每项：<code>{"key":"keyword1","label":"关键词1","description":"核心主题","show_on_card":true}</code>；<code>show_on_card</code> 控制是否在卡片上单独占一行。</p>
+        <label class="iag-label-s">提取 Prompt 补充（meta_extract_prompt）</label>
+        <textarea class="gta" rows="3" v-model="linkMetaSchema.prompt" placeholder="可选：对元数据提取的额外说明"></textarea>
+        <div class="btns" style="margin-top:10px"><button type="button" class="btn btn-p" @click="saveLinkMetaSettings">保存结构化设置</button></div>
       </div>
     </template>
   </div>
@@ -3291,7 +3862,8 @@ description:
       <button type="button" class="chat-subnav-btn" :class="{on:c.chatPanelTab==='config'}" @click="switchChatPanel('config')">对话配置</button>
     </nav>
     <div v-show="c.chatPanelTab==='room'" class="chat-room-shell">
-    <div class="chat-sb-rail">
+    <div v-if="mobilePortrait && !chatSbCollapsed" class="chat-sessions-backdrop" @click="toggleChatSb" aria-hidden="true"></div>
+    <div class="chat-sb-rail" :class="{'chat-sb-rail--sheet': mobilePortrait && !chatSbCollapsed}">
     <aside v-show="!chatSbCollapsed" class="chat-sidebar">
       <div class="cs-head cs-head--search">
         <div class="cs-head-row">
@@ -4184,6 +4756,37 @@ description:
     </div>
   </div>
 </div>
+<div v-if="modalTaskOps.show" class="modal-mask" @click.self="closeTaskOpsReport">
+  <div class="modal-box" @click.stop style="max-width:720px">
+    <div class="modal-h">运维失败分析 · {{ (modalTaskOps.taskId||'').slice(0,8) }}</div>
+    <div class="modal-b">
+      <p v-if="modalTaskOps.loading" style="font-size:12px;color:var(--t3);margin:0">加载报告中…</p>
+      <p v-else-if="modalTaskOps.err" style="font-size:12px;color:var(--err);margin:0">{{ modalTaskOps.err }}</p>
+      <pre v-else class="ta-mono q-ops-report-body">{{ modalTaskOps.body }}</pre>
+    </div>
+    <div class="modal-f">
+      <button type="button" class="btn btn-d btn-xs" @click="closeTaskOpsReport">关闭</button>
+    </div>
+  </div>
+</div>
+<div v-if="queueReadHistModal.show" class="modal-mask" @click.self="closeQueueReadHistory">
+  <div class="modal-box q-read-hist-modal" @click.stop style="max-width:520px">
+    <div class="modal-h">已读记录 · {{ queueReadHistModal.title }}</div>
+    <div class="modal-b">
+      <p v-if="!queueReadHistModal.entries.length" class="q-read-hist-empty">暂无已读记录</p>
+      <div v-else class="q-read-hist-list">
+        <div v-for="(row, idx) in queueReadHistModal.entries" :key="idx" class="q-read-hist-item">
+          <div class="q-read-hist-time">第 {{ idx + 1 }} 次 · {{ formatReadHistTime(row.read_at) }}</div>
+          <div v-if="row.note_version" class="q-read-hist-ver">备注版本 v{{ row.note_version }}</div>
+          <div class="q-read-hist-note">{{ row.note || '（当时无备注）' }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button type="button" class="btn btn-d btn-xs" @click="closeQueueReadHistory">关闭</button>
+    </div>
+  </div>
+</div>
   <div v-if="showHist" class="hist-overlay open" @click.self="showHist=false">
     <div class="hist-sheet" @click.stop>
       <div class="hist-sheet-h">
@@ -4213,9 +4816,13 @@ description:
                   <span class="hist-title" :title="histTaskTitle(t)">{{ histTaskTitle(t) }}</span>
                   <span class="mono hist-id" :title="t.id">{{ (t.id||'').slice(0,8) }}</span>
                 </div>
-                <div v-if="taskSourceLabel(t)||taskAuthorName(t)" class="hist-sub q-source-line">
-                  <span v-if="taskSourceLabel(t)">来源：{{ taskSourceLabel(t) }}</span>
-                  <span v-if="taskAuthorName(t)"> · 作者：{{ taskAuthorName(t) }}</span>
+                <div v-if="taskActionLabel(t)||taskAuthorName(t)" class="hist-sub q-source-line">
+                  <span v-if="taskActionLabel(t)">产生动作：{{ taskActionLabel(t) }}</span>
+                  <span v-if="taskAuthorName(t)">
+                    <span v-if="taskActionLabel(t)">  </span>作者:
+                    <a v-if="taskAuthorProfileUrl(t)" :href="taskAuthorProfileUrl(t)" target="_blank" rel="noopener noreferrer" class="q-source-author-link" @click.stop>{{ taskAuthorName(t) }}</a>
+                    <span v-else>{{ taskAuthorName(t) }}</span>
+                  </span>
                 </div>
                 <div v-if="histTaskSubTitle(t)" class="hist-sub" :title="histTaskSubTitle(t)">{{ histTaskSubTitle(t) }}</div>
                 <div v-if="taskCardMetricsLine(t)" class="hist-metrics">{{ taskCardMetricsLine(t) }}</div>
@@ -4228,10 +4835,17 @@ description:
               <span class="hist-platform">{{ t.platform||'-' }}</span>
               <div class="hist-status">
                 <span class="hist-status-badge" :class="'is-'+(t.status||'pending')">{{ histStatusLabel(t) }}</span>
+                <button
+                  v-if="t.status==='failed' && taskOpsReportId(t)"
+                  type="button"
+                  class="q-ops-report-link q-ops-report-link--hist"
+                  title="查看运维 Agent 失败分析报告"
+                  @click.stop="openTaskOpsReport(t)"
+                >失败分析</button>
                 <span v-if="t.stage||t.current_stage" class="hist-stage">{{ t.stage||t.current_stage }}</span>
               </div>
               <div class="hist-read-col">
-                <button v-if="histShowReadBadge(t)" type="button" class="q-read-badge hist-read-badge" :class="histTaskIsUnread(t)?'q-read-unread':'q-read-done'" :disabled="!histTaskIsUnread(t)" :title="histTaskIsUnread(t)?'点击标记为已读':'已读'" @click.stop="markHistTaskRead(t)">{{ histTaskReadLabel(t) }}</button>
+                <button v-if="histShowReadBadge(t)" type="button" class="q-read-badge hist-read-badge" :class="histTaskIsUnread(t)?'q-read-unread':'q-read-done'" :title="histTaskIsUnread(t)?'左键标记已读 · 右键查看已读记录':'左键累计已读 · 右键查看已读记录'" @click.stop="onHistReadBadgeClick(t)" @contextmenu.prevent="onHistReadBadgeContext(t,$event)">{{ histTaskReadLabel(t) }}</button>
                 <span v-else class="hist-read-na">—</span>
               </div>
               <div class="hist-progress">
@@ -4281,7 +4895,6 @@ description:
             </div>
             <div class="hist-log-tabs">
               <button type="button" class="btn btn-xs" :class="histLogPanel.tab==='text'?'btn-p':'btn-o'" @click="histLogPanel.tab='text'">操作日志 ({{histLogPanel.textLogs.length}})</button>
-              <button type="button" class="btn btn-xs" :class="histLogPanel.tab==='span'?'btn-p':'btn-o'" @click="histLogPanel.tab='span'">SPAN 链路 ({{histLogPanel.spans.length}})</button>
               <button type="button" class="btn btn-xs" :class="histLogPanel.tab==='err'?'btn-p':'btn-o'" @click="histLogPanel.tab='err'">异常 ({{histLogPanel.errors.length}})</button>
             </div>
             <button type="button" class="btn btn-d btn-xs" @click="closeHistLogPanel">收起</button>
@@ -4299,29 +4912,6 @@ description:
                 </template>
                 <div v-else class="hist-log-empty">暂无操作日志（新任务将自动写入 pipeline_logs JSONL）</div>
               </div>
-            </div>
-            <div v-show="histLogPanel.tab==='span'" class="hist-log-span-wrap">
-              <div v-if="histLogPanel.spanTask" class="hist-span-summary">
-                <span>状态 {{ histLogPanel.spanTask.status }}</span>
-                <span>耗时 {{ histLogPanel.spanTask.total_duration_ms||0 }} ms</span>
-                <span>Token {{ histLogPanel.spanTask.total_token_count||0 }}</span>
-                <span>步骤 {{ histLogPanel.spanTask.completed_steps||0 }}/{{ histLogPanel.spanTask.total_steps||0 }}</span>
-              </div>
-              <table class="dtbl hist-span-tbl" v-if="histLogPanel.spans.length">
-                <thead><tr><th>阶段</th><th>类型</th><th>状态</th><th>耗时</th><th>Token</th><th>置信度</th><th>说明</th></tr></thead>
-                <tbody>
-                  <tr v-for="s in histLogPanel.spans" :key="s.step_id" :class="'span-row--'+(s.status||'')">
-                    <td>{{ s.step_name }}</td>
-                    <td><code class="ta-mono">{{ s.step_type }}</code></td>
-                    <td>{{ s.status }}</td>
-                    <td>{{ s.duration_ms||'—' }} ms</td>
-                    <td>{{ s.token_count||'—' }}</td>
-                    <td>{{ s.confidence ? (Math.round(s.confidence*1000)/10)+'%' : '—' }}</td>
-                    <td class="hist-span-err">{{ s.error_message || (s.output_payload && s.output_payload.preview) || '—' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-else class="hist-log-empty">暂无 SPAN（新提交任务将按阶段写入 MariaDB/Redis）</div>
             </div>
             <div v-show="histLogPanel.tab==='err'" class="term hist-log-term">
               <div class="term-h"><span class="d3 r"></span><span class="d3 y"></span><span class="d3 g"></span><span>errors</span></div>
@@ -4435,6 +5025,7 @@ description:
     </div>
   </Teleport>
 </main>
+</div><!-- /.app-body -->
 <div v-if="ragSliceModal.show" class="modal-mask rag-slice-modal-mask" @click.self="closeRagSliceDetail">
   <div class="modal-box rag-slice-modal-box" @click.stop>
     <div class="modal-h">RAG 切片 · [{{ ragSliceModal.slice&&ragSliceModal.slice.ref_id }}] {{ ragSliceParentName(ragSliceModal.slice) }}</div>
@@ -4453,6 +5044,27 @@ description:
     </div>
   </div>
 </div>
+
+<!-- 手机竖屏：底栏 + 抽屉（桌面/横屏不渲染） -->
+<nav v-if="mobilePortrait && !(page==='chat' && c.chatPanelTab==='room')" class="mobile-bottom-nav" aria-label="主导航">
+  <button v-for="tab in mobileBottomTabs" :key="tab.key" type="button" class="mobile-bottom-nav-btn" :class="{on: tab.key!=='_more' && page===tab.key}" @click="onMobileBottomTap(tab.key)">
+    <span class="mobile-bottom-nav-ic" aria-hidden="true">
+      <svg v-if="tab.icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.85"><use :href="'#'+tab.icon"/></svg>
+      <svg v-else viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
+    </span>
+    <span>{{ tab.label }}</span>
+  </button>
+</nav>
+<div v-if="mobilePortrait && mobileNavOpen" class="mobile-drawer-backdrop" @click="mobileNavOpen=false" aria-hidden="true"></div>
+<aside v-if="mobilePortrait && mobileNavOpen" class="mobile-drawer" aria-label="更多页面">
+  <div class="mobile-drawer-hd">
+    <span class="mobile-drawer-title">全部功能</span>
+    <button type="button" class="mobile-drawer-close" aria-label="关闭" @click="mobileNavOpen=false">×</button>
+  </div>
+  <div class="mobile-drawer-grid">
+    <button v-for="it in mobileDrawerItems" :key="it.key" type="button" class="mobile-drawer-item" :class="{on:page===it.key}" @click="onMobileDrawerTap(it.key)">{{ it.label }}</button>
+  </div>
+</aside>
 </div>
 
 <!-- 主站内嵌 MD 阅读器（点击任务 MD / output 链接时不新开标签页） -->
@@ -4476,84 +5088,5 @@ description:
   </div>
 </div>
 
-<!-- 认证模块 -->
-<script src="/assets/js/auth.js?v=7"></script>
-<script>
-if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
-  AuthManager.router.init();
-}
-</script>
-
-<!-- 立即检查登录状态，避免闪烁 -->
-<script>
-(function() {
-  var token = localStorage.getItem('sba_token');
-  var userStr = localStorage.getItem('sba_user');
-  var bar = document.getElementById('auth-debug-bar');
-  var msg = document.getElementById('auth-debug-msg');
-  var path = window.location.pathname;
-  var isLoginPage = path === '/login.html' || path.endsWith('/login.html');
-
-  if (!token && !isLoginPage) {
-    var next = path + window.location.search;
-    window.location.replace('/login.html?next=' + encodeURIComponent(next));
-    return;
-  }
-
-  if (!token) {
-    if(bar){ bar.style.display='block'; msg.textContent='localStorage 中无 sba_token，请先登录'; }
-    var ld=document.getElementById('sba-boot-loading');
-    if(ld)ld.classList.add('sba-boot-done');
-  } else {
-    /* 有 token 也不提前隐藏遮罩：若 Vue 未挂载会与 v-cloak 叠加成白屏；由 onMounted 校验后再隐藏 */
-    if(!userStr){
-      if(bar){ bar.style.display='block'; msg.textContent='缺少 sba_user，将由应用自动拉取用户信息'; }
-    } else {
-      try {
-        var user = JSON.parse(userStr);
-        if (user && user.id) {
-          if(bar) bar.style.display = 'none';
-        } else {
-          if(bar){ bar.style.display='block'; msg.textContent='用户数据无效，将由应用自动刷新'; }
-        }
-      } catch (e) {
-        if(bar){ bar.style.display='block'; msg.textContent='sba_user 解析失败，将由应用自动刷新'; }
-        localStorage.removeItem('sba_user');
-      }
-    }
-  }
-})();
-</script>
-
-<script src="/vendor/vue.global.prod.js"></script>
-<script src="/vendor/mermaid.min.js"></script>
-<script src="/vendor/marked.min.js"></script>
-<script src="/vendor/purify.min.js"></script>
-<script src="/assets/js/diagram_style_presets.js?v=3"></script>
-<script src="/assets/js/orch_catalog.js?v=1"></script>
-<script src="/assets/js/reader_hub.js?v=5"></script>
-<script src="/assets/js/reader.js?v=4"></script>
-<script src="/assets/js/rich_content.js?v=4"></script>
-<script src="/assets/js/app.js?v=121"></script>
-<script>
-(function(){
-  setTimeout(function(){
-    if(window.__SBA_VUE_MOUNTED__)return;
-    var app=document.getElementById('app');
-    if(!app)return;
-    app.removeAttribute('v-cloak');
-    var ld=document.getElementById('sba-boot-loading');
-    if(ld)ld.classList.add('sba-boot-done');
-    var token=localStorage.getItem('sba_token');
-    if(!token){
-      var mask=document.getElementById('auth-required-mask');
-      if(mask)mask.style.display='flex';
-      app.innerHTML='';
-      return;
-    }
-    app.innerHTML='<div style="padding:32px 20px;max-width:520px;margin:24px auto;font-family:system-ui,sans-serif;line-height:1.55;color:#1e293b;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0"><h2 style="font-size:18px;margin:0 0 12px">应用加载失败</h2><p style="margin:0 0 10px;font-size:14px;color:#475569">Vue 未在 8 秒内完成挂载。请 Ctrl+F5 强刷并查看控制台报错。</p><p style="margin:0;font-size:13px;color:#64748b"><a href="/login.html">重新登录</a></p></div>';
-  },8000);
-})();
-</script>
 </body>
 </html>

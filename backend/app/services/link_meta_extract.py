@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .json_llm_output import (
@@ -29,11 +30,17 @@ _KB_FIELD_LABELS = {
     "domain": ("领域", "文档所属业务领域（大粒度）"),
     "module": ("模块", "所属功能模块（中粒度）"),
     "doc_type": ("文档类型", "如产品手册/技术文档/FAQ/政策/笔记"),
+    "author_name": ("作者", "内容作者/博主昵称（智能提取后写入结构化 JSON）"),
     "keyword1": ("关键词1", "核心主题词或实体"),
     "keyword2": ("关键词2", "次要主题词或补充实体"),
     "source": ("来源", "文档来源或出处"),
     "tags": ("标签", "主题标签列表"),
 }
+
+META_CARD_AUTO_DISPLAY_KEYS = frozenset({
+    "author_name", "domain", "module", "doc_type",
+    "keyword1", "keyword2", "keyword3", "keyword4",
+})
 
 
 def clamp_importance(value: Any, default: int = 5) -> int:
@@ -75,13 +82,93 @@ def normalize_meta_extract_fields(raw: Any) -> List[Dict[str, str]]:
             k = str(row.get("key") or "").strip()
             if not k:
                 continue
-            out.append({
+            item = {
                 "key": k,
                 "label": str(row.get("label") or k).strip(),
                 "description": str(row.get("description") or "").strip(),
-            })
+            }
+            if "show_on_card" in row:
+                item["show_on_card"] = bool(row.get("show_on_card"))
+            out.append(item)
         return out or list(DEFAULT_META_EXTRACT_FIELDS)
     return list(DEFAULT_META_EXTRACT_FIELDS)
+
+
+def field_show_on_card(field: Dict[str, Any]) -> bool:
+    """卡片逐行展示：显式 show_on_card 优先，否则按默认字段名推断。"""
+    if not isinstance(field, dict):
+        return False
+    if "show_on_card" in field:
+        return bool(field.get("show_on_card"))
+    key = str(field.get("key") or "").strip()
+    if not key:
+        return False
+    if key in META_CARD_AUTO_DISPLAY_KEYS:
+        return True
+    return key.startswith("keyword")
+
+
+def fields_for_card_display(fields: Optional[Sequence[Dict[str, str]]]) -> List[Dict[str, str]]:
+    rows = list(fields or DEFAULT_META_EXTRACT_FIELDS)
+    return [f for f in rows if field_show_on_card(f)]
+
+
+def parse_task_meta_hints(raw: Any) -> Dict[str, Any]:
+    """解析提交时的额外 JSON 提示；兼容旧版逗号分隔关键词。"""
+    if isinstance(raw, dict):
+        out: Dict[str, Any] = {}
+        for k, v in raw.items():
+            key = str(k or "").strip()
+            if not key:
+                continue
+            if isinstance(v, (list, dict)):
+                out[key] = v
+            else:
+                out[key] = str(v or "").strip()
+        return out
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parse_task_meta_hints(parsed)
+        except json.JSONDecodeError:
+            pass
+        parts = [p.strip() for p in re.split(r"[,，\s]+", text) if p.strip()]
+        if not parts:
+            return {}
+        hints: Dict[str, Any] = {}
+        for i, part in enumerate(parts[:8], 1):
+            hints[f"keyword{i}"] = part
+        return hints
+    return {}
+
+
+def merge_extracted_metadata(
+    extracted: Optional[Dict[str, Any]],
+    *,
+    task_author_name: str = "",
+    task_meta_hints: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """合并 LLM 提取结果、任务作者与提交 hints，以结构化 JSON 为卡片展示准绳。"""
+    out: Dict[str, Any] = dict(extracted or {})
+    hints = task_meta_hints if isinstance(task_meta_hints, dict) else {}
+    for key, val in hints.items():
+        k = str(key or "").strip()
+        if not k:
+            continue
+        if isinstance(val, (list, dict)):
+            if k not in out or out.get(k) in (None, "", [], {}):
+                out[k] = val
+            continue
+        s = str(val or "").strip()
+        if s and not str(out.get(k) or "").strip():
+            out[k] = s
+    author = str(task_author_name or "").strip()
+    if author:
+        if not str(out.get("author_name") or "").strip():
+            out["author_name"] = author
+    return out
 
 
 def fields_from_kb_metadata_json(metadata_json: str) -> List[Dict[str, str]]:
@@ -112,6 +199,32 @@ def get_meta_extract_config(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return {"enabled": enabled, "fields": fields, "prompt": prompt}
 
 
+_META_JSON_SECTION_RE = re.compile(
+    r"##\s*结构化元数据\s*\n+```(?:json|JSON)\s*\n(.*?)\n```",
+    re.DOTALL,
+)
+_META_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+
+
+def parse_meta_json_from_md(md_text: str) -> Dict[str, Any]:
+    """从 MD 正文的「结构化元数据」JSON 块解析字段（文档编辑后卡片同步用）。"""
+    src = str(md_text or "")
+    if not src.strip():
+        return {}
+    m = _META_JSON_SECTION_RE.search(src)
+    body = m.group(1) if m else ""
+    if not body.strip():
+        fm = _META_JSON_FENCE_RE.search(src)
+        body = fm.group(1) if fm else ""
+    if not body.strip():
+        return {}
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def format_meta_json_block(data: Dict[str, Any], *, fields: Optional[Sequence[Dict[str, str]]] = None) -> str:
     """渲染为 Markdown 代码块，供 output_template 的 {meta_json} 占位。"""
     if not data:
@@ -135,6 +248,7 @@ def _build_extract_prompt(
     summary_text: str = "",
     task_note: str = "",
     task_keywords: str = "",
+    task_meta_hints: Optional[Dict[str, Any]] = None,
     custom_prompt: str = "",
 ) -> str:
     field_lines = []
@@ -155,6 +269,21 @@ def _build_extract_prompt(
         parts.append(f"\n【任务备注（可参考）】\n{task_note.strip()}")
     if task_keywords.strip():
         parts.append(f"\n【任务关键词（可参考）】\n{task_keywords.strip()}")
+    hints = task_meta_hints if isinstance(task_meta_hints, dict) else {}
+    hint_lines = []
+    for key, val in hints.items():
+        k = str(key or "").strip()
+        if not k:
+            continue
+        if isinstance(val, (list, dict)):
+            hint_lines.append(f'- "{k}": {json.dumps(val, ensure_ascii=False)}')
+        elif str(val or "").strip():
+            hint_lines.append(f'- "{k}": {str(val).strip()}')
+    if hint_lines:
+        parts.append(
+            "\n【任务结构化 JSON 提示（字段名须与 schema 一致，可参考勿编造）】\n"
+            + "\n".join(hint_lines)
+        )
     if summary_text.strip():
         parts.append(f"\n【摘要】\n{summary_text.strip()[:6000]}")
     parts.append(f"\n【正文】\n{(body_text or '').strip()[:12000]}")
@@ -174,6 +303,7 @@ def extract_link_metadata(
     fields: Optional[Sequence[Dict[str, str]]] = None,
     task_note: str = "",
     task_keywords: str = "",
+    task_meta_hints: Optional[Dict[str, Any]] = None,
     log_cb: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """真实 LLM 调用：按配置字段提取元数据 JSON。"""
@@ -197,6 +327,7 @@ def extract_link_metadata(
         summary_text=summary_text,
         task_note=task_note,
         task_keywords=task_keywords,
+        task_meta_hints=task_meta_hints,
         custom_prompt=meta_cfg.get("prompt") or "",
     )
     system_prompt = (

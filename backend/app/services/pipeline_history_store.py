@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
-from sqlalchemy import create_engine, delete, desc, func, select
+from sqlalchemy import create_engine, delete, desc, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .link_hash import links_same_identity, url_hash as link_url_hash
@@ -43,6 +43,22 @@ def get_engine():
             url, pool_pre_ping=True, connect_args=connect_args, future=True
         )
         PipelineHistoryBase.metadata.create_all(_engine)
+        if not url.startswith("sqlite"):
+            try:
+                with _engine.connect() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE pipeline_task_history "
+                            "MODIFY COLUMN logs_json LONGTEXT NULL"
+                        )
+                    )
+                    conn.commit()
+            except Exception as exc:
+                _log.debug(
+                    "[链接沉淀-历史持久化|pipeline_history_store.get_engine|logs_json|硬编执行|迁移] "
+                    "跳过或已是最新; error=%s",
+                    exc,
+                )
         _SessionLocal = sessionmaker(_engine, expire_on_commit=False, class_=Session)
         driver = "sqlite" if url.startswith("sqlite") else "mysql"
         _log.info(
@@ -135,6 +151,31 @@ def _row_to_dict(row: PipelineTaskHistory) -> Dict[str, Any]:
     }
 
 
+def _cap_logs_json(logs: Any, *, max_entries: int = 800, max_chars: int = 4_000_000) -> str:
+    """限制日志 JSON 体积，避免 MySQL TEXT 溢出导致任务状态写入失败。"""
+    items = list(logs or [])
+    if len(items) > max_entries:
+        dropped = len(items) - max_entries
+        items = items[-max_entries:]
+        items.insert(
+            0,
+            {
+                "time": datetime.utcnow().isoformat(),
+                "message": f"[日志截断] 已丢弃最早 {dropped} 条，保留最近 {max_entries} 条",
+            },
+        )
+    raw = json.dumps(items, ensure_ascii=False)
+    if len(raw) <= max_chars:
+        return raw
+    # 二次截断：保留尾部消息
+    tail = items[-400:] if len(items) > 400 else items
+    raw = json.dumps(tail, ensure_ascii=False)
+    while len(raw) > max_chars and len(tail) > 20:
+        tail = tail[len(tail) // 4 :]
+        raw = json.dumps(tail, ensure_ascii=False)
+    return raw
+
+
 def _apply_dict(row: PipelineTaskHistory, entry: Dict[str, Any]) -> None:
     tid = (entry.get("id") or entry.get("task_id") or "").strip()
     if not tid:
@@ -183,7 +224,7 @@ def _apply_dict(row: PipelineTaskHistory, entry: Dict[str, Any]) -> None:
     row.html_message = entry.get("html_message") or ""
     err = entry.get("error")
     row.error = str(err) if err is not None else None
-    row.logs_json = json.dumps(entry.get("logs") or [], ensure_ascii=False)
+    row.logs_json = _cap_logs_json(entry.get("logs") or [])
     row.created_at = _parse_dt(entry.get("created_at"))
     row.updated_at = _parse_dt(entry.get("updated_at"))
 

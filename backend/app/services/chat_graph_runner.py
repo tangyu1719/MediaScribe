@@ -208,6 +208,7 @@ async def _prepare_runtime(
     chat_tool_max_retry: Optional[int],
     chat_distinct_tool_fail_limit: Optional[int],
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    orch_pipeline_scheme: Optional[str] = None,
     tools_cache_only: bool = False,
     _precomputed: Optional[Dict[str, Any]] = None,
 ) -> ChatGraphRuntime:
@@ -230,9 +231,10 @@ async def _prepare_runtime(
         system_prompt = ai_chat.assemble_chat_system_prompt(
             cfg, agent_id, agent_profile=agent_profile, user_id=user_id
         )
-    from .orch_pipeline_config import merge_orch_pipeline_nodes
+    from .orch_pipeline_config import merge_orch_pipeline_nodes, resolve_orch_pipeline_scheme
 
-    merged_orch = merge_orch_pipeline_nodes(orch_pipeline_nodes, cfg)
+    scheme = resolve_orch_pipeline_scheme(orch_pipeline_nodes, cfg, scheme=orch_pipeline_scheme)
+    merged_orch = merge_orch_pipeline_nodes(orch_pipeline_nodes, cfg, scheme=scheme)
 
     if chat_max_tool_rounds is not None:
         cfg["chat_max_tool_rounds"] = chat_max_tool_rounds
@@ -310,6 +312,7 @@ async def _prepare_runtime(
         tools_meta=tools_meta,
         chat_lc_tools=chat_lc_tools,
         orch_pipeline_nodes=merged_orch,
+        orch_pipeline_scheme=scheme,
     )
 
 
@@ -659,6 +662,7 @@ async def stream_langgraph_chat(
     chat_tool_max_retry: Optional[int] = None,
     chat_distinct_tool_fail_limit: Optional[int] = None,
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    orch_pipeline_scheme: Optional[str] = None,
     client_cur_task: Optional[Dict[str, Any]] = None,
     client_main_task_history: Optional[List] = None,
     memory_prepared: Optional[Dict[str, Any]] = None,
@@ -730,6 +734,7 @@ async def stream_langgraph_chat(
         chat_tool_max_retry=chat_tool_max_retry,
         chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
         orch_pipeline_nodes=orch_pipeline_nodes,
+        orch_pipeline_scheme=orch_pipeline_scheme,
         tools_cache_only=bool(_continue_early and _tid_early),
         _precomputed=_precomputed,
     )
@@ -1229,6 +1234,7 @@ async def stream_langgraph_resume(
     chat_tool_max_retry: Optional[int] = None,
     chat_distinct_tool_fail_limit: Optional[int] = None,
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    orch_pipeline_scheme: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """HITL resume：Command(resume=...) 继续编排或进入执行段。"""
     trace_id = _new_trace()
@@ -1253,6 +1259,7 @@ async def stream_langgraph_resume(
         chat_tool_max_retry=chat_tool_max_retry,
         chat_distinct_tool_fail_limit=chat_distinct_tool_fail_limit,
         orch_pipeline_nodes=orch_pipeline_nodes,
+        orch_pipeline_scheme=orch_pipeline_scheme,
     )
 
     checkpointer = get_session_checkpointer(session_id)

@@ -83,7 +83,8 @@ def coerce_pasted_link(raw: str) -> str:
         r"(?:"
         r"v\.douyin\.com|www\.douyin\.com|www\.iesdouyin\.com|"
         r"www\.xiaohongshu\.com|xhslink\.com|"
-        r"www\.bilibili\.com|m\.bilibili\.com|b23\.tv"
+        r"www\.bilibili\.com|m\.bilibili\.com|b23\.tv|"
+        r"mp\.weixin\.qq\.com"
         r")/[^\s\]\)\"'<>，。；!?#]+",
         text,
         re.I,

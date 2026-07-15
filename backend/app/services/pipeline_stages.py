@@ -52,6 +52,12 @@ PIPELINE_ROUTES: Dict[str, List[Dict[str, Any]]] = {
         {"id": "generate_md", "label": "生成文档"},
         {"id": "html", "label": "HTML长页", "optional": True},
     ],
+    "web_article": [
+        {"id": "fetch_fulltext", "label": "抓取网页全文"},
+        {"id": "ai_analysis", "label": "原文整理与摘要"},
+        {"id": "generate_md", "label": "生成文档"},
+        {"id": "html", "label": "HTML长页", "optional": True},
+    ],
 }
 
 STATUS_TO_STAGE = {
@@ -78,6 +84,11 @@ STATUS_TO_STAGE = {
         "generating": "generate_md",
     },
     "rss_article": {
+        "consolidating": "ai_analysis",
+        "generating": "generate_md",
+    },
+    "web_article": {
+        "extracting": "fetch_fulltext",
         "consolidating": "ai_analysis",
         "generating": "generate_md",
     },
@@ -124,6 +135,13 @@ _CROSS_ROUTE_RESUME: Dict[tuple, Dict[str, str]] = {
         "generate_md": "generate_md",
         "html": "html",
     },
+    ("video", "web_article"): {
+        "download": "fetch_fulltext",
+        "transcribe": "ai_analysis",
+        "comments": "comments",
+        "generate_md": "generate_md",
+        "html": "html",
+    },
 }
 
 
@@ -155,6 +173,7 @@ def _sanitize_checkpoint(stage_id: str, result: Any) -> Any:
         "comments": ("comments_file_path", "fetched_count"),
         "download": ("video_path", "path"),
         "transcribe": ("full_text", "transcript", "segments", "transcribe_source", "title", "video_path"),
+        "fetch_fulltext": ("source_text", "fetch_source", "char_len"),
         "extract": ("raw_text", "link_title", "cover_url", "content_type"),
         "ocr": ("ocr_text", "merged_text"),
         "assemble": ("article", "raw_text"),
@@ -322,10 +341,29 @@ class PipelineStageTracker:
         meta = dict(self.ctx.get(stage_id) or {})
         return meta
 
-    def fail(self, stage_id: str, error: str) -> None:
+    def fail(self, stage_id: str, error: str, *, error_code: str = "") -> None:
+        err_text = str(error)[:500]
+        resolved_code = (error_code or "").strip()
+        canonical_msg = err_text
+        try:
+            from .ops_error_classifier import classify_task_failure
+
+            cls = classify_task_failure(
+                error_message=err_text,
+                error_code=resolved_code,
+                stage=stage_id,
+            )
+            if cls.get("error_code"):
+                resolved_code = str(cls["error_code"])
+            if cls.get("error_message"):
+                canonical_msg = str(cls["error_message"])[:500]
+        except Exception:
+            pass
         row = self.stages.setdefault(stage_id, {"label": stage_label(self.route, stage_id)})
         row["status"] = "failed"
-        row["error"] = str(error)[:500]
+        row["error"] = canonical_msg or err_text
+        if resolved_code:
+            row["error_code"] = resolved_code
         row["updated_at"] = datetime.now().isoformat(timespec="seconds")
         label = stage_label(self.route, stage_id)
         try:
@@ -341,7 +379,7 @@ class PipelineStageTracker:
             failed_stage_label=label,
             resume_from=stage_id,
             resume_context=self.ctx,
-            error=str(error)[:500],
+            error=f"{resolved_code}: {canonical_msg}" if resolved_code else (canonical_msg or err_text),
             stage=f"失败于：{label}",
             **metrics,
         )
@@ -353,7 +391,8 @@ class PipelineStageTracker:
                 self.route,
                 stage_id,
                 status="failed",
-                error_message=str(error)[:500],
+                error_code=resolved_code,
+                error_message=canonical_msg or err_text,
             )
         except Exception:
             pass

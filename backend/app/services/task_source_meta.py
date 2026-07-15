@@ -1,7 +1,9 @@
 """链接文档化任务 — 导入来源与作者元数据。"""
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Optional
+from typing import Any, Dict, Optional
+
+from .file_naming import is_generic_author_name
 
 # 来源类型（import_source）
 SOURCE_MANUAL = "manual"
@@ -227,9 +229,32 @@ def enrich_task_source_fields(task: Dict[str, Any]) -> Dict[str, Any]:
         meta = row.get("extracted_metadata") if isinstance(row.get("extracted_metadata"), dict) else {}
         for key in ("author", "author_name", "nickname", "up_name", "creator_name"):
             v = str(meta.get(key) or opts.get(key) or "").strip()
-            if v:
+            if v and not is_generic_author_name(v):
                 row["author_name"] = v
                 break
+
+    if is_generic_author_name(str(row.get("author_name") or "").strip()):
+        row["author_name"] = ""
+
+    try:
+        from .author_profile_url import enrich_author_profile_url
+
+        row = enrich_author_profile_url(row)
+    except Exception:
+        pass
+
+    if (row.get("status") or "").lower() == "failed":
+        if not str(row.get("ops_report_id") or "").strip():
+            try:
+                from .ops import ops_find_report_for_task
+
+                tid = str(row.get("task_id") or row.get("id") or "").strip()
+                found = ops_find_report_for_task(tid) if tid else None
+                if found:
+                    row["ops_report_id"] = found.get("id") or ""
+                    row["ops_report_path"] = found.get("report_path") or ""
+            except Exception:
+                pass
 
     return row
 

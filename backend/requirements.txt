@@ -19,4 +19,6 @@ uuid6>=2024.0.0
 chonkie>=0.6.0
 feedparser>=6.0.0
 browser-cookie3>=0.19.1
+requests
+lark-oapi>=1.4.0
 # Eval 评测运维层可选依赖见 requirements-eval.txt（langfuse/agentevals/ragas）

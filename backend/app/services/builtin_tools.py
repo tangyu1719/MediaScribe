@@ -16,8 +16,33 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             "inputs": [
                 {"name": "platform", "type": "string", "required": True, "hint": "抖音 / B站 / 小红书等"},
                 {"name": "link", "type": "string", "required": True, "hint": "可下载或可解析的页面 URL"},
+                {
+                    "name": "video_transcript_mode",
+                    "type": "string",
+                    "required": False,
+                    "hint": "audio_only 仅音频 | visual_frames 画面OCR | hybrid 混合，默认 audio_only",
+                },
             ],
             "outputs": "任务进入队列；SSE 日志与最终 MD/HTML 路径由任务状态接口返回。",
+        },
+        {
+            "id": "tool_video_visual_extract",
+            "name": "视频画面转文字",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "从视频链接快速提取原文生文（Probe 路由 + 画面 OCR），不跑完整沉淀流水线。",
+            "inputs": [
+                {"name": "link", "type": "string", "required": True, "hint": "视频页面 URL"},
+                {
+                    "name": "video_transcript_mode",
+                    "type": "string",
+                    "required": False,
+                    "hint": "visual_frames（默认）| audio_only | hybrid",
+                },
+                {"name": "include_audio", "type": "bool", "required": False, "hint": "true 时等价 hybrid"},
+            ],
+            "outputs": "plain_text_preview、段数、coverage_score 等 JSON。",
         },
         {
             "id": "tool_xhs_user_search",

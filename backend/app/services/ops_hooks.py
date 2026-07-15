@@ -107,6 +107,13 @@ def ops_dispatch_log_incident(msg: str, level: str, *, task_id: Optional[str] = 
 
             logs = _collect_logs(task_id)
             err = {"type": f"Log{level}", "message": (msg or "")[:4000], "traceback": ""}
+            try:
+                from .ops_error_classifier import normalize_error_info
+                from .task_manager import get_task as _gt
+
+                err = normalize_error_info(err, task=_gt(task_id) if task_id else None)
+            except Exception:
+                pass
             tid = task_id or f"log_{fp[:10]}"
             res = ops_monitor_task(
                 link="_web_log_",
@@ -186,10 +193,18 @@ def ops_dispatch_span_failure(step: Dict[str, Any]) -> None:
                 "message": str(
                     step.get("error_message") or step.get("stop_reason") or step.get("status") or ""
                 )[:4000],
+                "error_code": str(step.get("error_code") or ""),
                 "step_id": sid,
                 "step_name": step.get("step_name"),
                 "task_id": tid,
             }
+            try:
+                from .ops_error_classifier import normalize_error_info
+                from .task_manager import get_task as _gt
+
+                err = normalize_error_info(err, stage=str(step.get("step_name") or ""), task=_gt(tid) or {})
+            except Exception:
+                pass
             res = ops_monitor_task(
                 link=link or "_span_failure_",
                 task_id=tid or f"span_{fp[:10]}",

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,29 +30,66 @@ if _agent_path not in sys.path:
 
 # uvicorn --reload 不监视 src/agent；每次转写前 reload，避免进程内缓存旧版 speech_to_text
 import video_downloader as _video_downloader  # noqa: E402
+from error_code_registry import resolve_error_code, T1010  # noqa: E402
 
 download_video = _video_downloader.download_video
 VIDEO_DIR = _video_downloader.VIDEO_DIR
 _log = logging.getLogger(__name__)
 
+_vd_reload_lock = threading.Lock()
+_vd_cached_mtime: float = -1.0
+_vd_cached_fn = None
 
-def _reload_speech_to_text():
-    """重新加载 video_downloader，返回最新的 speech_to_text（含 strict 参数检测）。"""
-    mod = importlib.reload(_video_downloader)
-    # reload 会清空 video_downloader._whisper_pool，必须在 reload 之后重新注册实例池
+
+def _ensure_ffmpeg_ready() -> None:
+    """转写前解析 ffmpeg 绝对路径（避免线程池内 shutil.which 偶发找不到）。"""
     try:
-        from .whisper_pool import register_whisper_pool_with_downloader
+        from ffmpeg_path import get_ffmpeg_executables  # type: ignore
 
-        register_whisper_pool_with_downloader(mod)
+        ff, fp = get_ffmpeg_executables()
+        if ff and fp:
+            return
+        get_ffmpeg_executables(force=True)
     except Exception as ex:
         _log.warning(
-            "[链接沉淀文档-视频转写|video_pipeline._reload_speech_to_text|whisper_pool|硬编执行|注册] "
-            "reload 后注册失败; error=%s",
-            ex,
+            "[链接沉淀文档-视频转写|video_pipeline._ensure_ffmpeg_ready|ffmpeg|硬编执行|探测] "
+            "解析失败; error_type=%s; error_message=%s",
+            type(ex).__name__,
+            str(ex)[:200],
         )
-    fn = mod.speech_to_text
-    has_strict = "strict" in inspect.signature(fn).parameters
-    return fn, has_strict, str(getattr(mod, "__file__", ""))
+
+
+def _reload_speech_to_text():
+    """重新加载 video_downloader；加锁 + mtime 缓存，避免并发 pipeline 线程 reload 竞态。"""
+    global _vd_cached_mtime, _vd_cached_fn
+    mod_file = str(getattr(_video_downloader, "__file__", "") or "")
+    try:
+        mtime = os.path.getmtime(mod_file) if mod_file and os.path.isfile(mod_file) else 0.0
+    except OSError:
+        mtime = 0.0
+
+    with _vd_reload_lock:
+        if _vd_cached_fn is not None and _vd_cached_mtime == mtime:
+            fn = _vd_cached_fn
+            has_strict = "strict" in inspect.signature(fn).parameters
+            return fn, has_strict, mod_file
+
+        mod = importlib.reload(_video_downloader)
+        try:
+            from .whisper_pool import register_whisper_pool_with_downloader
+
+            register_whisper_pool_with_downloader(mod)
+        except Exception as ex:
+            _log.warning(
+                "[链接沉淀文档-视频转写|video_pipeline._reload_speech_to_text|whisper_pool|硬编执行|注册] "
+                "reload 后注册失败; error=%s",
+                ex,
+            )
+        fn = mod.speech_to_text
+        has_strict = "strict" in inspect.signature(fn).parameters
+        _vd_cached_fn = fn
+        _vd_cached_mtime = mtime
+        return fn, has_strict, mod_file
 
 
 def invoke_speech_to_text(
@@ -64,6 +102,7 @@ def invoke_speech_to_text(
     strict: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """调用 Whisper 转写；兼容旧版 speech_to_text（无 strict 时用 transcribe_quality 兜底）。"""
+    _ensure_ffmpeg_ready()
     fn, has_strict, mod_file = _reload_speech_to_text()
     kwargs: Dict[str, Any] = {
         "log_callback": log_callback,
@@ -724,7 +763,7 @@ async def process_video_pipeline(task_id: str):
     user_prompt = task.get("user_prompt", "")
     cfg = load_pipeline_config()
     naming_rule = (cfg.get("file_naming_rule") or "").strip()
-    comments_config = task.get("comments", {"enabled": False, "count": 10, "sort": "hot"})
+    comments_config = task.get("comments") or {"enabled": False, "count": 10, "sort": "hot"}
     log = _make_log_cb(task_id)
     progress = _make_progress_cb(task_id)
     loop = asyncio.get_running_loop()
@@ -778,6 +817,39 @@ async def process_video_pipeline(task_id: str):
                         add_log(task_id, f"作者信息(CDP): {an2}" + (f" (id={ai2})" if ai2 else ""))
                 except Exception:
                     pass
+
+    # ── 路由0：网页 / 微信公众号 → web_article（不走 yt-dlp）──
+    from .link_doc_routing import is_web_article_link, platform_from_url
+
+    if is_web_article_link(link):
+        plat_norm = (platform or "").strip()
+        if not plat_norm or plat_norm in ("微信", "通用网页"):
+            plat_norm = platform_from_url(link) or "通用网页"
+            update_task(task_id, platform=plat_norm)
+        prev_route = (task.get("pipeline_route") or "video").strip() or "video"
+        rf = (task.get("resume_from") or task.get("failed_stage") or "").strip()
+        mapped_rf = remap_resume_stage(rf, prev_route, "web_article") if rf else ""
+        from .pipeline_stages import stage_label
+
+        patch_route: Dict[str, Any] = {"pipeline_route": "web_article"}
+        if mapped_rf:
+            patch_route["resume_from"] = mapped_rf
+            if (task.get("failed_stage") or "") == rf:
+                patch_route["failed_stage"] = mapped_rf
+        if prev_route != "web_article" or mapped_rf != rf:
+            update_task(task_id, **patch_route)
+            if mapped_rf and mapped_rf != rf:
+                add_log(
+                    task_id,
+                    f"[路由] 断点阶段 {rf}→{mapped_rf}（{stage_label(prev_route, rf)}→{stage_label('web_article', mapped_rf)}）",
+                )
+            elif prev_route != "web_article":
+                add_log(task_id, f"[路由] {prev_route}→web_article（网页/公众号沉淀）")
+        add_log(task_id, "检测到网页/微信公众号链接，路由到 web_article 沉淀链路...")
+        from .web_article_pipeline import process_web_article_pipeline
+
+        await process_web_article_pipeline(task_id, user_prompt=user_prompt)
+        return
 
     # 存储评论数据
     comments_data = None
@@ -932,7 +1004,7 @@ async def process_video_pipeline(task_id: str):
 
         ok_v, v_code, v_msg = assess_video_file(video_path)
         if not ok_v:
-            tracker.fail("download", v_msg)
+            tracker.fail("download", v_msg, error_code=v_code)
             _fail_task_transcribe(
                 task_id,
                 error_code=v_code,
@@ -946,23 +1018,32 @@ async def process_video_pipeline(task_id: str):
         transcript = None
         if tracker.should_run("transcribe"):
             tracker.start("transcribe")
-            update_task(task_id, status="transcribing", stage="步骤2: 语音转文字", progress=40)
+            from .pipeline_options_util import video_transcript_mode
+            from .video_visual.link_transcript import MODE_LABELS, extract_video_transcript_for_pipeline, normalize_video_transcript_mode
+
+            vt_mode = normalize_video_transcript_mode(video_transcript_mode(task))
+            stage_label = MODE_LABELS.get(vt_mode, "转写")
+            update_task(task_id, status="transcribing", stage=f"步骤2: {stage_label}", progress=40)
+            add_log(task_id, f"视频转写模式: {vt_mode} ({stage_label})")
             llm_cfg = cfg.get("llm_config") or cfg
+            strict_whisper = vt_mode == "audio_only"
+            _vt_mode = vt_mode
             transcript = await loop.run_in_executor(
                 _io_executor(),
-                lambda: invoke_speech_to_text(
+                lambda: extract_video_transcript_for_pipeline(
                     video_path,
+                    _vt_mode,
                     log_callback=log,
                     progress_callback=progress,
                     llm_config=llm_cfg if llm_cfg.get("apiKey") else None,
                     user_prompt=user_prompt,
-                    strict=True,
-                )
+                    strict_whisper=strict_whisper,
+                ),
             )
             if not transcript or transcript.get("ok") is False:
-                code = (transcript or {}).get("error_code") or "transcribe_no_result"
+                code = resolve_error_code(str((transcript or {}).get("error_code") or T1010)) or T1010
                 msg = (transcript or {}).get("error_message") or "语音转文字未返回结果"
-                tracker.fail("transcribe", msg)
+                tracker.fail("transcribe", msg, error_code=code)
                 _fail_task_transcribe(
                     task_id,
                     error_code=code,
@@ -991,13 +1072,15 @@ async def process_video_pipeline(task_id: str):
             transcript["full_text"] = cleaned_text
             if transcript.get("transcript"):
                 transcript["transcript"] = cleaned_text
+        vt_src = str(transcript.get("transcribe_source") or "")
+        skip_whisper_gate = vt_src in ("visual_smart", "hybrid_av")
         assessment = assess_transcript(
             raw_text,
-            transcribe_source=str(transcript.get("transcribe_source") or ""),
+            transcribe_source=vt_src or str(transcript.get("transcribe_source") or ""),
             transcript_meta=transcript if isinstance(transcript, dict) else None,
         )
-        if not assessment.ok:
-            tracker.fail("transcribe", assessment.error_message)
+        if not assessment.ok and not skip_whisper_gate:
+            tracker.fail("transcribe", assessment.error_message, error_code=assessment.error_code)
             _fail_task_transcribe(
                 task_id,
                 error_code=assessment.error_code,
@@ -1009,6 +1092,8 @@ async def process_video_pipeline(task_id: str):
                 transcribe_source=transcript.get("transcribe_source") or "",
             )
             return
+        if not assessment.ok and skip_whisper_gate and len(raw_text) >= 80:
+            add_log(task_id, f"[转写门禁] 画面/混合模式跳过 Whisper 专用门禁; len={len(raw_text)}", "WARNING")
 
         ai_summary = (transcript.get("ai_summary") or "").strip()
         article_text = (transcript.get("article") or "").strip()
@@ -1050,6 +1135,8 @@ async def process_video_pipeline(task_id: str):
                         "_log_chain": f"链接沉淀文档-{platform}视频",
                         "_task_note": str(task_snap_pre.get("task_note") or ""),
                         "_task_keywords": str(task_snap_pre.get("task_keywords") or ""),
+                        "_task_meta_hints": task_snap_pre.get("task_meta_hints") or {},
+                        "_author_name": str(task_snap_pre.get("author_name") or ""),
                     },
                     user_prompt=user_prompt,
                     stage_label=f"{platform}视频沉淀",

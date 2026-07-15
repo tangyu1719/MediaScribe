@@ -32,6 +32,7 @@ class ChatGraphRuntime:
     chat_tool_max_retry: int = 3
     chat_distinct_tool_fail_limit: int = 3
     orch_pipeline_nodes: Dict[str, bool] = field(default_factory=dict)
+    orch_pipeline_scheme: str = "standard_rag"
     cfg: Dict[str, Any] = field(default_factory=dict)
     provider: str = "ark"
     api_key: str = ""
@@ -88,6 +89,7 @@ class ChatGraphRuntime:
             "chat_tool_max_retry": self.chat_tool_max_retry,
             "chat_distinct_tool_fail_limit": self.chat_distinct_tool_fail_limit,
             "orch_pipeline_nodes": dict(self.orch_pipeline_nodes or {}),
+            "orch_pipeline_scheme": str(self.orch_pipeline_scheme or "standard_rag"),
         }
 
 
@@ -120,10 +122,15 @@ def restore_runtime_from_state(state: Dict[str, Any]) -> Optional[ChatGraphRunti
     message = str(state.get("message") or "").strip()
     try:
         from . import ai_chat
-        from .orch_pipeline_config import merge_orch_pipeline_nodes
+        from .orch_pipeline_config import merge_orch_pipeline_nodes, resolve_orch_pipeline_scheme
 
         cfg = ai_chat.load_chat_llm_config()
-        merged_orch = merge_orch_pipeline_nodes(rc.get("orch_pipeline_nodes"), cfg)
+        scheme = resolve_orch_pipeline_scheme(
+            rc.get("orch_pipeline_nodes"),
+            cfg,
+            scheme=rc.get("orch_pipeline_scheme"),
+        )
+        merged_orch = merge_orch_pipeline_nodes(rc.get("orch_pipeline_nodes"), cfg, scheme=scheme)
         creds = ai_chat.resolve_chat_api_credentials(cfg)
         runtime = ChatGraphRuntime(
             session_id=session_id,
@@ -141,6 +148,7 @@ def restore_runtime_from_state(state: Dict[str, Any]) -> Optional[ChatGraphRunti
                 int(rc.get("chat_distinct_tool_fail_limit") or cfg.get("chat_distinct_tool_fail_limit", 3) or 3),
             ),
             orch_pipeline_nodes=merged_orch,
+            orch_pipeline_scheme=scheme,
             cfg=cfg,
             provider=creds["provider"],
             api_key=creds["api_key"],

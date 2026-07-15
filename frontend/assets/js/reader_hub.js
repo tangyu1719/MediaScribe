@@ -30,16 +30,30 @@
     return ctx;
   }
 
-  /** 跳转至独立 MD 阅读页（非内嵌 overlay） */
+  /** 读取界面偏好：任务卡片 MD/HTML 是否在新标签页打开（默认 true） */
+  function shouldOpenMdInNewTab(ctxExtra) {
+    if (ctxExtra && ctxExtra.newTab != null) return !!ctxExtra.newTab;
+    try {
+      var o = JSON.parse(global.localStorage.getItem("sba_ui_prefs") || "{}");
+      if (o.openArtifactInNewTab != null) return !!o.openArtifactInNewTab;
+    } catch (_) {}
+    return true;
+  }
+
+  /** 跳转至独立 MD 阅读页（新标签页或当前页，由设置决定） */
   function navigateToMdPreview(fileName, preset, ctxExtra) {
     var name = String(fileName || "").trim();
     if (!name) return null;
     var extra = ctxExtra || {};
-    captureMdReturnContext(extra.from || "video", extra);
     var presetQ = preset ? "&preset=" + encodeURIComponent(preset) : "&preset=split";
     var fromQ = "&from=" + encodeURIComponent(extra.from || "video");
     var url = "/preview/md.html?file=" + encodeURIComponent(name) + presetQ + fromQ;
     recordRecentOpen(name, extra.mtime, extra.opened_at || Date.now());
+    if (shouldOpenMdInNewTab(extra)) {
+      global.open(url, "_blank", "noopener");
+      return url;
+    }
+    captureMdReturnContext(extra.from || "video", extra);
     global.location.assign(url);
     return url;
   }

@@ -3,8 +3,28 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+for _p in Path(__file__).resolve().parents:
+    _cand = _p / "src" / "agent"
+    if _cand.is_dir() and str(_cand) not in sys.path:
+        sys.path.insert(0, str(_cand.resolve()))
+        break
+
+from error_code_registry import (  # noqa: E402
+    T1002,
+    T1003,
+    T1005,
+    T1006,
+    T1007,
+    T1010,
+    V1001,
+    V1002,
+    resolve_error_code,
+)
 
 # 与 video_downloader.speech_to_text 硬编码 MOCK 文案一致，用于识别静默兜底
 MOCK_TRANSCRIPT_SNIPPETS: Tuple[str, ...] = (
@@ -60,15 +80,15 @@ def assess_video_file(path: str) -> Tuple[bool, str, str]:
     """校验下载产物是否可用于 Whisper。"""
     p = (path or "").strip()
     if not p or not os.path.isfile(p):
-        return False, "video_file_missing", "视频文件不存在"
+        return False, V1001, "视频文件不存在"
     try:
         size = os.path.getsize(p)
     except OSError as ex:
-        return False, "video_file_stat_failed", f"无法读取视频文件: {ex}"
+        return False, T1003, f"无法读取视频文件: {ex}"
     if size < MIN_VIDEO_FILE_BYTES:
         return (
             False,
-            "video_file_too_small",
+            V1002,
             f"视频文件过小（{size} bytes < {MIN_VIDEO_FILE_BYTES}），疑似下载不完整或空壳",
         )
     return True, "", ""
@@ -234,14 +254,14 @@ def assess_transcript(
     char_len = len(raw)
 
     if meta.get("ok") is False or meta.get("error_code"):
-        code = str(meta.get("error_code") or "transcribe_failed")
+        code = resolve_error_code(str(meta.get("error_code") or T1003)) or T1003
         msg = str(meta.get("error_message") or meta.get("error") or "语音转文字失败")
         return TranscriptAssessment(ok=False, error_code=code, error_message=msg, char_len=char_len)
 
     if not raw:
         return TranscriptAssessment(
             ok=False,
-            error_code="transcript_empty",
+            error_code=T1005,
             error_message="转写文本为空",
             char_len=0,
         )
@@ -249,7 +269,7 @@ def assess_transcript(
     if is_mock_transcript(raw):
         return TranscriptAssessment(
             ok=False,
-            error_code="transcript_mock_fallback",
+            error_code=T1007,
             error_message="检测到 MOCK 演示转写（非真实 Whisper 结果），已阻断沉淀",
             is_mock=True,
             char_len=char_len,
@@ -259,7 +279,7 @@ def assess_transcript(
     if char_len < MIN_TRANSCRIPT_CHARS:
         return TranscriptAssessment(
             ok=False,
-            error_code="transcript_too_short",
+            error_code=T1006,
             error_message=f"转写过短（{char_len} 字 < {MIN_TRANSCRIPT_CHARS}），无法进入原文整理",
             char_len=char_len,
             transcribe_degraded=True,
@@ -270,7 +290,7 @@ def assess_transcript(
         hint = "；".join(samples[:3]) if samples else "高重复短语"
         return TranscriptAssessment(
             ok=False,
-            error_code="transcribe_degraded_repetition",
+            error_code=T1002,
             error_message=(
                 f"转写重复率过高（{ratio:.0%} ≥ {REPETITION_RATIO_THRESHOLD:.0%}），"
                 f"疑似 Whisper 幻听/并发劣化；样例：{hint}"
@@ -285,7 +305,7 @@ def assess_transcript(
     if src in ("mock", "mock_fallback", "demo"):
         return TranscriptAssessment(
             ok=False,
-            error_code="transcript_mock_source",
+            error_code=T1007,
             error_message=f"转写来源标记为 {src}，生产路径已拒绝",
             is_mock=True,
             char_len=char_len,

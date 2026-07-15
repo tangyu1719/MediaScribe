@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .task_manager import get_output_dir
 from .document_consolidation import extract_title_from_summary, clean_title
@@ -37,6 +37,23 @@ _GENERIC_DOC_TITLE_MARKERS = frozenset({
     "小红书图文分析", "小红书视频分析", "抖音图文分析", "抖音视频分析",
     "B站视频分析", "B站图文分析", "内容分析", "未知标题", "文档标题",
 })
+
+
+def resolve_output_author_name(
+    *,
+    author_name: str = "",
+    extracted_metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """MD 产物元数据中的作者展示名（任务字段优先，其次 extracted_metadata）。"""
+    meta = extracted_metadata if isinstance(extracted_metadata, dict) else {}
+    name = str(author_name or "").strip()
+    if not name or is_generic_author_name(name):
+        for key in ("author_name", "author", "nickname", "up_name", "creator_name"):
+            v = str(meta.get(key) or "").strip()
+            if v and not is_generic_author_name(v):
+                name = v
+                break
+    return name or "未知"
 
 
 def resolve_effective_doc_title(
@@ -82,6 +99,8 @@ def render_output_template(
     transcribe_source: str = "",
     link_title: str = "",
     doc_title: str = "",
+    author_name: str = "",
+    extracted_metadata: Optional[Dict[str, Any]] = None,
     comments_section: str = "",
     comments_analysis: str = "",
     comments_file_link: str = "",
@@ -103,6 +122,10 @@ def render_output_template(
         content_type=content_type,
         summary=summary,
     )
+    eff_author = resolve_output_author_name(
+        author_name=author_name,
+        extracted_metadata=extracted_metadata if isinstance(extracted_metadata, dict) else {},
+    )
     ctx = {
         "platform": platform,
         "link": link,
@@ -115,6 +138,8 @@ def render_output_template(
         "transcribe_source": (transcribe_source or "").strip() or "unknown",
         "link_title": link_title,
         "doc_title": effective_title,
+        "author_name": eff_author,
+        "author": eff_author,
         "comments_section": (comments_section or "").strip(),
         "comments_analysis": (comments_analysis or "").strip(),
         "comments_file_link": (comments_file_link or "").strip(),
@@ -139,6 +164,8 @@ def _detect_platform_from_link(link: str, platform: str = "") -> str:
         return "抖音"
     if "bilibili.com" in low or "b23.tv" in low:
         return "B站"
+    if "mp.weixin.qq.com" in low:
+        return "微信"
     return ""
 
 
@@ -354,6 +381,49 @@ def _extract_author_from_html(html: str, platform: str) -> Tuple[str, str]:
                         author_id = str(user.get("userId") or user.get("id") or user.get("user_id") or "")
                         if author_name:
                             break
+        elif platform == "抖音":
+            import re as _re
+            import json as _json
+            for pat in (
+                r"window\._SSR_HYDRATED_DATA\s*=\s*(\{.+?\})\s*</script>",
+                r"_SSR_HYDRATED_DATA\s*=\s*(\{.+?\});",
+            ):
+                m = _re.search(pat, html, _re.DOTALL)
+                if not m:
+                    continue
+                try:
+                    data = _json.loads(m.group(1))
+                except Exception:
+                    continue
+                video_info = (data.get("app") or {}).get("videoInfo") or {}
+                author_info = video_info.get("authorInfo") or {}
+                author_name = str(author_info.get("nickname") or author_info.get("name") or "")
+                author_id = str(
+                    author_info.get("secUid")
+                    or author_info.get("sec_uid")
+                    or author_info.get("uid")
+                    or author_info.get("userId")
+                    or ""
+                )
+                if author_name and not is_generic_author_name(author_name):
+                    break
+        elif platform == "B站":
+            import re as _re
+            import json as _json
+            m = _re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});", html, _re.DOTALL)
+            if m:
+                try:
+                    state = _json.loads(m.group(1).replace("undefined", "null"))
+                except Exception:
+                    state = {}
+                video_data = (state.get("videoData") or {}).get("data") or {}
+                owner = video_data.get("owner") or {}
+                author_name = str(owner.get("name") or "")
+                author_id = str(owner.get("mid") or "")
+            if not author_id:
+                m2 = _re.search(r'"mid"\s*:\s*(\d+)', html)
+                if m2:
+                    author_id = m2.group(1)
     except Exception:
         pass
     if not author_name:

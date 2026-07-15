@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # 每条：code、匹配模式、分析、给 AI 的执行方案（可直接粘贴给 Cursor Agent）
 EXCEPTION_CATALOG: List[Dict[str, Any]] = [
     {
-        "code": "PIPE_EXECUTOR_SHUTDOWN",
+        "code": "K1002",
         "category": "pipeline",
         "severity": "high",
         "title": "流水线 executor 已 shutdown",
-        "patterns": [r"shutdown", r"cannot schedule new futures", r"interpreter shutdown"],
+        "patterns": [r"K1002", r"shutdown", r"cannot schedule new futures", r"interpreter shutdown"],
         "analysis": "短脚本 asyncio.run 结束后线程池被关闭，但仍有流水线任务在投递；或后端进程正在退出时仍有任务入队。",
         "proposal_md": (
             "## 目标\n修复「cannot schedule new futures after shutdown」导致的批量入队失败。\n\n"
@@ -25,11 +25,65 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "VIDEO_DOWNLOAD_FAIL",
+        "code": "T1012",
+        "category": "transcribe",
+        "severity": "high",
+        "title": "PyTorch 损坏 / torch._C DLL 加载失败",
+        "patterns": [
+            r"T1012",
+            r"transcribe_torch_dll_failed",
+            r"transcribe_pytorch_broken",
+            r"DLL load failed.*_C",
+            r"importing _C",
+            r"~orch",
+            r"torch/__init__\.py",
+            r"torch 无 __version__",
+        ],
+        "analysis": (
+            "Whisper 依赖 PyTorch 原生扩展 torch._C。常见原因：pip 升级/卸载中断导致 site-packages 出现 ~orch 残留、"
+            "torch/__init__.py 丢失，或 Windows 未加载 torch/lib 下 DLL。"
+        ),
+        "proposal_md": (
+            "## 目标\n恢复视频 Whisper 转写能力。\n\n"
+            "## 步骤\n"
+            "1. 停止后端 uvicorn，避免占用 torch 文件。\n"
+            "2. 执行 `python backend/scripts/fix_torch_env.py`（清理 ~orch 残留并重装 CPU 版 torch 2.5.1）。\n"
+            "3. 验证：`python -c \"import torch; import whisper; print(torch.__version__)\"`。\n"
+            "4. 重启后端，确认启动日志 Whisper 池 warmup 完成（core=4）。\n"
+            "5. 对失败视频任务 `POST /api/history/restart`，action=resume，从 transcribe 断点恢复。\n\n"
+            "## 验收\n"
+            "- 转写 SPAN status=completed；error_code 不再出现 T1012/T1003 DLL。\n"
+            "- ops 报告 failure_match_source=pattern_message，error_code=T1012（若仍失败）。"
+        ),
+    },
+    {
+        "code": "T1001",
+        "category": "transcribe",
+        "severity": "high",
+        "title": "ffmpeg/ffprobe 缺失导致 Whisper 无法转写",
+        "patterns": [
+            r"T1001",
+            r"transcribe_ffmpeg_missing",
+            r"找不到 ffmpeg",
+            r"ffprobe",
+        ],
+        "analysis": "本机未安装 ffmpeg/ffprobe 或未加入 PATH，Whisper 无法从视频抽取音轨。",
+        "proposal_md": (
+            "## 目标\n恢复视频语音转文字能力。\n\n"
+            "## 步骤\n"
+            "1. 安装 ffmpeg（Windows 可用 `winget install Gyan.FFmpeg` 或下载 zip 解压）。\n"
+            "2. 将 `ffmpeg.exe` / `ffprobe.exe` 所在目录加入系统 PATH。\n"
+            "3. 新开终端执行 `ffmpeg -version` 与 `ffprobe -version` 确认可用。\n"
+            "4. 重启后端，对失败任务执行「重新执行」或 `POST /api/history/rerun`。\n\n"
+            "## 验收\n- 转写阶段 SPAN status=completed；无 transcribe_ffmpeg_missing。"
+        ),
+    },
+    {
+        "code": "V1003",
         "category": "pipeline",
         "severity": "high",
         "title": "视频下载失败",
-        "patterns": [r"下载.*失败", r"download.*fail", r"yt-dlp", r"VideoDownload.*ERROR"],
+        "patterns": [r"V1003", r"下载.*失败", r"download.*fail", r"yt-dlp", r"VideoDownload.*ERROR"],
         "analysis": "小红书视频链过期、Cookie/Referer 无效、yt-dlp 超时或视频过长导致下载中断。",
         "proposal_md": (
             "## 目标\n恢复失败视频链接的下载与转写。\n\n"
@@ -42,11 +96,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "MILVUS_RAG_DOWN",
+        "code": "R1001",
         "category": "rag",
         "severity": "high",
         "title": "Milvus / RAG 向量库不可用",
-        "patterns": [r"Milvus", r"milvus", r"RAG.*失败", r"vector.*connect", r"UNAVAILABLE"],
+        "patterns": [r"R1001", r"Milvus", r"milvus", r"RAG.*失败", r"vector.*connect", r"UNAVAILABLE"],
         "analysis": "Docker 中 Milvus 未启动或反复崩溃，导致 RAG 检索与问答降级。",
         "proposal_md": (
             "## 目标\n恢复 RAG 向量检索。\n\n"
@@ -59,11 +113,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "PIPE_INVALID_INPUT_EMPTY",
+        "code": "P1001",
         "category": "pipeline",
         "severity": "medium",
         "title": "正文/输入为空",
-        "patterns": [r"PIPE_INVALID_INPUT_EMPTY", r"正文提取失败", r"内容为空", r"无效占位"],
+        "patterns": [r"P1001", r"PIPE_INVALID_INPUT_EMPTY", r"正文提取失败", r"内容为空", r"无效占位"],
         "analysis": "纯图笔记、无正文或页面结构变化导致 normalize 阶段无有效文本，不应无限重试。",
         "proposal_md": (
             "## 目标\n将纯图/无正文笔记标记为 skip，避免批次 gate 反复重跑。\n\n"
@@ -75,11 +129,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "BARE_XHS_LINK",
+        "code": "S1004",
         "category": "subscription",
         "severity": "medium",
         "title": "小红书裸链缺 xsec_token",
-        "patterns": [r"xsec_token", r"裸链", r"bare_explore"],
+        "patterns": [r"S1004", r"xsec_token", r"裸链", r"bare_explore"],
         "analysis": "主页摘录只有 noteId，未通过点击卡片补全 token，入队会被跳过或下载失败。",
         "proposal_md": (
             "## 目标\n补全 seen 表中裸 explore 链接的 xsec_token。\n\n"
@@ -91,11 +145,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "XHS_LOGIN_COOKIE",
+        "code": "S1005",
         "category": "subscription",
         "severity": "high",
         "title": "小红书登录/Cookie 失效",
-        "patterns": [r"登录", r"LOGIN", r"GUEST", r"Cookie", r"未登录", r"auth.*fail"],
+        "patterns": [r"S1005", r"登录", r"LOGIN", r"GUEST", r"Cookie", r"未登录", r"auth.*fail"],
         "analysis": "Cookie 过期或未绑定，导致拉取主页/收藏夹/下载失败。",
         "proposal_md": (
             "## 目标\n恢复小红书登录态。\n\n"
@@ -107,11 +161,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "CHAT_BACKEND_TIMEOUT",
+        "code": "C1001",
         "category": "chat",
         "severity": "medium",
         "title": "AI 问答后端超时",
-        "patterns": [r"连接.*失败", r"timeout", r"超时", r"8000.*无响应"],
+        "patterns": [r"C1001", r"连接.*失败", r"timeout", r"超时", r"8000.*无响应"],
         "analysis": "uvicorn 未启动、预热阻塞、Milvus/MCP 探测并发过高导致首包超时。",
         "proposal_md": (
             "## 目标\n恢复 AI 问答 SSE 连接。\n\n"
@@ -123,11 +177,11 @@ EXCEPTION_CATALOG: List[Dict[str, Any]] = [
         ),
     },
     {
-        "code": "SUB_DB_UNAVAILABLE",
+        "code": "I1001",
         "category": "subscription",
         "severity": "high",
         "title": "订阅库 MariaDB 不可用",
-        "patterns": [r"SBA_DATABASE_URL", r"SUB_DB_UNAVAILABLE", r"pymysql", r"Can't connect to MySQL"],
+        "patterns": [r"I1001", r"SBA_DATABASE_URL", r"SUB_DB_UNAVAILABLE", r"pymysql", r"Can't connect to MySQL"],
         "analysis": "MariaDB 未启动或连接串错误，订阅/定时任务无法读写。",
         "proposal_md": (
             "## 目标\n恢复 MariaDB 连接。\n\n"
@@ -185,6 +239,32 @@ def list_exception_catalog() -> Dict[str, Any]:
 
 def get_proposal_for_error(error_message: str, context: str = "") -> Dict[str, Any]:
     blob = f"{context}\n{error_message}"
+    try:
+        from .ops_error_classifier import classify_task_failure
+
+        cls = classify_task_failure(error_message=error_message, stage=context)
+        if cls.get("error_code") and cls.get("error_code") not in ("Z9999",):
+            matches = match_exceptions(f"{cls['error_code']} {cls['error_message']} {blob}")
+            if not matches:
+                matches = [
+                    {
+                        "code": cls["error_code"],
+                        "category": cls.get("category"),
+                        "severity": cls.get("severity"),
+                        "title": cls.get("title"),
+                        "analysis": cls.get("error_message"),
+                        "proposal_md": "",
+                    }
+                ]
+            return {
+                "ok": True,
+                "error_message": (error_message or "")[:2000],
+                "matches": matches,
+                "primary": matches[0] if matches else None,
+                "classification": cls,
+            }
+    except Exception:
+        pass
     matches = match_exceptions(blob)
     return {
         "ok": True,

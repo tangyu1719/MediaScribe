@@ -1,6 +1,7 @@
 """阅读器 Agent 会话存储：内存为主，JSON 落盘（一文档一会话）。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -32,6 +33,16 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def stable_doc_id_from_name(doc_name: str) -> str:
+    """与前端 reader_agent.js 一致：按 output 文件名稳定生成 doc_id。"""
+    name = (doc_name or "").strip()
+    if not name:
+        return "unknown"
+    base = Path(name).name
+    raw = f"sba-reader-doc|{base}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _empty_session(doc_id: str, doc_name: str = "") -> Dict[str, Any]:
     return {
         "doc_id": doc_id,
@@ -61,6 +72,63 @@ def load_from_disk(doc_id: str) -> Optional[Dict[str, Any]]:
             ex,
         )
         return None
+
+
+def find_best_session_by_doc_name(doc_name: str) -> Optional[Dict[str, Any]]:
+    """按 doc_name 在落盘目录中找消息最多的会话（兼容旧 content-hash doc_id）。"""
+    name = Path((doc_name or "").strip()).name
+    if not name:
+        return None
+    best: Optional[Dict[str, Any]] = None
+    best_n = -1
+    _ensure_dir()
+    for p in _STORE_DIR.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            if Path(str(data.get("doc_name") or "")).name != name:
+                continue
+            n = len(data.get("messages") or [])
+            if n > best_n:
+                best_n = n
+                best = data
+        except Exception:
+            continue
+    return best
+
+
+def lookup_session_for_file(doc_name: str) -> Dict[str, Any]:
+    """打开 MD 时解析会话：优先文件名稳定 id，必要时从旧 id 迁移。"""
+    base = Path((doc_name or "").strip()).name
+    if not base:
+        return _empty_session("unknown", doc_name)
+    primary_id = stable_doc_id_from_name(base)
+    row = get_session(primary_id, doc_name=base)
+    msgs = row.get("messages") or []
+    if msgs:
+        return row
+    legacy = find_best_session_by_doc_name(base)
+    if not legacy or not (legacy.get("messages") or []):
+        return row
+    legacy_id = str(legacy.get("doc_id") or "").strip()
+    if legacy_id and legacy_id != primary_id:
+        upsert_session(
+            primary_id,
+            doc_name=base,
+            messages=legacy.get("messages") or [],
+            prefs=legacy.get("prefs") if isinstance(legacy.get("prefs"), dict) else None,
+        )
+        flush_session(primary_id)
+        _LOG.info(
+            "[文本阅读-会话|reader_session_store.lookup_session_for_file|%s|硬编执行|迁移] "
+            "ok=true; from=%s; messages=%s",
+            base,
+            legacy_id,
+            len(legacy.get("messages") or []),
+        )
+        return get_session(primary_id, doc_name=base)
+    return legacy
 
 
 def get_session(doc_id: str, *, doc_name: str = "") -> Dict[str, Any]:

@@ -14,7 +14,7 @@ _LINK_DOC_KW = (
     "链接文档", "文档化", "读取评论", "读评论", "抓评论", "评论抓取",
     "评论区", "爬虫", "抓取", "转写", "开始处理", "流水线",
 )
-_SOCIAL_KW = ("小红书", "xhs", "抖音", "douyin", "b站", "bilibili", "笔记", "explore")
+_SOCIAL_KW = ("小红书", "xhs", "抖音", "douyin", "b站", "bilibili", "笔记", "explore", "微信", "公众号")
 
 
 def extract_http_urls(text: str) -> List[str]:
@@ -30,14 +30,56 @@ def extract_http_urls(text: str) -> List[str]:
 
 
 def platform_from_url(url: str) -> str:
+    """从 URL 识别平台；未知域名返回空字符串（禁止默认小红书）。"""
     low = (url or "").lower()
     if "xiaohongshu.com" in low or "xhslink.com" in low:
         return "小红书"
-    if "douyin.com" in low:
+    if "douyin.com" in low or "iesdouyin" in low:
         return "抖音"
     if "bilibili.com" in low or "b23.tv" in low:
         return "B站"
+    if "mp.weixin.qq.com" in low:
+        return "微信公众号"
+    if "zhihu.com" in low:
+        return "知乎"
+    if "github.com" in low:
+        return "GitHub"
+    parsed = urlparse(low)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return "通用网页"
     return ""
+
+
+def resolve_task_platform(link: str, explicit: str = "") -> str:
+    """任务入队平台：显式指定 > URL 识别 > 通用网页。"""
+    plat = (explicit or "").strip()
+    if plat in ("微信", "WeChat", "wechat", "WECHAT"):
+        plat = "微信公众号"
+    if plat:
+        return plat
+    from_url = platform_from_url(link)
+    return from_url or "通用网页"
+
+
+def is_web_article_link(url: str) -> bool:
+    """是否应走 HTML 文章链路（非 yt-dlp 视频下载）。"""
+    from .web_article_fetch import is_web_article_url
+
+    return is_web_article_url(url)
+
+
+def pipeline_route_hint(url: str) -> str:
+    """根据 URL 给出推荐 pipeline_route（供日志/诊断）。"""
+    low = (url or "").lower()
+    if "xiaohongshu.com" in low or "xhslink.com" in low:
+        return "xiaohongshu_graphic|video"
+    if "douyin.com" in low or "iesdouyin" in low:
+        return "douyin_graphic|video"
+    if is_web_article_link(url):
+        return "web_article"
+    if "bilibili.com" in low or "b23.tv" in low:
+        return "video"
+    return "video|web_article"
 
 
 def extract_xhs_numeric_id(text: str) -> Optional[str]:
@@ -72,7 +114,6 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
     only_xhs_id = bool(xhs_id) and not urls and has_social_kw
     link_doc_relevant = bool(urls) or only_xhs_id or (has_social_kw and (has_link_doc_kw or wants_comments or wants_crawl))
 
-    # 评论抓取：用户勾选 read_comments 或话术含「评论」时在流水线内抓取；不在路由层单独跑 scrape
     run_comment_scrape = False
     doc_intent = bool(
         wants_pipeline or wants_crawl or has_link_doc_kw or read_comments or wants_comments
@@ -92,7 +133,7 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
     elif link_doc_relevant and not urls and (wants_comments or wants_crawl):
         guidance = (
             "当前话术属于链接文档化/评论抓取，但未检测到 http(s) 链接。"
-            "请粘贴小红书/B站/抖音作品链接（小红书需带 xsec_token）。"
+            "请粘贴小红书/B站/抖音/微信公众号作品链接（小红书需带 xsec_token）。"
         )
 
     return {
@@ -107,6 +148,7 @@ def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dic
         "guidance": guidance,
         "wants_comments": wants_comments,
         "read_comments": read_comments,
+        "pipeline_route_hint": pipeline_route_hint(urls[0]) if urls else "",
     }
 
 
@@ -123,12 +165,11 @@ async def enqueue_link_pipeline_from_chat(
     if not link_ctx.get("run_link_pipeline") or not link_ctx.get("urls"):
         return {"ok": False, "reason": "no_auto_start"}
     url = str(link_ctx["urls"][0]).strip()
-    plat = (link_ctx.get("platform") or "").strip() or platform_from_url(url) or "未知"
+    plat = resolve_task_platform(url, str(link_ctx.get("platform") or ""))
     try:
         from .pipeline_comments import normalize_comments_count
         from .task_manager import reuse_or_enqueue_task, add_log
         from .task_source_meta import SOURCE_CHAT, source_meta_kwargs
-        from .video_pipeline import process_video_pipeline
         import asyncio
 
         count = normalize_comments_count(comment_count, default=10)
@@ -149,7 +190,7 @@ async def enqueue_link_pipeline_from_chat(
         add_log(
             tid,
             f"[链接文档化-对话自动启流水线|link_doc_routing.enqueue_link_pipeline_from_chat|{url}|Agent执行|提交] "
-            f"read_comments={read_comments}; count={comments_cfg['count']}; reused={reused}",
+            f"read_comments={read_comments}; count={comments_cfg['count']}; reused={reused}; route_hint={pipeline_route_hint(url)}",
         )
 
         from .pipeline_scheduler import request_video_pipeline_async

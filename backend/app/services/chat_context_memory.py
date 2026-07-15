@@ -561,6 +561,32 @@ def persist_normalized_session_document(session_id: str, doc: Dict[str, Any]) ->
     return normalized
 
 
+def maybe_migrate_session_document_async(session_id: str) -> None:
+    """后台瘦身超大/含全量 IO 的会话，不阻塞 GET 首屏。"""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    doc = get_session_document(sid)
+    if not doc:
+        return
+    normalized, changed = normalize_session_document_for_storage(doc)
+    if changed or session_document_has_full_orchestration_io(doc):
+        try:
+            persist_normalized_session_document(sid, normalized)
+            _log.info(
+                "[AI问答-会话读|chat_context_memory.maybe_migrate_session_document_async|session:%s|硬编执行|后台瘦身] ok=true",
+                sid,
+            )
+        except Exception as ex:
+            _log.warning(
+                "[AI问答-会话读|chat_context_memory.maybe_migrate_session_document_async|session:%s|硬编执行|后台瘦身] "
+                "ok=false; error_type=%s; error_message=%s",
+                sid,
+                type(ex).__name__,
+                str(ex)[:200],
+            )
+
+
 def context_usage(
     doc: Optional[Dict[str, Any]],
     *,

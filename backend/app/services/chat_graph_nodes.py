@@ -409,6 +409,13 @@ def _orch_enabled(runtime: ChatGraphRuntime, node_id: str) -> bool:
     return orch_node_enabled(getattr(runtime, "orch_pipeline_nodes", None), node_id)
 
 
+def _orch_rag_filter_hitl(runtime: ChatGraphRuntime) -> bool:
+    """标准 RAG：从 Query 自动推导筛选；复杂问题：需用户 HITL 确认。"""
+    if not _orch_enabled(runtime, "rag_filter_confirm"):
+        return False
+    return _orch_enabled(runtime, "rag_filter_confirm_hitl")
+
+
 def _skip_orch_step(
     runtime: ChatGraphRuntime,
     state: Dict[str, Any],
@@ -2037,7 +2044,7 @@ async def node_rewrite_summary(state: Dict[str, Any], config: RunnableConfig) ->
         "rewritten_query": rewritten,
         "query_summary": query_summary,
         "rewrite_actions": actions,
-        "graph_route": "slot_fill",
+        "graph_route": "rewrite_confirm" if _orch_enabled(runtime, "rewrite_confirm") else "slot_fill",
         "group_seq": seq.get("group_seq"),
         "orch_chain": seq.get("orch_chain", []),
         "orch_kb_fast_lane": orch_kb_fast_lane,
@@ -2560,6 +2567,35 @@ async def node_rag_filter_confirm_ui(state: Dict[str, Any], config: RunnableConf
         slot_snapshot=slot,
         enhancement_snapshot=state.get("enhancement_snapshot") or {},
     )
+    filt = dict(proposal.get("filter") or {})
+
+    # 标准 RAG：仅由 Query 自动推导元数据筛选，不弹 HITL
+    if not _orch_rag_filter_hitl(runtime):
+        _emit_orchestration_step(
+            runtime,
+            state,
+            trace_id=state.get("trace_id") or runtime.trace_id,
+            task_id=state.get("task_id") or "",
+            step_name="RAG 元数据筛选",
+            phase="rag_filter",
+            result_brief="已根据 Query 自动推导知识库筛选条件",
+            input_payload={"query": str(query)[:500], "auto": True},
+            output_payload={
+                "rag_metadata_filter": filt,
+                "extracted_terms": proposal.get("extracted_terms") or [],
+                "auto_applied": True,
+            },
+            executed=True,
+            llm_powered=False,
+        )
+        return {
+            "rag_metadata_filter": filt,
+            "rag_filter_confirmed": True,
+            "orchestration_phase": PHASE_SLOT_CONFIRM,
+            "graph_route": "rag_decision",
+            **_sse_events_from_runtime(runtime),
+        }
+
     payload = {
         "kind": "rag_filter_confirm",
         "query": query,
@@ -2720,6 +2756,8 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
     rag_hits: List[Dict[str, Any]] = []
     rag_err = ""
     rag_query = ""
+    meta_filt_applied: Dict[str, str] = dict(meta_filt) if meta_filt else {}
+    filter_degraded = False
     if needs and task_id:
         from .web_search_plan import build_rag_retrieve_query
 
@@ -2756,13 +2794,33 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
             },
             metadata_filter=meta_filt or None,
         )
+        # 降级策略 #1：元数据硬筛召回为 0 时去掉筛选重试
+        if meta_filt and not rag_err and not rag_hits:
+            filter_degraded = True
+            _LOG.info(
+                "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|筛选降级] "
+                "metadata_filter=%s; retry_without_filter=true",
+                session_id,
+                meta_filt_applied,
+            )
+            rag_hits, rag_err = await _safe_kb_search(
+                str(rag_query).strip(),
+                top_k=5,
+                span_ctx={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "trace_id": trace_id,
+                },
+                metadata_filter=None,
+            )
         _LOG.info(
             "[AI问答-LangGraph|chat_graph_nodes.node_rag_decision|session:%s|硬编执行|预取] "
-            "ok=%s; hit_count=%s; cost_ms=%s; error=%s",
+            "ok=%s; hit_count=%s; cost_ms=%s; filter_degraded=%s; error=%s",
             session_id,
             not rag_err,
             len(rag_hits),
             int((time.perf_counter() - t0) * 1000),
+            filter_degraded,
             (rag_err or "")[:120],
         )
 
@@ -2792,7 +2850,8 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
         "rag_query": str(rag_query)[:300],
         "prefetch_count": len(rag_hits),
         "prefetch_error": rag_err[:300] if rag_err else "",
-        "metadata_filter": meta_filt if needs else {},
+        "metadata_filter": meta_filt_applied if needs else {},
+        "metadata_filter_degraded": filter_degraded,
         "rag_slices": rag_slices,
         "citation_instruction": rag_cite_block,
     }
@@ -2807,7 +2866,10 @@ async def node_rag_decision(state: Dict[str, Any], config: RunnableConfig) -> Di
             step_name="RAG 决策",
             phase="rag_decision",
             result_brief=(
-                f"需要检索，已预取 {len(rag_hits)} 条"
+                (
+                    f"需要检索，已预取 {len(rag_hits)} 条"
+                    + ("（元数据筛选无结果，已去掉筛选重试）" if filter_degraded else "")
+                )
                 if not rag_err
                 else "需要检索（预取失败）"
             ),

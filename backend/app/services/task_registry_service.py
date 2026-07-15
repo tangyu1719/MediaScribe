@@ -39,6 +39,8 @@ def _mysql_info() -> Dict[str, bool]:
 
 def _classify_kind(task_id: str, task: Dict[str, Any]) -> str:
     tid = (task_id or "").strip()
+    if tid.startswith("fleet_") or str(task.get("task_kind") or "") == "fleet":
+        return "fleet"
     if tid.startswith("task_"):
         return "main"
     try:
@@ -332,7 +334,7 @@ def _apply_filters(
 
     out: List[Dict[str, Any]] = []
     for r in rows:
-        if kind_f in ("main", "pipeline") and r.get("task_kind") != kind_f:
+        if kind_f in ("main", "pipeline", "fleet") and r.get("task_kind") != kind_f:
             continue
         if sid_f and str(r.get("session_id") or "") != sid_f:
             continue
@@ -411,7 +413,21 @@ def query_task_registry(
     for row in _collect_pipeline_runtime(limit=limit):
         _ingest(row)
 
-    # 4) MySQL 补全（仅补充热层没有的 task_id）
+    # 4) 多 Agent 舰队会话（agent_fleet store）
+    try:
+        from .agent_fleet_service import collect_fleet_registry_rows
+
+        for row in collect_fleet_registry_rows(limit=limit):
+            _ingest(row)
+    except Exception as ex:
+        _log.info(
+            "[任务中心-查询|task_registry_service.query_task_registry|fleet|硬编执行|跳过] "
+            "失败; error_type=%s; error_message=%s",
+            type(ex).__name__,
+            str(ex)[:120],
+        )
+
+    # 5) MySQL 补全（仅补充热层没有的 task_id）
     mysql_mains, mysql_pipes = _collect_mysql_supplement(limit=limit)
     for row in mysql_mains + mysql_pipes:
         tid = str(row.get("task_id") or "")
@@ -449,6 +465,7 @@ def query_task_registry(
         "stats": {
             "main": sum(1 for r in rows if r.get("task_kind") == "main"),
             "pipeline": sum(1 for r in rows if r.get("task_kind") == "pipeline"),
+            "fleet": sum(1 for r in rows if r.get("task_kind") == "fleet"),
             "redis_present_count": redis_n,
             "mysql_synced_count": mysql_n,
         },

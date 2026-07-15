@@ -12,6 +12,7 @@ _LOG = logging.getLogger("sba.chat_tools")
 # 与 builtin_tools.list_builtin_tools 对齐的 function 名映射（AI 对话实际可调用名）
 _BUILTIN_ID_TO_FN = {
     "tool_link_pipeline": "link_pipeline_start",
+    "tool_video_visual_extract": "video_visual_extract",
     "tool_rag_search": "rag_search",
     "tool_rag_index": "rag_search",
     "tool_comment_scraper": "scrape_comments",
@@ -195,6 +196,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         read_comments_flag: bool = False,
         comment_count: int = 10,
         comment_sort: str = "hot",
+        video_transcript_mode: str = "audio_only",
     ) -> str:
         from .task_manager import reuse_or_enqueue_task, add_log
         from .video_pipeline import process_video_pipeline
@@ -224,10 +226,15 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         count = normalize_comments_count(comment_count, default=10) if rc else 10
         sort = (comment_sort or "hot").strip() or "hot"
         comments_cfg = {"enabled": rc, "count": count, "sort": sort}
+        from .video_visual.link_transcript import normalize_video_transcript_mode
+
+        vt_mode = normalize_video_transcript_mode(video_transcript_mode)
+        pipe_opts = {"video_transcript_mode": vt_mode}
         tid, reused, _ = reuse_or_enqueue_task(
             plat, url, user_prompt=user_prompt[:500], comments=comments_cfg, action="start",
+            pipeline_options=pipe_opts,
         )
-        add_log(tid, f"AI 工具 link_pipeline_start: {url}; read_comments={rc}; reused={reused}")
+        add_log(tid, f"AI 工具 link_pipeline_start: {url}; read_comments={rc}; video_transcript_mode={vt_mode}; reused={reused}")
         from .pipeline_scheduler import request_video_pipeline_async
 
         asyncio.create_task(request_video_pipeline_async(tid))
@@ -238,16 +245,62 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
             "reused": reused,
             "platform": plat,
             "read_comments": rc,
+            "video_transcript_mode": vt_mode,
             "hint": "在链接文档化页查看任务进度与 MD/HTML 产出",
         })
+
+    async def video_visual_extract(
+        link: str,
+        video_transcript_mode: str = "visual_frames",
+        include_audio: bool = False,
+    ) -> str:
+        """单链视频→原文（不跑完整沉淀）；适合课件/PPT 快速抽画面文字。"""
+        from .video_visual.link_transcript import extract_video_transcript_for_pipeline, normalize_video_transcript_mode
+        from .video_visual.common import download_video_for_visual
+
+        url = (link or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return _json_result({"ok": False, "error": "link 须为 http(s) URL"})
+        mode = normalize_video_transcript_mode(video_transcript_mode)
+        if include_audio and mode == "visual_frames":
+            mode = "hybrid"
+        path = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: download_video_for_visual(url),
+        )
+        if not path:
+            return _json_result({"ok": False, "error": "视频下载失败", "url": url})
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: extract_video_transcript_for_pipeline(path, mode, strict_whisper=False),
+        )
+        plain = (result.get("full_text") or result.get("transcript") or "").strip()
+        return _json_result({
+            "ok": bool(result.get("ok") and plain),
+            "url": url,
+            "video_transcript_mode": mode,
+            "plain_text_len": len(plain),
+            "plain_text_preview": plain[:2000],
+            "visual_segment_count": result.get("visual_segment_count"),
+            "coverage_score": result.get("coverage_score"),
+            "error_code": result.get("error_code"),
+            "error_message": result.get("error_message"),
+        })
+
+    tools.append(StructuredTool.from_function(
+        coroutine=video_visual_extract,
+        name="video_visual_extract",
+        description=(
+            "从视频链接提取原文生文（画面 OCR / 音频 / 混合），不进入完整 MD 沉淀流水线。"
+            "video_transcript_mode: audio_only | visual_frames | hybrid。课件/PPT 请用 visual_frames。"
+        ),
+    ))
 
     tools.append(StructuredTool.from_function(
         coroutine=link_pipeline_start,
         name="link_pipeline_start",
         description=(
-            "提交链接文档化流水线（转写/图文/MD/HTML）。"
-            "仅当当前主任务尚无同链接流水线时调用；"
-            "用户追问进度/缓存/「好了吗」时禁止调用，应改用 cache_query。"
+            "提交视频/图文链接，服务端执行下载、转写、摘要与 Markdown/HTML 产出。"
+            "video_transcript_mode: audio_only 仅 Whisper；visual_frames 智能画面 OCR；hybrid 音频+画面。"
             "read_comments_flag 仅在为 true 时读取评论；comment_count 可选 10/20/50/0(全量)，默认 10。"
         ),
     ))
@@ -706,6 +759,17 @@ def build_skill_chat_tools() -> List[Any]:
                     from .board_usage_stats import record_skill_invoke
 
                     record_skill_invoke(skill_id)
+                except Exception:
+                    pass
+                try:
+                    from .skill_usage_archive_service import record_skill_usage_start
+
+                    record_skill_usage_start(
+                        skill_id=skill_id,
+                        skill_name=str(row.get("name") or ""),
+                        user_request=(user_request or "")[:2000],
+                        trigger="invoke",
+                    )
                 except Exception:
                     pass
                 body = (row.get("body_md") or "").strip()

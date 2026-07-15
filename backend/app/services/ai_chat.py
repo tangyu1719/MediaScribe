@@ -1224,6 +1224,7 @@ async def chat_stream_v2(
     client_main_task_history: Optional[List] = None,
     memory_prepared: Optional[Dict[str, Any]] = None,
     orch_pipeline_nodes: Optional[Dict[str, Any]] = None,
+    orch_pipeline_scheme: Optional[str] = None,
 ):
     """完整 SSE 流（默认 LangGraph 编排；handoff 时 _langgraph_orchestration_done=True）。"""
     graph_boot = graph_execution_boot if graph_execution_boot is not None else pop_graph_execution_bootstrap()
@@ -1330,6 +1331,7 @@ async def chat_stream_v2(
                 client_main_task_history=client_main_task_history,
                 memory_prepared=memory_prepared,
                 orch_pipeline_nodes=orch_pipeline_nodes,
+                orch_pipeline_scheme=orch_pipeline_scheme,
                 _precomputed={
                     "cfg": cfg,
                     "provider": provider,

@@ -400,7 +400,7 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
     doc_name = (title or "抖音内容").strip()
     transcribe_source = (result_data.get("transcribe_source") or "").strip() or "link_analyzer"
     naming_rule = (cfg.get("file_naming_rule") or "").strip()
-    from .file_naming import build_output_md_path, render_output_template
+    from .file_naming import build_output_md_path, render_output_template, resolve_output_author_name
     from .pipeline_comments import (
         append_comments_section_to_md,
         format_comments_file_link,
@@ -436,6 +436,8 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
         transcribe_source=transcribe_source,
         link_title=link_title,
         doc_title=title,
+        author_name=str(result_data.get("author_name") or "").strip(),
+        extracted_metadata=result_data.get("extracted_metadata") or {},
         comments_section=comments_section,
         comments_analysis=comments_viewpoint,
         comments_file_link=format_comments_file_link(comments_file_path),
@@ -451,6 +453,7 @@ def _generate_md(result_data: Dict, link: str, task_id: str, cfg: Optional[Dict]
 - 原始链接: {link}
 - 平台: 抖音
 - 类型: {content_type}
+- 作者: {resolve_output_author_name(author_name=str(result_data.get("author_name") or "").strip(), extracted_metadata=result_data.get("extracted_metadata") or {})}
 - 转写链路: {transcribe_source}
 
 ## 原始内容
@@ -516,6 +519,9 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
         # ── 节点2: OCR 补偿（仅 NOTE 类型） ──
         update_task(task_id, status="ocr", stage="OCR补偿", progress=40)
         result = await loop.run_in_executor(_io_executor(), lambda: _ocr_compensation(result, task_id))
+        from app.schemas.mm_document_resources import attach_link_external_resources
+
+        attach_link_external_resources(result, platform="抖音", source_link=link)
 
         # ── 节点3: 原文装配 ──
         update_task(task_id, status="assembling", stage="原文装配", progress=55)
@@ -552,6 +558,8 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
                     "_log_chain": "链接沉淀文档-抖音图文",
                     "_task_note": str(task_snap_pre.get("task_note") or ""),
                     "_task_keywords": str(task_snap_pre.get("task_keywords") or ""),
+                    "_task_meta_hints": task_snap_pre.get("task_meta_hints") or {},
+                    "_author_name": str(task_snap_pre.get("author_name") or ""),
                 },
                 stage_label="抖音图文沉淀",
                 comments_text=comments_text,
@@ -587,19 +595,27 @@ async def process_douyin_article_pipeline(task_id: str, user_prompt: str = "", c
         # ── 节点6: 生成 MD（参照原 generate_md 格式） ──
         update_task(task_id, status="generating", stage="生成Markdown", progress=90)
         task_snap_md = get_task(task_id) or {}
-        result_data = {
-            "ai_summary": ai_summary,
-            "article": consolidation.get("article", ""),
-            "title": title,
-            "link_title": link_title,
-            "comments_viewpoint": (consolidation.get("comments_viewpoint") or "").strip(),
-            "comments_file_path": str((task.get("comments") or {}).get("comments_file_path") or ""),
-            "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
-            "task_note": task_snap_md.get("task_note") or "",
-            "task_keywords": task_snap_md.get("task_keywords") or "",
-        }
+        from app.schemas.mm_document_resources import apply_resources_to_md_payload
+
+        result_data = apply_resources_to_md_payload(
+            {
+                "ai_summary": ai_summary,
+                "article": consolidation.get("article", ""),
+                "title": title,
+                "link_title": link_title,
+                "comments_viewpoint": (consolidation.get("comments_viewpoint") or "").strip(),
+                "comments_file_path": str((task.get("comments") or {}).get("comments_file_path") or ""),
+                "extracted_metadata": task_snap_md.get("extracted_metadata") or {},
+                "author_name": task_snap_md.get("author_name") or "",
+                "task_note": task_snap_md.get("task_note") or "",
+                "task_keywords": task_snap_md.get("task_keywords") or "",
+            },
+            result,
+            platform="抖音",
+            source_link=link,
+        )
         doc_path = await loop.run_in_executor(
-            _io_executor(), lambda: _generate_md(result_data, link, task_id, cfg=cfg))
+            _io_executor(), lambda rd=result_data: _generate_md(rd, link, task_id, cfg=cfg))
         if not doc_path:
             update_task(task_id, status="failed", error="文档生成失败")
             mark_failure_from_task(task_id, "文档生成失败", route="douyin_graphic", stage_id="generate_md")

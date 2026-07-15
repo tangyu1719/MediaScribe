@@ -49,8 +49,8 @@ IM_PLATFORMS: List[Dict[str, Any]] = [
         "id": "wechat",
         "name": "微信",
         "description": "个人微信接入（需第三方桥接，暂不推荐）",
-        "available": False,
-        "status": "coming_soon",
+        "available": True,
+        "status": "configure",
     },
 ]
 
@@ -422,41 +422,11 @@ async def im_robot_wechat_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _generate_im_reply(user_text: str, agent_key: str) -> str:
-    """调用 src/agent 统一网关生成短回复。"""
+    """调用统一 LLM 网关生成短回复。"""
     try:
-        import sys
-        from pathlib import Path
+        from .im_llm_reply import generate_im_short_reply
 
-        here = Path(__file__).resolve()
-        agent_dir = None
-        for p in here.parents:
-            cand = p / "src" / "agent"
-            if cand.is_dir():
-                agent_dir = cand
-                break
-        if agent_dir and str(agent_dir) not in sys.path:
-            sys.path.insert(0, str(agent_dir))
-        from provider_adapters import invoke_unified
-
-        system = (
-            "你是 IM 群聊助手，回复须简洁、可直接发送给同事。"
-            "优先给出可执行结论，避免冗长 markdown 标题。"
-        )
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: invoke_unified(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_text},
-                ],
-                task_type=agent_key,
-                max_tokens=800,
-            ),
-        )
-        if isinstance(result, dict):
-            return (result.get("content") or result.get("text") or "").strip()
-        return str(result or "").strip()
+        return generate_im_short_reply(user_text, scene="wechat")
     except Exception as exc:
         logger.warning(
             "[IM机器人-微信回复|im_robot._generate_im_reply|llm|Agent执行|失败] 生成失败; error=%s",
