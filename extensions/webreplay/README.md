@@ -6,8 +6,8 @@
 
 | 能力 | 说明 |
 |------|------|
-| 录制 | 真实 `click` / 表单 `change`，生成 CSS + XPath + 文本快照 |
-| 重放 | `element.click()` / 填表 + 事件，随机步间延迟，iframe `frameUrl` 切换 |
+| 录制 | 真实点击、输入、Enter/Escape、滚动，生成 URL + CSS + XPath + 文本快照 |
+| 重放 | 指针/鼠标点击、原生表单赋值、按键与滚动，按录制时间间隔执行，支持 iframe `frameUrl` 切换 |
 | 安全守护 | 支付/删除等敏感文案点击在重放时拒绝 |
 | API 线索 | `webRequest` + 页面内 `fetch/XHR` 劫持，保存 `apiHints` 供人工/Agent 参考 |
 | 定时 | `chrome.alarms` + 脚本 `schedule.timeOfDay`（`HH:mm`） |

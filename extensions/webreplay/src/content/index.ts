@@ -5,6 +5,7 @@ import {
   setModeInactive,
   setStepCount,
   startRecording,
+  stopRecordingAndFlush,
   stopRecordingUi,
 } from './recorder';
 import { abortReplay, isReplaying, runReplay } from './replayer';
@@ -67,16 +68,18 @@ function refreshState(): void {
   }).catch(() => stopRecordingUi());
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  switch (msg.type) {
+function installMessageListeners(): void {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    switch (msg.type) {
     case 'rec/start':
       startRecording(msg.name, msg.stepCount ?? 0);
       sendResponse({ ok: true });
       return false;
     case 'rec/stop':
-      stopRecordingUi();
-      sendResponse({ ok: true });
-      return false;
+      void stopRecordingAndFlush()
+        .then(() => sendResponse({ ok: true }))
+        .catch((e) => sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      return true;
     case 'rec/step-count':
       setStepCount(msg.count);
       sendResponse({ ok: true });
@@ -97,33 +100,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       abortReplay();
       sendResponse({ ok: true });
       return false;
-    default:
-      return false;
-  }
-});
+      default:
+        return false;
+    }
+  });
 
-window.addEventListener('message', (ev) => {
-  if (ev.source !== window) return;
-  const data = ev.data as { tag?: string; url?: string; method?: string; startedAt?: number; status?: number; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string };
-  if (data?.tag !== 'webreplay/fetch-response') return;
-  chrome.runtime.sendMessage({
-    type: 'rec/response-body',
-    url: data.url,
-    method: data.method,
-    startedAt: data.startedAt,
-    status: data.status,
-    bodyText: data.bodyText,
-    bodyTruncated: data.bodyTruncated,
-    bodyOmitted: data.bodyOmitted,
-  }).catch(() => {});
-});
+  window.addEventListener('message', (ev) => {
+    if (ev.source !== window) return;
+    const data = ev.data as { tag?: string; url?: string; method?: string; startedAt?: number; status?: number; contentType?: string; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string };
+    if (data?.tag !== 'webreplay/fetch-response') return;
+    chrome.runtime.sendMessage({
+      type: 'rec/response-body',
+      url: data.url,
+      method: data.method,
+      startedAt: data.startedAt,
+      status: data.status,
+      contentType: data.contentType,
+      bodyText: data.bodyText,
+      bodyTruncated: data.bodyTruncated,
+      bodyOmitted: data.bodyOmitted,
+    }).catch(() => {});
+  });
 
-document.addEventListener('__webreplay_refresh_state__', refreshState);
-document.addEventListener('__webreplay_abort_replay__', () => abortReplay());
+  document.addEventListener('__webreplay_refresh_state__', refreshState);
+  document.addEventListener('__webreplay_abort_replay__', () => abortReplay());
+}
 
 const w = window as Window & { __webreplay_content_initialized__?: boolean };
 if (!w.__webreplay_content_initialized__) {
   w.__webreplay_content_initialized__ = true;
+  installMessageListeners();
   attachRecorderListeners();
   injectFetchHook();
   setModeInactive();

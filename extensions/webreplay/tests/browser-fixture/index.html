@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WebReplay 事件录制回归</title>
+  <style>
+    body { max-width: 760px; margin: 32px auto; font: 16px/1.5 system-ui, sans-serif; }
+    label, button, [contenteditable] { display: block; margin: 12px 0; }
+    input, select, [contenteditable] { box-sizing: border-box; width: 360px; padding: 8px; }
+    [contenteditable], #scroll-box { border: 1px solid #aaa; }
+    #scroll-box { width: 360px; height: 100px; overflow: auto; }
+    #scroll-content { height: 420px; padding: 8px; background: linear-gradient(#fff,#dbeafe); }
+    #state { padding: 12px; background: #f3f4f6; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>WebReplay 事件录制回归</h1>
+  <form id="test-form">
+    <label>名称 <input id="name" name="name" autocomplete="off"></label>
+    <label><input id="enabled" type="checkbox"> 启用导出</label>
+    <label>格式
+      <select id="format"><option value="json">JSON</option><option value="csv">CSV</option></select>
+    </label>
+    <div id="note" contenteditable="true" role="textbox" aria-label="备注"></div>
+    <button id="submit" type="submit">应用设置</button>
+  </form>
+  <div id="scroll-box"><div id="scroll-content">滚动到容器底部</div></div>
+  <button id="export" type="button">导出结果</button>
+  <pre id="state">{"submits":0,"exports":0}</pre>
+  <script>
+    const state = { submits: 0, exports: 0 };
+    const render = () => {
+      document.querySelector('#state').textContent = JSON.stringify({
+        name: document.querySelector('#name').value,
+        enabled: document.querySelector('#enabled').checked,
+        format: document.querySelector('#format').value,
+        note: document.querySelector('#note').textContent,
+        scrollY: document.querySelector('#scroll-box').scrollTop,
+        ...state,
+      });
+    };
+    document.querySelector('#test-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      state.submits += 1;
+      render();
+    });
+    document.querySelector('#export').addEventListener('click', () => {
+      state.exports += 1;
+      render();
+      const blob = new Blob([document.querySelector('#state').textContent], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'webreplay-regression.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
+    render();
+  </script>
+</body>
+</html>

@@ -65,7 +65,8 @@ async function refresh(): Promise<void> {
     runBtn.className = 'primary';
     runBtn.onclick = async () => {
       try {
-        await chrome.runtime.sendMessage({ type: 'script/run', id: s.id });
+        const result = await chrome.runtime.sendMessage({ type: 'script/run', id: s.id }) as { ok?: boolean; error?: string };
+        if (result?.error || result?.ok === false) throw new Error(result.error || '重放启动失败');
         toast(`已开始重放：${s.name}`);
         window.close();
       } catch (e) {
@@ -91,29 +92,36 @@ function escapeHtml(s: string): string {
 
 $('btn-start-rec').addEventListener('click', async () => {
   const btn = $('btn-start-rec') as HTMLButtonElement;
-  const status = await chrome.runtime.sendMessage({ type: 'popup/status' }) as { recording: { recording: boolean } };
-  if (status.recording?.recording) {
-    const res = await chrome.runtime.sendMessage({ type: 'rec/end' }) as { ok?: boolean; error?: string };
-    if (res?.error) toast(res.error);
-    else toast('脚本已保存');
-    await refresh();
-    return;
-  }
-  const name = ( $('script-name') as HTMLInputElement).value.trim();
-  if (!name) {
-    toast('请输入脚本名称');
-    return;
-  }
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) {
-    toast('无法获取当前标签页');
-    return;
-  }
-  const res = await chrome.runtime.sendMessage({ type: 'rec/begin', tabId: tab.id, name }) as { ok?: boolean; error?: string };
-  if (res?.error) toast(res.error);
-  else {
-    toast('录制已开始，在页面右下角可点完成');
-    await refresh();
+  btn.disabled = true;
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'popup/status' }) as { recording: { recording: boolean } };
+    if (status.recording?.recording) {
+      const res = await chrome.runtime.sendMessage({ type: 'rec/end' }) as { ok?: boolean; error?: string };
+      if (res?.error || res?.ok === false) toast(res.error || '脚本保存失败');
+      else toast('脚本已保存');
+      await refresh();
+      return;
+    }
+    const name = ( $('script-name') as HTMLInputElement).value.trim();
+    if (!name) {
+      toast('请输入脚本名称');
+      return;
+    }
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) {
+      toast('无法获取当前标签页');
+      return;
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'rec/begin', tabId: tab.id, name }) as { ok?: boolean; error?: string };
+    if (res?.error || res?.ok === false) toast(res.error || '录制启动失败');
+    else {
+      toast('录制已开始，在页面右下角可点完成');
+      await refresh();
+    }
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    btn.disabled = false;
   }
 });
 

@@ -11925,6 +11925,8 @@ function wrStepKindLabel(st){
   const k=String(st&&st.kind||"");
   if(k==="click")return "点击";
   if(k==="input")return "输入";
+  if(k==="key")return "按键";
+  if(k==="scroll")return "滚动";
   if(k==="wait")return "等待";
   return k||"—";
 }
@@ -11932,8 +11934,11 @@ function wrStepDesc(st){
   if(!st)return "—";
   if(st.kind==="click"||st.kind==="input"){
     const css=st.selector&&st.selector.css;
-    return (css?css.slice(0,72):"—")+(st.kind==="input"&&st.value?" · 值="+String(st.value).slice(0,24):"");
+    const inputValue=st.kind==="input"?(st.control==="checked"?" · 选中="+String(!!st.checked):(st.value?" · 值="+String(st.value).slice(0,24):"")):"";
+    return (css?css.slice(0,72):"—")+inputValue;
   }
+  if(st.kind==="key")return (st.key||"按键")+" · "+((st.selector&&st.selector.css)||"—").slice(0,72);
+  if(st.kind==="scroll")return (st.selector&&st.selector.css?st.selector.css.slice(0,60):"页面")+" · ("+(st.x||0)+", "+(st.y||0)+")";
   if(st.kind==="wait")return (st.reason||"fixed")+" "+(st.timeoutMs||0)+"ms";
   return "—";
 }

@@ -7,7 +7,7 @@ export interface ElementSelector {
   attributes: Record<string, string>;
 }
 
-export type StepKind = 'click' | 'input' | 'wait';
+export type StepKind = 'click' | 'input' | 'key' | 'scroll' | 'wait';
 
 export interface ClickStep {
   kind: 'click';
@@ -21,6 +21,32 @@ export interface InputStep {
   kind: 'input';
   selector: ElementSelector;
   value: string;
+  control: 'value' | 'checked' | 'textContent';
+  checked?: boolean;
+  recordedAt: number;
+  frameUrl: string;
+  originTabId?: number;
+}
+
+export interface KeyStep {
+  kind: 'key';
+  selector: ElementSelector;
+  key: 'Enter' | 'Escape';
+  code: string;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  recordedAt: number;
+  frameUrl: string;
+  originTabId?: number;
+}
+
+export interface ScrollStep {
+  kind: 'scroll';
+  selector?: ElementSelector;
+  x: number;
+  y: number;
   recordedAt: number;
   frameUrl: string;
   originTabId?: number;
@@ -30,10 +56,12 @@ export interface WaitStep {
   kind: 'wait';
   reason: 'mutation-quiet' | 'fixed';
   timeoutMs: number;
+  recordedAt?: number;
   frameUrl?: string;
+  originTabId?: number;
 }
 
-export type ScriptStep = ClickStep | InputStep | WaitStep;
+export type ScriptStep = ClickStep | InputStep | KeyStep | ScrollStep | WaitStep;
 
 /** 录制期间捕获的 HTTP 线索（简化版 apiChains） */
 export interface ApiRequestHint {
@@ -96,7 +124,7 @@ export type BgMessage =
   | { type: 'rec/cancel' }
   | { type: 'rec/state' }
   | { type: 'rec/step'; step: ScriptStep }
-  | { type: 'rec/response-body'; url: string; method: string; startedAt: number; status: number; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string }
+  | { type: 'rec/response-body'; url: string; method: string; startedAt: number; status: number; contentType?: string; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string }
   | { type: 'rec/stop' }
   | { type: 'rec/start'; name: string; stepCount: number }
   | { type: 'rec/step-count'; count: number }
