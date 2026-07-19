@@ -99,7 +99,7 @@ async function routeMessage(
       await cancelRecording();
       return { ok: true };
     case 'rec/step':
-      onRecStep(msg.step as import('../shared/types').ScriptStep, sender.tab?.id);
+      await onRecStep(msg.step as import('../shared/types').ScriptStep, sender.tab?.id);
       return { ok: true };
     case 'rec/response-body':
       if (sender.tab?.id !== undefined) {
@@ -108,6 +108,7 @@ async function routeMessage(
           method: String(msg.method),
           startedAt: Number(msg.startedAt),
           status: Number(msg.status),
+          contentType: msg.contentType as string | undefined,
           bodyText: msg.bodyText as string | undefined,
           bodyTruncated: msg.bodyTruncated as boolean | undefined,
           bodyOmitted: msg.bodyOmitted as string | undefined,

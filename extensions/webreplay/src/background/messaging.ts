@@ -5,7 +5,7 @@ const FRAME_POLL_MS = 300;
 
 export async function ensureContentScripts(tabId: number, frameId?: number): Promise<void> {
   const files = ['content/index.js'];
-  const target = frameId === undefined ? { tabId } : { tabId, frameIds: [frameId] };
+  const target = frameId === undefined ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] };
   try {
     await chrome.scripting.executeScript({ target, files });
   } catch {
@@ -22,7 +22,23 @@ export async function sendToTab<T = unknown>(
   return chrome.tabs.sendMessage(tabId, message, { frameId }) as Promise<T>;
 }
 
+export async function sendToAllFrames(tabId: number, message: Record<string, unknown>): Promise<void> {
+  await ensureContentScripts(tabId);
+  const frames = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () => true,
+  });
+  await Promise.all(frames.map(async (frame) => {
+    try {
+      await chrome.tabs.sendMessage(tabId, message, { frameId: frame.frameId });
+    } catch {
+      /* frame 可能在消息发送期间导航或销毁 */
+    }
+  }));
+}
+
 export async function broadcastRefresh(tabId: number): Promise<void> {
+  await ensureContentScripts(tabId);
   const frames = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     func: () => {
