@@ -57,7 +57,8 @@ DEFAULT_JOBS: List[Dict[str, Any]] = [
         "frequency_preset": "24H",
         "daily_hour": 0,
         "daily_minute": 0,
-        "enabled": True,
+        # 收藏夹包含个人隐私数据，只允许用户点击“执行/同步”后运行。
+        "enabled": False,
         "params_json": {"trigger_label": "scheduled"},
     },
     {

@@ -14,6 +14,10 @@ _scheduler_running = False
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 _job_ids: Dict[str, str] = {}
 
+# 收藏夹同步只能由用户通过手动执行接口触发。即使旧数据库中该任务仍为
+# enabled，也不能在应用启动时恢复为 APScheduler 周期任务。
+MANUAL_ONLY_JOB_KEYS = frozenset({"favorites_sync_all"})
+
 
 def register_main_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _main_loop
@@ -86,6 +90,14 @@ def refresh_job_schedule(job_key: str) -> None:
         _scheduler.remove_job(ap_id)
     except Exception:
         pass
+    if job_key in MANUAL_ONLY_JOB_KEYS:
+        _job_ids.pop(job_key, None)
+        _log.info(
+            "[%s|scheduled_job_scheduler.refresh_job_schedule|%s|硬编执行|跳过] mode=manual_only",
+            _CHAIN,
+            job_key,
+        )
+        return
     if not job.get("enabled"):
         _job_ids.pop(job_key, None)
         return

@@ -515,12 +515,9 @@ def _startup_deferred_services():
     unified_ok = False
     try:
         from .services.scheduled_job_scheduler import start_scheduled_job_scheduler
-        from .services.favorites_scheduler import schedule_favorites_on_startup
 
         sched_status = start_scheduled_job_scheduler()
         unified_ok = bool(sched_status.get("scheduler_running"))
-        if unified_ok:
-            schedule_favorites_on_startup()
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("unified scheduled job scheduler: %s", e)
     if not unified_ok:
@@ -530,13 +527,6 @@ def _startup_deferred_services():
             start_scheduler()
         except Exception as e:
             logging.getLogger("uvicorn.error").warning("creator subscription scheduler: %s", e)
-        try:
-            from .services.favorites_scheduler import schedule_favorites_on_startup, start_scheduler as start_favorites_scheduler
-
-            start_favorites_scheduler()
-            schedule_favorites_on_startup()
-        except Exception as e:
-            logging.getLogger("uvicorn.error").warning("favorites scheduler startup: %s", e)
         try:
             from .services.rss_scheduler import start_scheduler as start_rss_scheduler
 
