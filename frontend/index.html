@@ -2745,11 +2745,11 @@ description:
             <p>处理链路：抽图落盘 → OCR/VLM 分类描述 → 回插 picture 块 → 导出时复制 images + manifest 并重写 url。</p>
           </div>
         </details>
-        <p style="font-size:11px;color:var(--t3);margin-bottom:10px" v-else>流程图分块得分：PDF/图片 → CV 检框 → 泳道横切（<code style="color:var(--a2)">column_band_split</code>）→ 黑框吸附 → 几何得分与叠图预览。</p>
+        <p style="font-size:11px;color:var(--t3);margin-bottom:10px" v-else>流程图转 Mermaid：PDF/图片 → 统一 OCR → 节点与连接关系复核 → Mermaid。支持彩色圆角框、大型思维导图和多页 PDF。</p>
         <div class="mm-mode-row">
           <span class="fl">处理模式</span>
           <label class="mm-mode-opt"><input type="radio" value="doc" v-model="mm.mode"/> 普通文档</label>
-          <label class="mm-mode-opt"><input type="radio" value="flowchart" v-model="mm.mode"/> 流程图分块得分</label>
+          <label class="mm-mode-opt"><input type="radio" value="flowchart" v-model="mm.mode"/> 流程图转 Mermaid</label>
         </div>
         <div v-if="mm.mode==='doc'" class="mm-export-opts">
           <label class="mm-fc-lbl"><input type="checkbox" v-model="mm.exportTxt" @change="persistMmPrefs"/> 同时导出 TXT（默认关闭）</label>
@@ -2758,16 +2758,31 @@ description:
           </label>
         </div>
         <div v-if="mm.mode==='flowchart'" class="mm-fc-opts">
-          <label class="mm-fc-lbl">PDF 页码 <input class="gi gi-xs" type="number" min="1" v-model.number="mm.page" style="width:56px"/></label>
-          <label class="mm-fc-lbl">横切段数 <input class="gi gi-xs" type="number" min="0" v-model.number="mm.columnBands" title="0=投影自动估计（右栏约4段）" style="width:56px"/></label>
-          <label class="mm-fc-lbl"><input type="checkbox" v-model="mm.columnBandSplit"/> 泳道横切</label>
-          <label class="mm-fc-lbl"><input type="checkbox" v-model="mm.skipArrows"/> 跳过箭头</label>
+          <label class="mm-fc-lbl">PDF 页码 <input class="gi gi-xs" type="number" min="0" v-model.number="mm.page" title="0=转换全部页" style="width:62px"/> <span title="0=转换全部页">（0=全部）</span></label>
+          <label class="mm-fc-lbl">渲染倍率 <input class="gi gi-xs" type="number" min="1" max="6" step="0.5" v-model.number="mm.zoom" style="width:62px"/></label>
+          <label class="mm-fc-lbl">OCR
+            <select class="gi gi-xs" v-model="mm.ocrEngine" @change="persistMmPrefs" title="auto 会按可用性组合 Umi-OCR、EasyOCR 与 Tesseract">
+              <option value="auto">统一 OCR（推荐）</option>
+              <option value="umi-ocr">Umi-OCR</option>
+              <option value="easyocr">EasyOCR</option>
+              <option value="tesseract">Tesseract</option>
+              <option value="paddleocr">PaddleOCR</option>
+            </select>
+          </label>
+          <label class="mm-fc-lbl">布局
+            <select class="gi gi-xs" v-model="mm.flowDirection" @change="persistMmPrefs">
+              <option value="auto">自动判断</option>
+              <option value="LR">从左到右</option>
+              <option value="TD">从上到下</option>
+            </select>
+          </label>
+          <label class="mm-fc-lbl" title="已配置视觉模型时，对 OCR 节点和连接关系做二次复核"><input type="checkbox" v-model="mm.vlmRefine" @change="persistMmPrefs"/> VLM 二次复核</label>
         </div>
         <input ref="mmFileInp" type="file" multiple style="display:none" @change="mmOnLocalPick"/>
         <div class="mm-drop" @click="mmPickLocal" @dragover.prevent @drop.prevent="mmOnDrop">点击或拖拽文件到此处上传<br/><span style="font-size:10px;opacity:.85">写入服务端 output/mm_uploads</span></div>
         <div class="btns" style="margin-top:12px;flex-wrap:wrap">
           <button type="button" class="btn btn-o btn-xs" @click="openMmBrowse">从服务器浏览加入队列…</button>
-          <button type="button" class="btn btn-p btn-xs" @click="docProc" :disabled="mm.busy">{{mm.mode==='flowchart'?'流程图得分':'开始处理并导出'}}</button>
+          <button type="button" class="btn btn-p btn-xs" @click="docProc" :disabled="mm.busy">{{mm.mode==='flowchart'?'转换为 Mermaid':'开始处理并导出'}}</button>
           <button type="button" class="btn btn-o btn-xs" @click="openOut">输出目录（服务端）</button>
         </div>
         <div class="btns" style="margin-top:8px;flex-wrap:wrap">
@@ -2788,16 +2803,26 @@ description:
         <p v-if="mm.busy" style="font-size:11px;color:var(--warn);margin-bottom:8px">处理中，请稍候…</p>
         <div class="term"><div class="term-b mm-log-pane" style="color:var(--dt);white-space:pre-wrap;font-size:11px">{{d.log||'等待处理任务'}}</div></div>
         <template v-if="mm.mode==='flowchart' && mm.fcResult">
-          <div class="st" style="margin-top:14px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>流程图得分</div>
+          <div class="st" style="margin-top:14px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>Mermaid 转换结果</div>
           <div class="mm-fc-stats">
-            <span>块数 <b>{{mm.fcResult.final_block_count}}</b></span>
-            <span :class="mm.fcResult.overlap_ok?'ok':'bad'">重叠 {{mm.fcResult.overlap_pair_count}}</span>
-            <span v-if="mm.fcResult.column_band_cuts&&mm.fcResult.column_band_cuts.length">切线 y={{mm.fcResult.column_band_cuts.join(', ')}}</span>
+            <span>节点 <b>{{mm.fcResult.node_count}}</b></span>
+            <span>连线 <b>{{mm.fcResult.edge_count}}</b></span>
+            <span>页数 <b>{{mm.fcResult.page_count}}</b></span>
+            <span>布局 <b>{{mm.fcResult.direction||'—'}}</b></span>
+            <span v-if="mm.fcResult.diagram_title">标题 <b>{{mm.fcResult.diagram_title}}</b></span>
+            <span v-if="mm.fcResult.ocr_diagnostics&&mm.fcResult.ocr_diagnostics.length">OCR <b>{{mmOcrProviderLabel()}}</b></span>
           </div>
           <div v-if="mm.fcResult.overlay_url" class="mm-fc-preview">
-            <a :href="mm.fcResult.overlay_url" target="_blank" rel="noopener"><img :src="mm.fcResult.overlay_url" alt="debug overlay"/></a>
+            <a :href="mm.fcResult.overlay_url" target="_blank" rel="noopener"><img :src="mm.fcResult.overlay_url" alt="流程图 OCR 与拓扑复核叠图"/></a>
           </div>
           <p v-else style="font-size:11px;color:var(--t3)">无叠图 URL（请确认产物在服务端 output 目录下）</p>
+          <div v-if="mm.fcResult.mermaid" style="margin-top:10px">
+            <div class="btns" style="margin:0 0 8px;flex-wrap:wrap">
+              <button type="button" class="btn btn-o btn-xs" @click="mmCopyMermaid">复制 Mermaid</button>
+              <button type="button" class="btn btn-o btn-xs" @click="mmDownloadMermaid">下载 .mmd</button>
+            </div>
+            <textarea class="gi" readonly :value="mm.fcResult.mermaid" spellcheck="false" style="width:100%;min-height:220px;resize:vertical;font-family:var(--mono);font-size:11px;line-height:1.55"></textarea>
+          </div>
         </template>
         <div v-if="mm.mode==='doc'" class="mm-preview">
           <div class="mm-preview-hd">

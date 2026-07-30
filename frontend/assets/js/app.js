@@ -11175,6 +11175,10 @@ const mm=reactive({
   exportTxt:false,
   summarize:false,
   page:1,
+  zoom:3,
+  ocrEngine:"auto",
+  flowDirection:"auto",
+  vlmRefine:true,
   columnBands:0,
   columnBandSplit:true,
   skipArrows:true,
@@ -11228,12 +11232,18 @@ function persistMmPrefs(){
   try{
     localStorage.setItem("sba_mm_export_txt",mm.exportTxt?"1":"0");
     localStorage.setItem("sba_mm_summarize",mm.summarize?"1":"0");
+    localStorage.setItem("sba_mm_flow_ocr_engine",mm.ocrEngine);
+    localStorage.setItem("sba_mm_flow_direction",mm.flowDirection);
+    localStorage.setItem("sba_mm_flow_vlm_refine",mm.vlmRefine?"1":"0");
   }catch(_){}
 }
 function ldMmPrefs(){
   try{
     mm.exportTxt=localStorage.getItem("sba_mm_export_txt")==="1";
     mm.summarize=localStorage.getItem("sba_mm_summarize")==="1";
+    mm.ocrEngine=localStorage.getItem("sba_mm_flow_ocr_engine")||"auto";
+    mm.flowDirection=localStorage.getItem("sba_mm_flow_direction")||"auto";
+    mm.vlmRefine=localStorage.getItem("sba_mm_flow_vlm_refine")!=="0";
   }catch(_){}
 }
 ldMmPrefs();
@@ -11314,7 +11324,43 @@ function mmFcApplyResult(res){
     column_band_cuts:res.column_band_cuts||[],
     overlay_url:res.overlay_url||"",
     work_dir:res.work_dir||"",
+    node_count:Number(res.node_count||res.final_block_count||0),
+    edge_count:Number(res.edge_count||0),
+    page_count:Number(res.page_count||1),
+    direction:res.direction||"",
+    diagram_title:res.diagram_title||"",
+    mermaid:res.mermaid||"",
+    mermaid_path:res.mermaid_path||"",
+    ocr_diagnostics:res.ocr_diagnostics||[],
   };
+}
+function mmOcrProviderLabel(){
+  const names=[];
+  for(const diag of (mm.fcResult&&mm.fcResult.ocr_diagnostics||[])){
+    for(const provider of (diag&&diag.providers||[])){
+      if(provider&&provider.ok&&provider.name)names.push(provider.name);
+    }
+    for(const used of (diag&&diag.used||[])){
+      if(used)names.push(used);
+    }
+  }
+  return [...new Set(names)].join(" + ")||"已完成";
+}
+async function mmCopyMermaid(){
+  const code=(mm.fcResult&&mm.fcResult.mermaid||"").trim();
+  if(!code){showToastMsg("暂无 Mermaid");return}
+  try{await navigator.clipboard.writeText(code);showToastMsg("Mermaid 已复制")}
+  catch(_){prompt("复制 Mermaid",code)}
+}
+function mmDownloadMermaid(){
+  const code=(mm.fcResult&&mm.fcResult.mermaid||"").trim();
+  if(!code){showToastMsg("暂无 Mermaid");return}
+  const blob=new Blob([code+"\n"],{type:"text/plain;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="flowchart-"+Date.now()+".mmd";
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 async function docProcFlowchart(){
   if(mm.busy)return;
@@ -11323,8 +11369,8 @@ async function docProcFlowchart(){
   mm.fcResult=null;
   const stamp=()=>new Date().toLocaleTimeString();
   try{
-    docLogLine("["+stamp()+"] 流程图得分 "+mm.queue.length+" 个文件 …");
-    docLogLine("  参数: page="+mm.page+" column_bands="+mm.columnBands+" column_band_split="+mm.columnBandSplit);
+    docLogLine("["+stamp()+"] 流程图转 Mermaid "+mm.queue.length+" 个文件 …");
+    docLogLine("  参数: page="+mm.page+" zoom="+mm.zoom+" ocr="+mm.ocrEngine+" direction="+mm.flowDirection+" vlm_refine="+mm.vlmRefine);
     const list=[...mm.queue];
     for(let i=0;i<list.length;i++){
       const it=list[i];
@@ -11333,6 +11379,10 @@ async function docProcFlowchart(){
         const body={
           path:it.path,
           page:mm.page,
+          zoom:mm.zoom,
+          ocr_engine:mm.ocrEngine,
+          direction:mm.flowDirection,
+          vlm_refine:!!mm.vlmRefine,
           column_bands:mm.columnBands,
           column_band_split:mm.columnBandSplit,
           skip_arrows:mm.skipArrows,
@@ -11351,12 +11401,13 @@ async function docProcFlowchart(){
         }
         const geom=res.geometry_score||{};
         const cuts=(res.column_band_cuts||[]).join(",");
-        docLogLine("      → OK 块数:"+res.final_block_count+" 重叠对:"+geom.overlap_pair_count+(cuts?" 切线y:"+cuts:""));
+        const providers=(res.ocr_diagnostics||[]).flatMap(x=>x.used||[]).filter((v,i,a)=>a.indexOf(v)===i).join("+");
+        docLogLine("      → OK 节点:"+res.node_count+" 连线:"+res.edge_count+" 方向:"+res.direction+(providers?" OCR:"+providers:"")+(cuts?" 切线y:"+cuts:""));
         if(i===list.length-1)mmFcApplyResult(res);
       }catch(e){docLogLine("      → 请求异常: "+(e.message||String(e)))}
     }
-    docLogLine("["+stamp()+"] 流程图得分完成");
-    showToastMsg("流程图得分已跑完");
+    docLogLine("["+stamp()+"] 流程图转 Mermaid 完成");
+    showToastMsg("流程图已转换为 Mermaid");
   }finally{mm.busy=false}
 }
 async function docProc(){
@@ -13327,7 +13378,7 @@ return{page,menuMain,isAdmin,mobilePortrait,mobileNavOpen,mobileAgpzStep,mobileP
   apz,ldApzCatalog,selectApzTemplate,ldApzCurrent,ldApzHist,loadApzRevision,saveApzTemplate,newApzCustom,useApzInChat,deactivateApzCustom,
   kb,kbImportMeta,kbImportBtnLabel,kbMilvusStatusText,kbMilvusStatusColor,ldKbS,ldKbF,kbRefreshAll,ldKbMetaOpts,ldKbConn,kbSetConnectionParams,kbProbeConnection,kbRetryConnection,kbConnFmtTs,kbResetConnection,kbToggleConnDetail,kbSyncChunkCounts,kbRestoreCatalog,kbRm,ldKbLibs,onKbLibChange,promptCreateKbLib,deleteKbLib,saveKbLibCfg,kbLoadRecallVocab,kbImportInterviewFolder,kbFolderInp,kbPickLocalFolder,onKbLocalFolderPick,openKbBrowse,kbBrowse,kbBrowseEnter,kbBrowseUp,kbImportSelectedFiles,kbImportFolderHere,kbConfirmImportWithMeta,kbOpenImportMeta,openKbFileDetail,closeKbFileDetail,kbAutoFillMeta,kbSaveFileMeta,kbRowPv,
    rss,rssFmtTime,rssFeedTitle,rssArticleTitle,rssSyncStepClass,rssSyncActionLabel,ldRssAll,rssSelectFeed,rssSelectItem,rssOpenDoc,rssEnqueueDoc,rssAddFeed,rssDeleteFeed,rssSyncOne,rssSyncAll,rssToggleFilter,rssToggleRead,rssToggleStar,rssExportOpml,rssImportOpmlFile,rssTriggerOpmlImport,
-  d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,persistMmPrefs,ldMmPrefs,mmLoadPreview,mmOnPreviewClick,mmCloseLightbox,mmOpenPreviewMd,
+  d,docProc,mm,mmBrowse,mmFileInp,mmPickLocal,openMmBrowse,mmBrowseEnter,mmBrowseUp,mmLoadBrowse,mmAddBrowsePicks,mmOnLocalPick,mmOnDrop,mmRmQueueSel,mmClearQueue,mmClearDocLog,persistMmPrefs,ldMmPrefs,mmLoadPreview,mmOnPreviewClick,mmCloseLightbox,mmOpenPreviewMd,mmOcrProviderLabel,mmCopyMermaid,mmDownloadMermaid,
   ca,caQ,caSel,caPickRow,caSv,caEx,
   st,agtKeys,GW_PROVIDERS,gwProvMeta,gwFormSections,gwFieldPlaceholder,gwProvCardStyle,pickGwProvider,gwTestPayload,providerBadge,gwNodeAccent,resetGwForm,ldGw,ldAr,ldNf,testConn,ndUpSert,ndPoolSv,ndUp,ndDn,ndDel,rtSv,ldWf,svWf,ldMd,svMd,svFs,ldFsCfg,aicf,ldAiCfg,svAiCfg,thcf,ldThCfg,svThCfg,ldTpl,svTpl,ldHtmlCfg,svHtmlCfg,ldImPlatforms,openImPlatform,closeImDetail,imPlatformIcon,imPlatformBadge,imDetailTitle,ldImFeishu,ldImFeishuMsgs,imFsSave,imFsTime,imFsWebhookUrl,imFsCopyWebhook,ldImWechat,imWxSave,imWxStartQr,imWxRefreshStatus,imWxDisconnect,imWxCopyInbound,imWxInboundUrl,
   INTERNAL_IAG_TABS,IAG_KEY_ORDER,IAG_SUMMARY_PREVIEW_VARS,IAG_SUMMARY_BODY_TOKENS,IAG_COMMENTS_SECTION_VARS,iag,iagRawMode,ldIag,saveIag,iagLabel,iagHelpText,iagIsLongText,iagIsGuidedTab,iagFieldKeys,iagGenericFieldKeys,iagTplPreviewMd,iagTplPreviewFn,iagCommentsSectionPreview,iagMetaExtractFieldsJson,iagApplyKbMetaSchema,iagResetMetaExtractFields,insertIagToken,iagToggleRawMode,iagDiagramStyleKeys,resetIagDiagramStyle,

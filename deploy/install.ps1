@@ -109,6 +109,7 @@ if (-not $SkipSystemPackages) {
     Ensure-CompatiblePython
     Install-WingetPackage "node" "OpenJS.NodeJS.LTS" "Node.js LTS"
     Install-WingetPackage "ffmpeg" "Gyan.FFmpeg" "FFmpeg"
+    Install-WingetPackage "tesseract" "UB-Mannheim.TesseractOCR" "Tesseract OCR"
     Install-WingetPackage "docker" "Docker.DockerDesktop" "Docker Desktop"
 }
 
@@ -116,6 +117,7 @@ Write-Host "[检查] 基础环境"
 Invoke-SystemPython @("--version")
 if (-not (Test-Command "git")) { throw "未找到 Git，请重开终端后重试。" }
 if (-not (Test-Command "ffmpeg")) { throw "未找到 FFmpeg，请重开终端后重试。" }
+if (-not (Test-Command "tesseract")) { Write-Warning "未找到 Tesseract，将使用 EasyOCR；中文流程图建议安装 Tesseract chi_sim。" }
 if (-not (Test-Command "docker")) { throw "未找到 Docker，请启动 Docker Desktop 或重开终端后重试。" }
 & docker compose version
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose v2 不可用。" }

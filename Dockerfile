@@ -26,6 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     build-essential \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

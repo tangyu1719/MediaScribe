@@ -13,6 +13,7 @@ FastAPI 后端 + 原生 HTML/Vue SPA 前端，覆盖链接文档化、任务编�
 ## 目录
 
 - [快速开始](#快速开始)
+- [大型流程图转 Mermaid](#大型流程图转-mermaid)
 - [认证系统](#认证系统)
 - [环境变量](#环境变量)
 - [项目结构](#项目结构)
@@ -31,7 +32,7 @@ cd MediaScribe
 
 ### 一键安全部署（推荐）
 
-这是给新机器准备的完整部署入口。脚本会检查并按需安装 Python 3.11、Git、Node.js、Docker、FFmpeg，安装 yt-dlp、Playwright 和 RAG SDK，交互询问私密配置，并启动 Web、MySQL、Redis、Milvus、etcd 与 MinIO。
+这是给新机器准备的完整部署入口。脚本会检查并按需安装 Python 3.11、Git、Node.js、Docker、FFmpeg、Tesseract 中文 OCR，安装 yt-dlp、EasyOCR、Playwright 和 RAG SDK，交互询问私密配置，并启动 Web、MySQL、Redis、Milvus、etcd 与 MinIO。
 
 #### Windows 10/11
 
@@ -92,6 +93,46 @@ python deploy/security_scan.py
 ```
 
 更多端口调整、离线模型、故障排查与手工部署说明见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+
+## 大型流程图转 Mermaid
+
+部署完成后打开 Web 的“多模态处理”，将处理模式切换为“流程图转 Mermaid”，上传 PDF 或图片并点击“转换为 Mermaid”。页面会显示节点数、连线数、OCR/拓扑叠图，并可直接复制或下载 `.mmd`。
+
+转换链路专门处理大型流程图、彩色圆角框和思维导图：
+
+1. PDF 按指定倍率渲染；页码填 `0` 时转换全部页（默认最多 20 页）。
+2. `auto` 模式融合 EasyOCR 与 Tesseract 的坐标结果；若配置 Umi-OCR，则优先加入统一 OCR 融合。
+3. 重叠框传递去重，序号碎片归并；彩色连接线导致的跨框文字会按视觉区域重新拆分。
+4. 对每个节点放大复核文字，再按 LR/TD 空间层级恢复父子连线。
+5. 已配置视觉模型时可启用“VLM 二次复核”，校正明确可见的文字、节点形状和连接关系。
+
+可选 OCR 环境变量：
+
+```env
+# auto | umi-ocr | easyocr | tesseract | paddleocr
+FLOWCHART_OCR_ENGINE=auto
+# Umi-OCR HTTP API 地址；留空时自动使用 EasyOCR + Tesseract
+FLOWCHART_UMI_OCR_URL=
+# page=0 时允许处理的最大页数
+FLOWCHART_MAX_PAGES=20
+```
+
+接口调用示例（`path` 必须是服务端可读取的 PDF/图片路径）：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/doc/flowchart/score \
+  -H "Content-Type: application/json" \
+  -d '{"path":"output/mm_uploads/example.pdf","page":0,"zoom":3,"ocr_engine":"auto","direction":"auto","vlm_refine":true}'
+```
+
+每次转换会在 `output/flowchart_scoring_web/<任务ID>/` 生成：
+
+- `flowchart.mmd`：最终 Mermaid；
+- `flowchart_conversion_report.json`：节点、边、方向与 OCR 诊断；
+- `page_<页码>/flowchart_graph.json`：单页结构化图；
+- `page_<页码>/ocr_topology_overlay.png`：节点和连线人工复核叠图。
+
+`PaddleOCR` 仅作为显式可选引擎；若本机 Paddle 运行时不兼容，请保持 `auto`，系统不会让 Paddle 故障阻断 EasyOCR/Tesseract 主链路。低分辨率扫描件建议将渲染倍率调到 `3–4`，并检查叠图后再使用 Mermaid。
 
 ### 1. 安装依赖
 
@@ -197,6 +238,9 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `LLM_MODEL_QA` | — | 问答路由 endpoint id（写入 runtime `config.json` 的 `ai_chat_model` / `gateway_task_type_route.qa`） |
 | `LLM_MODEL_REASON` | — | 摘要/推理 endpoint id（写入 `gateway_task_type_route.summary`） |
 | `SBA_AGENT_CONFIG` | 自动 | LLM 配置 JSON 路径；容器内由 entrypoint 生成 `/app/runtime/agent/config.json` |
+| `FLOWCHART_OCR_ENGINE` | `auto` | 流程图 OCR：自动融合或显式选择 Umi/EasyOCR/Tesseract/PaddleOCR |
+| `FLOWCHART_UMI_OCR_URL` | — | 可选 Umi-OCR HTTP API 地址 |
+| `FLOWCHART_MAX_PAGES` | `20` | PDF 页码为 `0` 时的最大转换页数 |
 
 本地开发仍可直接编辑 `src/agent/config.json`（`start_backend.bat` 会优先使用本仓库 `src/agent/config.json`）。
 

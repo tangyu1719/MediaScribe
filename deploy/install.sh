@@ -19,12 +19,12 @@ install_system_packages() {
       SUDO=""
       if [[ "$EUID" -ne 0 ]]; then SUDO="sudo"; fi
       $SUDO apt-get update
-      $SUDO apt-get install -y git python3 python3-venv python3-pip nodejs npm ffmpeg docker.io docker-compose-plugin
+      $SUDO apt-get install -y git python3 python3-venv python3-pip nodejs npm ffmpeg tesseract-ocr tesseract-ocr-chi-sim docker.io docker-compose-plugin
       if have systemctl; then $SUDO systemctl enable --now docker; fi
       ;;
     Darwin)
       have brew || { echo "缺少 Homebrew：https://brew.sh"; exit 1; }
-      brew install git python@3.11 node ffmpeg
+      brew install git python@3.11 node ffmpeg tesseract tesseract-lang
       have docker || brew install --cask docker
       ;;
     *)

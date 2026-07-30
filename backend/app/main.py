@@ -3873,7 +3873,7 @@ async def route_doc_process(request: Request):
 
 @app.post("/api/doc/flowchart/score")
 async def route_doc_flowchart_score(request: Request):
-    """多模态 Web：PDF/图片 → 流程图 CV 分块 + 泳道横切 + 几何得分 + 叠图。"""
+    """多模态 Web：PDF/图片 → 统一 OCR → 节点/连线 → Mermaid。"""
     body = await request.json()
     path_raw = (body.get("path") or "").strip()
     if not path_raw:
@@ -3882,13 +3882,16 @@ async def route_doc_flowchart_score(request: Request):
 
     return run_flowchart_score(
         path_raw,
-        page=int(body.get("page") or 1),
-        zoom=float(body.get("zoom") or 2.0),
+        page=int(body.get("page") if body.get("page") is not None else 1),
+        zoom=float(body.get("zoom") or 3.0),
         mineru_json=(body.get("mineru_json") or "").strip(),
         column_band_split=bool(body.get("column_band_split", True)),
         column_bands=int(body.get("column_bands") if body.get("column_bands") is not None else 0),
         min_band_h=int(body.get("min_band_h") or 48),
         skip_arrows=bool(body.get("skip_arrows", True)),
+        ocr_engine=(body.get("ocr_engine") or "auto").strip(),
+        direction=(body.get("direction") or "auto").strip(),
+        vlm_refine=bool(body.get("vlm_refine", True)),
         artifact_subdir=(body.get("job_id") or "").strip(),
     )
 
