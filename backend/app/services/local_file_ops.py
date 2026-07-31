@@ -64,6 +64,26 @@ def _resolve_allowed_dest(path: str) -> Path:
     return target
 
 
+def _begin_mutation(operation: str, paths: Dict[str, Path], **metadata: Any) -> str:
+    from .file_change_journal import begin_file_change
+
+    return begin_file_change(operation, paths, metadata=metadata)
+
+
+def _commit_mutation(change_id: str, paths: Dict[str, Path], result: Dict[str, Any]) -> Dict[str, Any]:
+    from .file_change_journal import commit_file_change
+
+    return commit_file_change(change_id, paths, result=result)
+
+
+def _fail_mutation(change_id: str, error: Any) -> None:
+    if not change_id:
+        return
+    from .file_change_journal import fail_file_change
+
+    fail_file_change(change_id, str(error or ""))
+
+
 def _stat_entry(p: Path) -> Dict[str, Any]:
     try:
         st = p.stat()
@@ -274,18 +294,34 @@ def write_local_file(path: str, content: str, append: bool = False) -> Dict[str,
     if len(body.encode("utf-8")) > _MAX_WRITE_BYTES:
         return {"ok": False, "error": f"内容超过 {_MAX_WRITE_BYTES} 字节上限", "path": raw}
 
+    change_id = ""
     try:
         target = _resolve_allowed_dest(raw)
         if target.exists() and target.is_dir():
             return {"ok": False, "error": "目标是目录，不能写入", "path": str(target)}
         existed = target.exists()
+        change_id = _begin_mutation("write", {"target": target}, append=bool(append))
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
         with target.open(mode, encoding="utf-8", newline="\n") as fh:
             fh.write(body)
         size = target.stat().st_size
-    except (PermissionError, OSError, ValueError) as ex:
+    except (PermissionError, OSError, ValueError, RuntimeError) as ex:
+        _fail_mutation(change_id, ex)
         return {"ok": False, "error": str(ex), "path": raw}
+
+    result = {
+        "ok": True,
+        "path": str(target),
+        "size_bytes": size,
+        "append": bool(append),
+        "created": not existed,
+    }
+    try:
+        result.update(_commit_mutation(change_id, {"target": target}, result))
+    except Exception as ex:
+        _fail_mutation(change_id, ex)
+        return {"ok": False, "error": f"文件已写入但变更快照提交失败: {ex}", "path": str(target)}
 
     _LOG.info(
         "[AI问答-本地文件|local_file_ops.write_local_file|%s|工具执行|完成] "
@@ -294,25 +330,29 @@ def write_local_file(path: str, content: str, append: bool = False) -> Dict[str,
         append,
         size,
     )
-    return {
-        "ok": True,
-        "path": str(target),
-        "size_bytes": size,
-        "append": bool(append),
-        "created": not existed,
-    }
+    return result
 
 
 def mkdir_local_path(path: str, parents: bool = True) -> Dict[str, Any]:
     """创建目录（可递归创建父目录）。"""
+    change_id = ""
     try:
         target = _resolve_allowed_dest(path)
         existed = target.exists()
         if existed and not target.is_dir():
             return {"ok": False, "error": "路径已存在且不是目录", "path": str(target)}
+        change_id = _begin_mutation("mkdir", {"target": target}, parents=bool(parents))
         target.mkdir(parents=bool(parents), exist_ok=True)
-    except (PermissionError, OSError, ValueError) as ex:
+    except (PermissionError, OSError, ValueError, RuntimeError) as ex:
+        _fail_mutation(change_id, ex)
         return {"ok": False, "error": str(ex), "path": path}
+
+    result = {"ok": True, "path": str(target), "created": not existed}
+    try:
+        result.update(_commit_mutation(change_id, {"target": target}, result))
+    except Exception as ex:
+        _fail_mutation(change_id, ex)
+        return {"ok": False, "error": f"目录已创建但变更快照提交失败: {ex}", "path": str(target)}
 
     _LOG.info(
         "[AI问答-本地文件|local_file_ops.mkdir_local_path|%s|工具执行|完成] "
@@ -320,25 +360,36 @@ def mkdir_local_path(path: str, parents: bool = True) -> Dict[str, Any]:
         target.name,
         not existed,
     )
-    return {"ok": True, "path": str(target), "created": not existed}
+    return result
 
 
 def move_local_path(source: str, dest: str, overwrite: bool = False) -> Dict[str, Any]:
     """移动或重命名文件/目录（均在白名单内）。"""
+    change_id = ""
     try:
         src = _resolve_allowed_path(source, must_exist=True)
         dst = _resolve_allowed_dest(dest)
         if dst.exists():
             if not overwrite:
                 return {"ok": False, "error": "目标已存在，请设 overwrite=true 或更换目标", "dest": str(dst)}
+        change_id = _begin_mutation("move", {"source": src, "dest": dst}, overwrite=bool(overwrite))
+        if dst.exists():
             if dst.is_dir():
                 shutil.rmtree(dst)
             else:
                 dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
         final = shutil.move(str(src), str(dst))
-    except (PermissionError, OSError, ValueError, FileNotFoundError) as ex:
+    except (PermissionError, OSError, ValueError, FileNotFoundError, RuntimeError) as ex:
+        _fail_mutation(change_id, ex)
         return {"ok": False, "error": str(ex), "source": source, "dest": dest}
+
+    result = {"ok": True, "source": str(src), "dest": str(final), "moved": True}
+    try:
+        result.update(_commit_mutation(change_id, {"source": src, "dest": Path(final)}, result))
+    except Exception as ex:
+        _fail_mutation(change_id, ex)
+        return {"ok": False, "error": f"文件已移动但变更快照提交失败: {ex}", "source": str(src), "dest": str(final)}
 
     _LOG.info(
         "[AI问答-本地文件|local_file_ops.move_local_path|src->dest|工具执行|完成] "
@@ -346,16 +397,24 @@ def move_local_path(source: str, dest: str, overwrite: bool = False) -> Dict[str
         src.name,
         Path(final).name,
     )
-    return {"ok": True, "source": str(src), "dest": str(final), "moved": True}
+    return result
 
 
 def copy_local_path(source: str, dest: str, overwrite: bool = False, recursive: bool = True) -> Dict[str, Any]:
     """复制文件/目录到目标（粘贴语义：copy source -> dest）。"""
+    change_id = ""
     try:
         src = _resolve_allowed_path(source, must_exist=True)
         dst = _resolve_allowed_dest(dest)
         if dst.exists() and not overwrite:
             return {"ok": False, "error": "目标已存在，请设 overwrite=true", "dest": str(dst)}
+        change_id = _begin_mutation(
+            "copy",
+            {"dest": dst},
+            source=str(src),
+            overwrite=bool(overwrite),
+            recursive=bool(recursive),
+        )
         if dst.exists():
             if dst.is_dir():
                 shutil.rmtree(dst)
@@ -381,16 +440,11 @@ def copy_local_path(source: str, dest: str, overwrite: bool = False, recursive: 
                         copied += 1
         else:
             return {"ok": False, "error": "源不是文件或目录", "source": str(src)}
-    except (PermissionError, OSError, ValueError, FileNotFoundError) as ex:
+    except (PermissionError, OSError, ValueError, FileNotFoundError, RuntimeError) as ex:
+        _fail_mutation(change_id, ex)
         return {"ok": False, "error": str(ex), "source": source, "dest": dest}
 
-    _LOG.info(
-        "[AI问答-本地文件|local_file_ops.copy_local_path|src->dest|工具执行|完成] "
-        "复制; ok=true; recursive=%s; files=%s",
-        recursive,
-        copied,
-    )
-    return {
+    result = {
         "ok": True,
         "source": str(src),
         "dest": str(dst),
@@ -398,6 +452,19 @@ def copy_local_path(source: str, dest: str, overwrite: bool = False, recursive: 
         "recursive": bool(recursive),
         "file_count": copied,
     }
+    try:
+        result.update(_commit_mutation(change_id, {"dest": dst}, result))
+    except Exception as ex:
+        _fail_mutation(change_id, ex)
+        return {"ok": False, "error": f"文件已复制但变更快照提交失败: {ex}", "source": str(src), "dest": str(dst)}
+
+    _LOG.info(
+        "[AI问答-本地文件|local_file_ops.copy_local_path|src->dest|工具执行|完成] "
+        "复制; ok=true; recursive=%s; files=%s",
+        recursive,
+        copied,
+    )
+    return result
 
 
 def info_local_file(path: str) -> Dict[str, Any]:
@@ -436,7 +503,9 @@ def delete_local_path(path: str, recursive: bool = False) -> Dict[str, Any]:
     except (ValueError, PermissionError, FileNotFoundError) as ex:
         return {"ok": False, "error": str(ex), "path": path}
 
+    change_id = ""
     try:
+        change_id = _begin_mutation("delete", {"target": target}, recursive=bool(recursive))
         if target.is_file():
             target.unlink()
             kind = "file"
@@ -451,8 +520,16 @@ def delete_local_path(path: str, recursive: bool = False) -> Dict[str, Any]:
             kind = "dir"
         else:
             return {"ok": False, "error": "未知路径类型", "path": str(target)}
-    except OSError as ex:
+    except (OSError, RuntimeError) as ex:
+        _fail_mutation(change_id, ex)
         return {"ok": False, "error": str(ex), "path": str(target)}
+
+    result = {"ok": True, "path": str(target), "deleted": True, "type": kind, "recursive": bool(recursive)}
+    try:
+        result.update(_commit_mutation(change_id, {"target": target}, result))
+    except Exception as ex:
+        _fail_mutation(change_id, ex)
+        return {"ok": False, "error": f"目标已删除但变更快照提交失败: {ex}", "path": str(target)}
 
     _LOG.info(
         "[AI问答-本地文件|local_file_ops.delete_local_path|%s|工具执行|完成] "
@@ -461,7 +538,32 @@ def delete_local_path(path: str, recursive: bool = False) -> Dict[str, Any]:
         kind,
         recursive,
     )
-    return {"ok": True, "path": str(target), "deleted": True, "type": kind, "recursive": bool(recursive)}
+    return result
+
+
+def list_local_file_changes(limit: int = 50, session_id: str = "", task_id: str = "") -> Dict[str, Any]:
+    from .file_change_journal import list_file_changes
+
+    rows = list_file_changes(limit=limit, session_id=session_id, task_id=task_id)
+    return {"ok": True, "changes": rows, "count": len(rows)}
+
+
+def get_local_file_change(change_id: str) -> Dict[str, Any]:
+    from .file_change_journal import FileChangeJournalError, get_file_change
+
+    try:
+        return {"ok": True, "change": get_file_change(change_id)}
+    except FileChangeJournalError as ex:
+        return {"ok": False, "error": str(ex), "change_id": change_id}
+
+
+def rollback_local_file_change(change_id: str, force: bool = False) -> Dict[str, Any]:
+    from .file_change_journal import FileChangeJournalError, rollback_file_change
+
+    try:
+        return rollback_file_change(change_id, force=force)
+    except FileChangeJournalError as ex:
+        return {"ok": False, "error": str(ex), "change_id": change_id, "rolled_back": False}
 
 
 # 兼容旧名

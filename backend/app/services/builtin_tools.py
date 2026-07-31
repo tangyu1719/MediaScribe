@@ -288,4 +288,43 @@ def list_builtin_tools() -> List[Dict[str, Any]]:
             ],
             "outputs": "deleted、type JSON。",
         },
+        {
+            "id": "tool_local_file_changes",
+            "name": "本地文件变更记录",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "列出 Agent 文件工具产生的事务记录、状态与回退能力。",
+            "inputs": [
+                {"name": "limit", "type": "int", "required": False, "hint": "最多返回 200 条"},
+                {"name": "session_id", "type": "string", "required": False, "hint": "按会话筛选"},
+                {"name": "task_id", "type": "string", "required": False, "hint": "按任务筛选"},
+            ],
+            "outputs": "change_id、operation、status、rollback_available JSON。",
+        },
+        {
+            "id": "tool_local_file_change_diff",
+            "name": "本地文件变更 Diff",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "查看一次文件变更的逐文件状态和 UTF-8 unified diff。",
+            "inputs": [
+                {"name": "change_id", "type": "string", "required": True, "hint": "chg_ 开头的变更 ID"},
+            ],
+            "outputs": "before、after、diff 与事务元数据 JSON。",
+        },
+        {
+            "id": "tool_local_file_rollback",
+            "name": "本地文件安全回退",
+            "kind": "tool_call",
+            "version": "1.0.0",
+            "impl": "internal",
+            "description": "按 change_id 回退写入、创建、移动、复制或删除；默认保护后续修改。",
+            "inputs": [
+                {"name": "change_id", "type": "string", "required": True, "hint": "待回退的变更 ID"},
+                {"name": "force", "type": "bool", "required": False, "hint": "仅在用户明确允许覆盖冲突时使用"},
+            ],
+            "outputs": "rolled_back、restored_paths 或 conflicts JSON。",
+        },
     ]

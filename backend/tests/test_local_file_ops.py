@@ -13,11 +13,14 @@ from app.services.local_file_ops import (
     delete_local_path,
     find_local_files,
     grep_local_files,
+    get_local_file_change,
     info_local_file,
     list_local_path,
+    list_local_file_changes,
     mkdir_local_path,
     move_local_path,
     read_local_file,
+    rollback_local_file_change,
     write_local_file,
 )
 
@@ -34,6 +37,9 @@ _ALL_TOOLS = (
     "local_file_grep",
     "local_file_info",
     "local_file_delete",
+    "local_file_changes",
+    "local_file_change_diff",
+    "local_file_rollback",
 )
 
 
@@ -237,4 +243,56 @@ def test_local_file_tools_invoke_via_registry():
             os.environ.pop("FS_ALLOW_ROOTS", None)
         else:
             os.environ["FS_ALLOW_ROOTS"] = prev
+        _cleanup_workdir()
+
+
+def test_file_change_diff_rollback_and_conflict_guard():
+    work = _fresh_workdir()
+    prev_roots = os.environ.get("FS_ALLOW_ROOTS")
+    prev_journal = os.environ.get("SBA_FILE_JOURNAL_ROOT")
+    os.environ["FS_ALLOW_ROOTS"] = str(work)
+    os.environ["SBA_FILE_JOURNAL_ROOT"] = str(work / ".journal")
+    target = work / "transaction.txt"
+    target.write_text("before\n", encoding="utf-8")
+    try:
+        wrote = write_local_file(str(target), "after\n")
+        assert wrote["ok"] is True
+        assert wrote["change_id"].startswith("chg_")
+        assert wrote["rollback_available"] is True
+        assert wrote["file_diff"][0]["status"] == "modified"
+        assert "-before" in wrote["file_diff"][0]["unified_diff"]
+        assert "+after" in wrote["file_diff"][0]["unified_diff"]
+
+        detail = get_local_file_change(wrote["change_id"])
+        assert detail["ok"] is True
+        assert detail["change"]["status"] == "committed"
+        rows = list_local_file_changes(limit=10)
+        assert any(row["change_id"] == wrote["change_id"] for row in rows["changes"])
+
+        rolled = rollback_local_file_change(wrote["change_id"])
+        assert rolled["ok"] is True
+        assert target.read_text(encoding="utf-8") == "before\n"
+
+        second = write_local_file(str(target), "second\n")
+        target.write_text("later user edit\n", encoding="utf-8")
+        conflict = rollback_local_file_change(second["change_id"])
+        assert conflict["ok"] is False
+        assert conflict["conflicts"] == [str(target)]
+        assert target.read_text(encoding="utf-8") == "later user edit\n"
+
+        deleted = delete_local_path(str(target))
+        assert deleted["ok"] is True
+        assert not target.exists()
+        restored = rollback_local_file_change(deleted["change_id"])
+        assert restored["ok"] is True
+        assert target.read_text(encoding="utf-8") == "later user edit\n"
+    finally:
+        if prev_roots is None:
+            os.environ.pop("FS_ALLOW_ROOTS", None)
+        else:
+            os.environ["FS_ALLOW_ROOTS"] = prev_roots
+        if prev_journal is None:
+            os.environ.pop("SBA_FILE_JOURNAL_ROOT", None)
+        else:
+            os.environ["SBA_FILE_JOURNAL_ROOT"] = prev_journal
         _cleanup_workdir()
