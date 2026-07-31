@@ -5,6 +5,7 @@ PyYAML>=6.0,<7
 setuptools>=68,<82
 redis>=5.0,<6
 sentence-transformers>=3.0,<4
-torch>=2.2
+# transformers 对 torch.load 的安全要求（CVE-2025-32434）
+torch>=2.6,<3
 yt-dlp>=2025.6.30
 volcengine-python-sdk[ark]>=1.0.0

@@ -33,8 +33,11 @@ def _normalize_server_block(block: Dict[str, Any]) -> Dict[str, Any]:
             p = (_BASE / cwd).resolve()
         out["cwd"] = str(p)
     env = out.get("env")
-    if isinstance(env, dict):
-        new_env = dict(env)
+    if isinstance(env, dict) or cmd in ("python", "python3", "py"):
+        new_env = dict(env) if isinstance(env, dict) else {}
+        if cmd in ("python", "python3", "py"):
+            new_env.setdefault("PYTHONIOENCODING", "utf-8")
+            new_env.setdefault("PYTHONUTF8", "1")
         pp = str(new_env.get("PYTHONPATH") or "").strip()
         if pp:
             parts = []
@@ -48,6 +51,8 @@ def _normalize_server_block(block: Dict[str, Any]) -> Dict[str, Any]:
                 parts.append(str(sp))
             new_env["PYTHONPATH"] = os.pathsep.join(parts)
         out["env"] = new_env
+    out.setdefault("encoding", "utf-8")
+    out.setdefault("encoding_error_handler", "replace")
     return out
 
 
