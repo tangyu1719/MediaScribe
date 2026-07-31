@@ -3879,8 +3879,30 @@ body.rss-panel-fs-active{overflow:hidden}
 .fav-card-grid .fav-card{position:relative;padding-top:22px}
 .fav-card-seq{position:absolute;top:6px;left:8px;font-size:10px;font-weight:700;color:var(--a1);background:rgba(37,99,235,.1);padding:1px 6px;border-radius:4px}
 .fav-card-err{font-size:10px;color:var(--err);margin-top:6px;line-height:1.35}
+.fav-note-layout{display:flex;align-items:flex-start;gap:11px;min-width:0}
+.fav-note-cover-wrap{
+  flex:0 0 82px;width:82px;aspect-ratio:3/4;margin:0;overflow:hidden;
+  border-radius:9px;background:var(--bg2);border:1px solid var(--border2);
+}
+.fav-note-cover-wrap img{display:block;width:100%;height:100%;object-fit:cover}
+.fav-note-content{flex:1;min-width:0}
+.fav-note-author{display:flex;align-items:center;gap:6px;min-width:0;margin-top:7px}
+.fav-note-author .fav-author-avatar{width:24px;height:24px;font-size:10px}
+.fav-note-author-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:var(--t1)}
+.fav-note-author-followers{flex:0 0 auto;font-size:9px;color:var(--t3)}
+.fav-note-meta-line{margin-top:7px;font-size:10px;line-height:1.45;color:var(--t2)}
+.fav-note-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}
+.fav-note-tag{
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  padding:2px 6px;border-radius:999px;font-size:9px;color:#1d4ed8;
+  background:rgba(59,130,246,.07);border:1px solid rgba(59,130,246,.16);
+}
+.fav-note-origin{display:flex;align-items:center;flex-wrap:wrap;gap:5px 8px;margin-top:7px;font-size:9px;color:var(--t3)}
+.fav-note-source-badge{padding:2px 6px;border-radius:999px;background:var(--bg2);border:1px solid var(--border2);color:var(--t2)}
+.fav-note-source-badge--capture{color:#15803d;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.24);font-weight:650}
 .sub-link-rows{display:flex;flex-direction:column;gap:8px}
 .sub-link-rows .sub-link-card{width:100%}
+.sub-link-rows .fav-note-cover-wrap{flex-basis:96px;width:96px;aspect-ratio:4/3}
 .sub-link-card{cursor:pointer}
 .sub-link-card:hover{box-shadow:0 2px 8px rgba(15,23,42,.08)}
 .q-card-scroll-flash{outline:2px solid var(--a1);outline-offset:2px;animation:q-card-flash 2.2s ease}
