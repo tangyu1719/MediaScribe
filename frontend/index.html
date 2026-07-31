@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=64">
+<link rel="stylesheet" href="/assets/css/app.css?v=65">
 <link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
 <link rel="preload" href="/vendor/vue.global.prod.js" as="script">
-<link rel="preload" href="/assets/js/app.js?v=143" as="script">
+<link rel="preload" href="/assets/js/app.js?v=144" as="script">
 <!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
 <script src="/assets/js/auth.js?v=8"></script>
 <script>
@@ -23,7 +23,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
 })();
 </script>
 <script src="/vendor/vue.global.prod.js" defer></script>
-<script src="/assets/js/app.js?v=143" defer></script>
+<script src="/assets/js/app.js?v=144" defer></script>
 <script src="/vendor/marked.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/vendor/mermaid.min.js" defer></script>
@@ -683,12 +683,38 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
           <div v-if="!upUnifiedList.length&&!favUpForm.pulling&&!favUpForm.loading" class="rss-empty">暂无 UP。添加订阅或点「拉取关注 UP」。</div>
           <div v-for="u in upUnifiedList" :key="u.creator_id" class="up-unified-card glass" :class="{on:upSelId===u.creator_id,'up-unified-card--subscribed':u.already_subscribed}">
             <button type="button" class="up-unified-card-head" @click="selectUpCard(u)">
-              <div class="rss-feed-title">{{u.display_name||u.creator_id}}</div>
-              <div class="rss-feed-meta">
-                <template v-if="u.already_subscribed">{{u.status||'active'}} · offset {{u.cursor_offset||0}}{{u.initial_backfill_done?' · 增量':' · 回填中'}} · {{subFmtTime(u.last_fetch_at)||'未同步'}}</template>
-                <template v-else>候选 · 收藏 {{u.note_count||0}} 篇<span v-if="u.has_profile"> · 有画像</span></template>
+              <div class="up-person-row">
+                <span class="up-person-avatar">{{upAvatarText(u)}}</span>
+                <span class="up-person-identity">
+                  <span class="up-person-name-line">
+                    <span class="up-person-name">{{u.display_name||'未命名作者'}}</span>
+                    <span class="up-person-state" :class="'up-person-state--'+upStatusClass(u)">{{upStatusLabel(u)}}</span>
+                  </span>
+                  <span v-if="upPublicId(u)" class="up-person-id">小红书号 {{upPublicId(u)}}</span>
+                </span>
               </div>
-              <div v-if="(u.sample_titles||[]).length&&!u.already_subscribed" class="rss-feed-meta" style="margin-top:2px">{{(u.sample_titles||[])[0]}}</div>
+              <span class="up-person-metrics">
+                <span v-if="u.note_count" class="up-person-metric">
+                  <strong>{{u.note_count}}</strong>
+                  <small>篇收藏命中</small>
+                </span>
+                <span v-if="u.already_subscribed" class="up-person-metric">
+                  <strong>{{u.initial_backfill_done?'增量追踪':'首次回填'}}</strong>
+                  <small>同步方式</small>
+                </span>
+                <span class="up-person-metric">
+                  <strong>{{u.has_profile?'画像已生成':'画像待生成'}}</strong>
+                  <small>人物分析</small>
+                </span>
+              </span>
+              <span v-if="(u.sample_titles||[]).length" class="up-person-evidence">
+                <span class="up-person-evidence-label">代表内容</span>
+                <span v-for="(title,idx) in (u.sample_titles||[]).slice(0,2)" :key="idx" class="up-person-evidence-title">{{title}}</span>
+              </span>
+              <span class="up-person-foot">
+                <span>{{upSourceLabel(u)}}</span>
+                <span v-if="u.already_subscribed">{{subFmtTime(u.last_fetch_at)?'最近同步 '+subFmtTime(u.last_fetch_at):'尚未同步'}}</span>
+              </span>
             </button>
             <div v-if="upSelId===u.creator_id" class="btns up-unified-card-actions">
               <template v-if="u.already_subscribed">
@@ -705,6 +731,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                 <button type="button" class="btn btn-o btn-xs" :disabled="favUpForm.profiling" @click.stop="profileFollowUp(u)">{{favUpForm.profiling?'画像中…':'生成画像'}}</button>
                 <button type="button" class="btn btn-danger btn-xs" :disabled="favUpForm.removing" @click.stop="removeFollowUp(u)">移出关注</button>
               </template>
+              <a v-if="u.profile_url" class="btn btn-o btn-xs" :href="u.profile_url" target="_blank" rel="noopener noreferrer" @click.stop>打开主页</a>
             </div>
           </div>
           </div>
@@ -799,21 +826,36 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                 <button type="button" class="btn btn-o btn-xs" :class="{on:subProfileViewMode==='full'}" @click="subProfileViewMode='full'">完整报告</button>
               </div>
               <div v-show="subProfileViewMode==='summary'" class="xhs-profile-summary">
-                <div class="xhs-profile-card">
-                  <div class="xhs-profile-card-h">{{subProfile.display_name||subSelRow?.display_name||'UP 人物画像'}}</div>
-                  <div v-if="subProfile.red_id||subProfile.creator_id" class="xhs-profile-meta">
-                    <span v-if="subProfile.red_id">小红书号 {{subProfile.red_id}}</span>
-                    <span v-if="subProfile.creator_id">Creator {{subProfile.creator_id}}</span>
-                    <span v-if="subProfile.llm_model">模型 {{subProfile.llm_model}}</span>
+                <div class="xhs-profile-card xhs-profile-person-card">
+                  <div class="xhs-profile-person-head">
+                    <span class="xhs-profile-person-avatar">{{upAvatarText({display_name:subProfile.display_name||subSelRow?.display_name})}}</span>
+                    <div class="xhs-profile-person-identity">
+                      <div class="xhs-profile-card-h">{{subProfile.display_name||subSelRow?.display_name||'UP 人物画像'}}</div>
+                      <div class="xhs-profile-person-sub">
+                        <span v-if="subProfile.red_id">小红书号 {{subProfile.red_id}}</span>
+                        <span>{{subProfileRunLabel()}}</span>
+                      </div>
+                    </div>
+                    <span class="xhs-profile-depth-badge">人物画像</span>
                   </div>
-                  <dl class="xhs-profile-dl">
-                    <template v-if="subProfile.industry"><dt>行业</dt><dd>{{subProfile.industry}}</dd></template>
-                    <template v-if="subProfile.domain"><dt>领域</dt><dd>{{subProfile.domain}}</dd></template>
-                    <template v-if="subProfile.niche"><dt>细分赛道</dt><dd>{{subProfile.niche}}</dd></template>
-                    <template v-if="subProfile.persona_summary"><dt>人设</dt><dd>{{subProfile.persona_summary}}</dd></template>
-                    <template v-if="subProfile.target_audience"><dt>目标受众</dt><dd>{{subProfile.target_audience}}</dd></template>
-                    <template v-if="subProfile.content_style"><dt>内容风格</dt><dd>{{subProfile.content_style}}</dd></template>
-                  </dl>
+                  <div v-if="subProfile.industry||subProfile.domain||subProfile.niche" class="xhs-profile-facts">
+                    <div v-if="subProfile.industry" class="xhs-profile-fact"><span>行业</span><strong>{{subProfile.industry}}</strong></div>
+                    <div v-if="subProfile.domain" class="xhs-profile-fact"><span>领域</span><strong>{{subProfile.domain}}</strong></div>
+                    <div v-if="subProfile.niche" class="xhs-profile-fact"><span>细分方向</span><strong>{{subProfile.niche}}</strong></div>
+                  </div>
+                  <div v-if="subProfile.persona_summary" class="xhs-profile-persona">
+                    <span>核心人设</span>
+                    <p>{{subProfile.persona_summary}}</p>
+                  </div>
+                  <div v-if="subProfile.target_audience||subProfile.content_style" class="xhs-profile-audience-grid">
+                    <div v-if="subProfile.target_audience"><span>目标受众</span><p>{{subProfile.target_audience}}</p></div>
+                    <div v-if="subProfile.content_style"><span>内容风格</span><p>{{subProfile.content_style}}</p></div>
+                  </div>
+                  <div class="xhs-profile-analysis-meta">
+                    <span v-if="subProfile.catalog_count">基于 {{subProfile.catalog_count}} 篇内容目录</span>
+                    <span v-if="subProfile.selected_count">深度采样 {{subProfile.selected_count}} 篇</span>
+                    <span v-if="subProfile.llm_model">分析模型 {{subProfile.llm_model}}</span>
+                  </div>
                 </div>
                 <div v-if="subProfile.deep_directions.length" class="xhs-profile-block">
                   <div class="xhs-profile-block-h">深入方向</div>
@@ -988,22 +1030,32 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
           <div class="rss-panel-scroll">
           <div v-if="!favHabit.top_authors||!favHabit.top_authors.length" class="rss-empty">暂无习惯数据。完成至少一批新增收藏分析后将累积作者/话题偏好。</div>
           <div v-else class="xhs-profile-cards">
+            <div v-if="favHabit.total_analyzed" class="fav-habit-overview">
+              <strong>{{favHabit.total_analyzed}}</strong>
+              <span>篇收藏已纳入偏好画像</span>
+            </div>
             <div class="xhs-profile-card">
               <div class="xhs-profile-card-h">常收藏作者 Top</div>
-              <ul class="xhs-profile-note-list">
-                <li v-for="a in (favHabit.top_authors||[]).slice(0,8)" :key="a.author_id">
-                  <span>{{a.author_name||a.author_id}}</span>
-                  <span class="xhs-profile-note-meta">{{a.count}} 篇</span>
+              <ul class="fav-author-list">
+                <li v-for="(a,idx) in (favHabit.top_authors||[]).slice(0,8)" :key="a.author_id">
+                  <span class="fav-author-rank">{{idx+1}}</span>
+                  <span class="fav-author-avatar">{{upAvatarText({display_name:a.author_name||a.author_id})}}</span>
+                  <span class="fav-author-name">{{a.author_name||'未命名作者'}}</span>
+                  <span class="fav-author-count"><strong>{{a.count}}</strong> 篇</span>
                 </li>
               </ul>
             </div>
             <div class="xhs-profile-card" v-if="(favHabit.interest_topics||[]).length">
               <div class="xhs-profile-card-h">兴趣话题</div>
-              <p style="font-size:12px;color:var(--t2);line-height:1.6">{{(favHabit.interest_topics||[]).slice(0,12).join(' · ')}}</p>
+              <div class="xhs-profile-tags">
+                <span v-for="(topic,idx) in (favHabit.interest_topics||[]).slice(0,12)" :key="idx" class="xhs-profile-tag">{{topic}}</span>
+              </div>
             </div>
             <div class="xhs-profile-card" v-if="(favHabit.preferred_content_types||[]).length">
               <div class="xhs-profile-card-h">偏好内容类型</div>
-              <p style="font-size:12px;color:var(--t2)">{{(favHabit.preferred_content_types||[]).join(' · ')}}</p>
+              <div class="fav-content-types">
+                <span v-for="(type,idx) in (favHabit.preferred_content_types||[])" :key="idx">{{type}}</span>
+              </div>
             </div>
           </div>
           <div v-if="favHabit.persona_md" class="xhs-sub-digest" style="margin-top:10px;font-size:12px" v-html="renderSubDigestMd(favHabit.persona_md.slice(0,3000))"></div>
