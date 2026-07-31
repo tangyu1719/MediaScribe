@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=65">
+<link rel="stylesheet" href="/assets/css/app.css?v=66">
 <link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
 <link rel="preload" href="/vendor/vue.global.prod.js" as="script">
-<link rel="preload" href="/assets/js/app.js?v=144" as="script">
+<link rel="preload" href="/assets/js/app.js?v=145" as="script">
 <!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
 <script src="/assets/js/auth.js?v=8"></script>
 <script>
@@ -23,7 +23,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
 })();
 </script>
 <script src="/vendor/vue.global.prod.js" defer></script>
-<script src="/assets/js/app.js?v=144" defer></script>
+<script src="/assets/js/app.js?v=145" defer></script>
 <script src="/vendor/marked.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/vendor/mermaid.min.js" defer></script>
@@ -693,27 +693,9 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                   <span v-if="upPublicId(u)" class="up-person-id">小红书号 {{upPublicId(u)}}</span>
                 </span>
               </div>
-              <span class="up-person-metrics">
-                <span v-if="u.note_count" class="up-person-metric">
-                  <strong>{{u.note_count}}</strong>
-                  <small>篇收藏命中</small>
-                </span>
-                <span v-if="u.already_subscribed" class="up-person-metric">
-                  <strong>{{u.initial_backfill_done?'增量追踪':'首次回填'}}</strong>
-                  <small>同步方式</small>
-                </span>
-                <span class="up-person-metric">
-                  <strong>{{u.has_profile?'画像已生成':'画像待生成'}}</strong>
-                  <small>人物分析</small>
-                </span>
-              </span>
-              <span v-if="(u.sample_titles||[]).length" class="up-person-evidence">
-                <span class="up-person-evidence-label">代表内容</span>
-                <span v-for="(title,idx) in (u.sample_titles||[]).slice(0,2)" :key="idx" class="up-person-evidence-title">{{title}}</span>
-              </span>
-              <span class="up-person-foot">
-                <span>{{upSourceLabel(u)}}</span>
-                <span v-if="u.already_subscribed">{{subFmtTime(u.last_fetch_at)?'最近同步 '+subFmtTime(u.last_fetch_at):'尚未同步'}}</span>
+              <span class="up-person-brief">
+                <span v-if="!u.already_subscribed&&u.note_count">收藏命中 {{u.note_count}} 篇</span>
+                <span v-else-if="u.already_subscribed">{{subFmtTime(u.last_fetch_at)?'最近同步 '+subFmtTime(u.last_fetch_at):'尚未同步'}}</span>
               </span>
             </button>
             <div v-if="upSelId===u.creator_id" class="btns up-unified-card-actions">
@@ -815,6 +797,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
             <div v-else class="xhs-profile-panel">
               <div class="xhs-profile-stats" :class="'xhs-profile-stats--'+subProfileRunClass()">
                 <span class="xhs-profile-stat-pill">{{subProfileRunLabel()}}</span>
+                <span v-if="subProfile.confidence">置信度 {{subProfile.confidence}}</span>
                 <span v-if="subProfile.catalog_count">目录 {{subProfile.catalog_count}} 篇</span>
                 <span v-if="subProfile.selected_count">选篇 {{subProfile.selected_count}}</span>
                 <span v-if="subProfile.deep_ok_count">深度 {{subProfile.deep_ok_count}}/{{subProfile.selected_count||subProfile.deep_ok_count}}</span>
@@ -836,7 +819,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                         <span>{{subProfileRunLabel()}}</span>
                       </div>
                     </div>
-                    <span class="xhs-profile-depth-badge">人物画像</span>
+                    <span class="xhs-profile-depth-badge">小红书深度画像</span>
                   </div>
                   <div v-if="subProfile.industry||subProfile.domain||subProfile.niche" class="xhs-profile-facts">
                     <div v-if="subProfile.industry" class="xhs-profile-fact"><span>行业</span><strong>{{subProfile.industry}}</strong></div>
@@ -857,6 +840,36 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                     <span v-if="subProfile.llm_model">分析模型 {{subProfile.llm_model}}</span>
                   </div>
                 </div>
+                <div v-if="subProfile.content_types.length||subProfile.output_themes.length||subProfile.output_formats.length||subProfile.cadence_hint||subProfile.freshness" class="xhs-profile-section">
+                  <div class="xhs-profile-section-head">
+                    <div>
+                      <strong>内容生产画像</strong>
+                      <span>基于小红书目录与深度采样结果</span>
+                    </div>
+                  </div>
+                  <div v-if="subProfile.content_types.length" class="xhs-profile-type-grid">
+                    <div v-for="row in subProfile.content_types" :key="row.key" class="xhs-profile-type-stat">
+                      <strong>{{row.count}}</strong>
+                      <span>{{row.label}}</span>
+                    </div>
+                  </div>
+                  <div v-if="subProfile.output_themes.length" class="xhs-profile-analysis-row">
+                    <span>稳定主题</span>
+                    <div class="xhs-profile-tags">
+                      <span v-for="(t,i) in subProfile.output_themes" :key="'ot'+i" class="xhs-profile-tag">{{t}}</span>
+                    </div>
+                  </div>
+                  <div v-if="subProfile.output_formats.length" class="xhs-profile-analysis-row">
+                    <span>常用形式</span>
+                    <div class="xhs-profile-tags">
+                      <span v-for="(t,i) in subProfile.output_formats" :key="'of'+i" class="xhs-profile-tag xhs-profile-tag--muted">{{t}}</span>
+                    </div>
+                  </div>
+                  <div v-if="subProfile.cadence_hint||subProfile.freshness" class="xhs-profile-output-grid">
+                    <div v-if="subProfile.cadence_hint"><span>更新节奏</span><p>{{subProfile.cadence_hint}}</p></div>
+                    <div v-if="subProfile.freshness"><span>内容新鲜度</span><p>{{subProfile.freshness}}</p></div>
+                  </div>
+                </div>
                 <div v-if="subProfile.deep_directions.length" class="xhs-profile-block">
                   <div class="xhs-profile-block-h">深入方向</div>
                   <div class="xhs-profile-tags">
@@ -867,6 +880,59 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
                   <div class="xhs-profile-block-h">近期主题</div>
                   <div class="xhs-profile-tags">
                     <span v-for="(t,i) in subProfile.recent_topics" :key="'r'+i" class="xhs-profile-tag xhs-profile-tag--muted">{{t}}</span>
+                  </div>
+                </div>
+                <div v-if="subProfile.recent_direction_shift" class="xhs-profile-section xhs-profile-shift">
+                  <div class="xhs-profile-section-head">
+                    <div>
+                      <strong>近期方向变化</strong>
+                      <span>从近期内容中识别出的主题迁移</span>
+                    </div>
+                  </div>
+                  <p>{{subProfile.recent_direction_shift}}</p>
+                </div>
+                <div v-if="subProfile.title_topic_buckets.length" class="xhs-profile-section">
+                  <div class="xhs-profile-section-head">
+                    <div>
+                      <strong>标题主题聚类</strong>
+                      <span>按小红书笔记标题统计</span>
+                    </div>
+                  </div>
+                  <div class="xhs-profile-topic-grid">
+                    <div v-for="(bucket,i) in subProfile.title_topic_buckets" :key="'tb'+i" class="xhs-profile-topic-card">
+                      <div><strong>{{bucket.topic}}</strong><span v-if="bucket.count">{{bucket.count}} 篇</span></div>
+                      <p v-if="(bucket.example_titles||[]).length">{{bucket.example_titles.slice(0,2).join(' · ')}}</p>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="subProfile.collaboration_scenarios.length||subProfile.open_questions.length" class="xhs-profile-insight-grid">
+                  <div v-if="subProfile.collaboration_scenarios.length" class="xhs-profile-section">
+                    <div class="xhs-profile-section-head"><div><strong>适合合作场景</strong><span>分析建议</span></div></div>
+                    <ul class="xhs-profile-plain-list">
+                      <li v-for="(item,i) in subProfile.collaboration_scenarios" :key="'cs'+i">{{item}}</li>
+                    </ul>
+                  </div>
+                  <div v-if="subProfile.open_questions.length" class="xhs-profile-section">
+                    <div class="xhs-profile-section-head"><div><strong>待验证信息</strong><span>当前样本尚不能确认</span></div></div>
+                    <ul class="xhs-profile-plain-list xhs-profile-plain-list--muted">
+                      <li v-for="(item,i) in subProfile.open_questions" :key="'oq'+i">{{item}}</li>
+                    </ul>
+                  </div>
+                </div>
+                <div v-if="subProfile.evidence_notes.length" class="xhs-profile-section">
+                  <div class="xhs-profile-section-head">
+                    <div>
+                      <strong>画像证据</strong>
+                      <span>由原文内容支撑的判断依据</span>
+                    </div>
+                  </div>
+                  <div class="xhs-profile-evidence-list">
+                    <div v-for="(item,i) in subProfile.evidence_notes" :key="item.note_id||i" class="xhs-profile-evidence-card">
+                      <strong>{{item.title||item.note_id}}</strong>
+                      <ul v-if="(item.key_points||[]).length">
+                        <li v-for="(point,j) in item.key_points" :key="j">{{point}}</li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
                 <div v-if="subProfile.selected_notes.length" class="xhs-profile-block">

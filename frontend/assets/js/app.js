@@ -1022,6 +1022,9 @@ const subProfile=reactive({
   display_name:"",red_id:"",creator_id:"",llm_model:"",
   industry:"",domain:"",niche:"",persona_summary:"",target_audience:"",content_style:"",
   deep_directions:[],recent_topics:[],selected_notes:[],sampled_articles:[],
+  content_types:[],output_themes:[],output_formats:[],cadence_hint:"",freshness:"",
+  title_topic_buckets:[],recent_direction_shift:"",evidence_notes:[],
+  collaboration_scenarios:[],confidence:"",open_questions:[],
   run_status:"",catalog_count:0,selected_count:0,deep_ok_count:0,deep_fail_count:0,
   finished_at:"",error_code:"",error_message:""
 });
@@ -1136,6 +1139,9 @@ function resetSubProfile(){
     display_name:"",red_id:"",creator_id:"",llm_model:"",
     industry:"",domain:"",niche:"",persona_summary:"",target_audience:"",content_style:"",
     deep_directions:[],recent_topics:[],selected_notes:[],sampled_articles:[],
+    content_types:[],output_themes:[],output_formats:[],cadence_hint:"",freshness:"",
+    title_topic_buckets:[],recent_direction_shift:"",evidence_notes:[],
+    collaboration_scenarios:[],confidence:"",open_questions:[],
     run_status:"",catalog_count:0,selected_count:0,deep_ok_count:0,deep_fail_count:0,
     finished_at:"",error_code:"",error_message:""
   });
@@ -1143,6 +1149,17 @@ function resetSubProfile(){
 function applySubProfileFromApi(d){
   const doc=(d&&d.profile_doc)||{};
   const run=(d&&d.latest_run)||{};
+  const profileJson=(doc.profile_json&&typeof doc.profile_json==="object")?doc.profile_json:{};
+  const light=(profileJson.light_profile&&typeof profileJson.light_profile==="object")
+    ?profileJson.light_profile:((run.light_profile_json&&typeof run.light_profile_json==="object")?run.light_profile_json:{});
+  const output=(doc.output_analysis&&typeof doc.output_analysis==="object")
+    ?doc.output_analysis:((profileJson.output_analysis&&typeof profileJson.output_analysis==="object")?profileJson.output_analysis:{});
+  const distribution=(doc.content_type_distribution&&typeof doc.content_type_distribution==="object")
+    ?doc.content_type_distribution:((light.content_type_distribution&&typeof light.content_type_distribution==="object")?light.content_type_distribution:{});
+  const typeLabels={video:"视频",graphic:"图文",image:"图文",text:"文字",other:"其他"};
+  const contentTypes=Object.entries(distribution)
+    .map(([key,value])=>({key,label:typeLabels[String(key).toLowerCase()]||String(key),count:Number(value)||0}))
+    .filter(row=>row.count>0);
   const dirs=Array.isArray(doc.deep_directions)?doc.deep_directions:(doc.deep_directions?[doc.deep_directions]:[]);
   const notes=Array.isArray(doc.selected_notes)?doc.selected_notes:[];
   const sampled=Array.isArray(doc.sampled_articles)?doc.sampled_articles:(doc.profile_json&&doc.profile_json.sampled_articles)||[];
@@ -1175,6 +1192,17 @@ function applySubProfileFromApi(d){
     recent_topics:topics.filter(Boolean),
     selected_notes:mergedNotes,
     sampled_articles:sampled,
+    content_types:contentTypes,
+    output_themes:Array.isArray(output.themes)?output.themes.filter(Boolean):[],
+    output_formats:Array.isArray(output.formats)?output.formats.filter(Boolean):[],
+    cadence_hint:String(output.cadence_hint||"").trim(),
+    freshness:String(output.freshness||"").trim(),
+    title_topic_buckets:Array.isArray(light.title_topic_buckets)?light.title_topic_buckets.filter(x=>x&&x.topic):[],
+    recent_direction_shift:String(profileJson.recent_direction_shift||"").trim(),
+    evidence_notes:Array.isArray(profileJson.evidence_notes)?profileJson.evidence_notes.filter(Boolean):[],
+    collaboration_scenarios:Array.isArray(profileJson.collaboration_scenarios)?profileJson.collaboration_scenarios.filter(Boolean):[],
+    confidence:String(profileJson.confidence||"").trim(),
+    open_questions:Array.isArray(profileJson.open_questions)?profileJson.open_questions.filter(Boolean):[],
     run_status:run.status||"",
     catalog_count:Number(run.catalog_count)||0,
     selected_count:Number(run.selected_count)||0,
