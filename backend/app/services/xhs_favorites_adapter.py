@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,7 +66,13 @@ def _note_id_from_dict(n: Dict[str, Any]) -> str:
             nid = extract_xhs_note_id_from_url(val)
             if is_valid_xhs_note_id(nid):
                 return nid
-    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    card = (
+        n.get("noteCard")
+        if isinstance(n.get("noteCard"), dict)
+        else n.get("note_card")
+        if isinstance(n.get("note_card"), dict)
+        else {}
+    )
     if card:
         for key in ("noteId", "id", "note_id"):
             val = str(card.get(key) or "").strip()
@@ -82,7 +89,13 @@ def _note_id_from_dict(n: Dict[str, Any]) -> str:
 
 def _normalize_favorite_note_dict(n: Dict[str, Any]) -> Dict[str, Any]:
     """合并 noteCard 字段；无真实 noteId 时保留原结构供上层跳过（不再生成 fav_* 假 ID）。"""
-    card = n.get("noteCard") if isinstance(n.get("noteCard"), dict) else {}
+    card = (
+        n.get("noteCard")
+        if isinstance(n.get("noteCard"), dict)
+        else n.get("note_card")
+        if isinstance(n.get("note_card"), dict)
+        else {}
+    )
     merged: Dict[str, Any] = dict(n)
     if card:
         merged.setdefault("noteCard", card)
@@ -93,6 +106,15 @@ def _normalize_favorite_note_dict(n: Dict[str, Any]) -> Dict[str, Any]:
         card_user = card.get("user") if isinstance(card.get("user"), dict) else {}
         if card_user and not merged.get("user"):
             merged["user"] = card_user
+    for source, target in (
+        ("display_title", "displayTitle"),
+        ("note_id", "noteId"),
+        ("note_card", "noteCard"),
+        ("interact_info", "interactInfo"),
+        ("xsec_token", "xsecToken"),
+    ):
+        if merged.get(source) is not None and not merged.get(target):
+            merged[target] = merged.get(source)
     nid = _note_id_from_dict(merged)
     if nid:
         merged["noteId"] = nid
@@ -196,8 +218,23 @@ def _extract_favorites_meta_from_state(data: Dict[str, Any]) -> List[Dict[str, A
                 if not flat:
                     continue
                 first = flat[0] if isinstance(flat[0], dict) else {}
-                card = first.get("noteCard") if isinstance(first.get("noteCard"), dict) else {}
-                if not (first.get("displayTitle") or card.get("displayTitle") or first.get("noteId") or card.get("noteId")):
+                card = (
+                    first.get("noteCard")
+                    if isinstance(first.get("noteCard"), dict)
+                    else first.get("note_card")
+                    if isinstance(first.get("note_card"), dict)
+                    else {}
+                )
+                if not (
+                    first.get("displayTitle")
+                    or first.get("display_title")
+                    or card.get("displayTitle")
+                    or card.get("display_title")
+                    or first.get("noteId")
+                    or first.get("note_id")
+                    or card.get("noteId")
+                    or card.get("note_id")
+                ):
                     continue
                 return [_normalize_favorite_note_dict(x) for x in flat if isinstance(x, dict)]
 
@@ -228,7 +265,9 @@ def parse_favorites_meta_from_init_state(
         title = (
             n.get("title")
             or n.get("displayTitle")
+            or n.get("display_title")
             or (n.get("noteCard") or {}).get("displayTitle")
+            or (n.get("noteCard") or {}).get("display_title")
             or ""
         )
         title = str(title).strip()
@@ -262,11 +301,47 @@ def _author_followers(n: Dict[str, Any]) -> int:
     author = n.get("user") or n.get("author") or {}
     if not isinstance(author, dict):
         return 0
-    for key in ("fans", "fanCount", "follows", "followerCount", "followers"):
+    for key in (
+        "fans",
+        "fanCount",
+        "fan_count",
+        "follows",
+        "followerCount",
+        "follower_count",
+        "followers",
+    ):
         val = author.get(key)
         if isinstance(val, (int, float)) and val >= 0:
             return int(val)
     return 0
+
+
+def _cover_url_from_note(n: Dict[str, Any], card: Dict[str, Any]) -> str:
+    for value in (n.get("cover"), card.get("cover")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("url_default", "url_pre", "url", "urlDefault", "urlPre"):
+                url = str(value.get(key) or "").strip()
+                if url:
+                    return url
+            for info in value.get("info_list") or value.get("infoList") or []:
+                if isinstance(info, dict):
+                    url = str(info.get("url") or info.get("url_default") or "").strip()
+                    if url:
+                        return url
+    for key in ("imageList", "image_list"):
+        images = card.get(key)
+        if isinstance(images, list) and images and isinstance(images[0], dict):
+            url = str(
+                images[0].get("url")
+                or images[0].get("url_default")
+                or images[0].get("urlDefault")
+                or ""
+            ).strip()
+            if url:
+                return url
+    return ""
 
 
 def parse_favorites_from_init_state(
@@ -285,7 +360,9 @@ def parse_favorites_from_init_state(
         title = (
             n.get("title")
             or n.get("displayTitle")
+            or n.get("display_title")
             or (n.get("noteCard") or {}).get("displayTitle")
+            or (n.get("noteCard") or {}).get("display_title")
             or ""
         )
         title = str(title).strip() or f"笔记 {nid[:8]}"
@@ -294,7 +371,15 @@ def parse_favorites_from_init_state(
         if not url:
             continue
         uh = link_url_hash(url)
-        pub = n.get("time") or n.get("createTime") or n.get("publishTime") or n.get("collectTime")
+        pub = (
+            n.get("time")
+            or n.get("createTime")
+            or n.get("create_time")
+            or n.get("publishTime")
+            or n.get("publish_time")
+            or n.get("collectTime")
+            or n.get("collect_time")
+        )
         pub_str = None
         pub_date = None
         if pub:
@@ -313,21 +398,34 @@ def parse_favorites_from_init_state(
         author = n.get("user") or n.get("author") or card.get("user") or {}
         author_id = str(author.get("userId") or author.get("id") or author.get("user_id") or "")
         author_name = str(author.get("nickname") or author.get("name") or "")
-        stats = n.get("interactInfo") if isinstance(n.get("interactInfo"), dict) else {}
+        stats = (
+            n.get("interactInfo")
+            if isinstance(n.get("interactInfo"), dict)
+            else n.get("interact_info")
+            if isinstance(n.get("interact_info"), dict)
+            else {}
+        )
         like_count = 0
         comment_count = 0
-        for key in ("likedCount", "likeCount", "likes", "liked"):
+        for key in ("likedCount", "liked_count", "likeCount", "like_count", "likes", "liked"):
             val = stats.get(key) if stats else None
             if isinstance(val, (int, float)):
                 like_count = int(val)
                 break
-        for key in ("commentCount", "commentsCount", "comments", "commented"):
+        for key in (
+            "commentCount",
+            "comment_count",
+            "commentsCount",
+            "comments_count",
+            "comments",
+            "commented",
+        ):
             val = stats.get(key) if stats else None
             if isinstance(val, (int, float)):
                 comment_count = int(val)
                 break
         hashtags: List[str] = []
-        for key in ("hashtags", "tagList", "topics", "keywords"):
+        for key in ("hashtags", "tagList", "tag_list", "topics", "keywords"):
             vals = n.get(key) or card.get(key)
             if isinstance(vals, list):
                 for v in vals:
@@ -340,10 +438,7 @@ def parse_favorites_from_init_state(
         if not hashtags:
             text_blob = " ".join([title, str(n.get("desc") or ""), str(n.get("noteCard", {}).get("desc") if isinstance(n.get("noteCard"), dict) else "")])
             hashtags = re.findall(r"#([\w\u4e00-\u9fff\-]+)", text_blob)
-        cover_url = str(
-            card.get("cover")
-            or card.get("imageList", [{}])[0].get("url") if isinstance(card.get("imageList"), list) and card.get("imageList") else ""
-        )
+        cover_url = _cover_url_from_note(n, card)
         items.append(
             FavoritesFeedItem(
                 platform=_PLATFORM,
@@ -367,6 +462,89 @@ def parse_favorites_from_init_state(
             )
         )
     return items
+
+
+def parse_favorites_from_response_capture(
+    capture: Dict[str, Any],
+    *,
+    owner_creator_id: str,
+    profile_url: str,
+    fetch_source: str = "collect_page",
+) -> List[FavoritesFeedItem]:
+    """解析页面自身已签名的收藏分页响应，不在浏览器外重算签名。
+
+    ``capture`` 由 ``xhs_local_browser`` 在真实页面上下文拦截
+    ``/api/sns/web/v2/note/collect/page`` 后产生。这里只消费响应体中的公开
+    笔记结构；请求头、Cookie 和签名字段不会离开浏览器上下文。
+    """
+    pages = capture.get("pages") if isinstance(capture, dict) else []
+    if not isinstance(pages, list):
+        return []
+
+    by_note: Dict[str, FavoritesFeedItem] = {}
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        notes = page.get("items")
+        if not isinstance(notes, list) or not notes:
+            continue
+        transport = str(page.get("transport") or "xhr").strip().lower()
+        source = f"{fetch_source}_{transport}"
+        parsed = parse_favorites_from_init_state(
+            {"collect": {"notes": notes}},
+            owner_creator_id=owner_creator_id,
+            profile_url=profile_url,
+            fetch_source=source,
+        )
+        for item in parsed:
+            current = by_note.get(item.note_id)
+            if current is None:
+                by_note[item.note_id] = item
+                continue
+            current_score = (
+                (8 if "xsec_token" in (current.canonical_url or "") else 0)
+                + (4 if current.author_id else 0)
+                + (2 if current.title and not current.title.startswith("笔记 ") else 0)
+                + (1 if current.cover_url else 0)
+            )
+            item_score = (
+                (8 if "xsec_token" in (item.canonical_url or "") else 0)
+                + (4 if item.author_id else 0)
+                + (2 if item.title and not item.title.startswith("笔记 ") else 0)
+                + (1 if item.cover_url else 0)
+            )
+            if item_score > current_score:
+                by_note[item.note_id] = item
+    return list(by_note.values())
+
+
+def favorites_catalog_metrics(items: List[FavoritesFeedItem]) -> Dict[str, Any]:
+    """生成无敏感值的覆盖率指标，便于同参数比较旧路径与响应捕获路径。"""
+    total = len(items)
+    source_counts: Dict[str, int] = {}
+    for item in items:
+        source = str(getattr(item, "fetch_source", "") or "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+    def _ratio(count: int) -> float:
+        return round(count / total, 4) if total else 0.0
+
+    note_ids = sum(1 for item in items if is_valid_xhs_note_id(item.note_id))
+    tokens = sum(1 for item in items if "xsec_token" in (item.canonical_url or ""))
+    titles = sum(1 for item in items if item.title and not item.title.startswith("笔记 "))
+    authors = sum(1 for item in items if item.author_id or item.author_name)
+    return {
+        "count": total,
+        "source_counts": source_counts,
+        "note_id_complete": note_ids,
+        "note_id_rate": _ratio(note_ids),
+        "xsec_token_complete": tokens,
+        "xsec_token_rate": _ratio(tokens),
+        "title_complete": titles,
+        "title_rate": _ratio(titles),
+        "author_complete": authors,
+        "author_rate": _ratio(authors),
+    }
 
 
 def enrich_favorites_feed_items_with_xsec(
@@ -446,6 +624,7 @@ def fetch_favorites_catalog(
     """
     from .xhs_local_browser import scrape_favorites_feed_items
 
+    started_at = time.perf_counter()
     url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
     try:
         items = scrape_favorites_feed_items(
@@ -489,12 +668,14 @@ def fetch_favorites_catalog(
         profile_url=url,
     )
 
+    metrics = favorites_catalog_metrics(items)
+    metrics["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
     _log.info(
-        "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|拉取] 完成; count=%s; with_token=%s",
+        "[%s|xhs_favorites_adapter.fetch_favorites_catalog|%s|Agent执行|拉取] "
+        "完成; metrics=%s",
         _CHAIN,
         creator_id,
-        len(items),
-        sum(1 for it in items if "xsec_token" in it.canonical_url),
+        json.dumps(metrics, ensure_ascii=False, sort_keys=True),
     )
     return items[:limit], True
 

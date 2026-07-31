@@ -207,6 +207,79 @@ def cdp_tab_eval(ws_url: str, expression: str, *, timeout_sec: float = 12.0) -> 
             pass
 
 
+def cdp_tab_reload_with_init_script(
+    ws_url: str,
+    source: str,
+    *,
+    settle_seconds: float = 4.0,
+    timeout_sec: float = 20.0,
+) -> Dict[str, Any]:
+    """在同一 CDP session 内注册脚本、刷新页面并移除注册项。
+
+    ``Page.addScriptToEvaluateOnNewDocument`` 的注册与 CDP session 同寿命；
+    因此不能像普通 Runtime.evaluate 那样每一步重新连接 WebSocket。
+    """
+    import websocket as _ws
+
+    ws = _ws.create_connection(ws_url, timeout=int(timeout_sec))
+    identifier = ""
+    removed = False
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+        ws.send(json.dumps({"id": 2, "method": "Runtime.enable"}))
+        ws.send(
+            json.dumps(
+                {
+                    "id": 3,
+                    "method": "Page.addScriptToEvaluateOnNewDocument",
+                    "params": {"source": source},
+                }
+            )
+        )
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            msg = json.loads(ws.recv())
+            if msg.get("id") == 3:
+                identifier = str((msg.get("result") or {}).get("identifier") or "")
+                break
+        if not identifier:
+            return {"registered": False, "removed": False}
+        ws.send(
+            json.dumps(
+                {
+                    "id": 4,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "window.scrollTo(0, 0); window.location.reload(); true",
+                        "returnByValue": True,
+                    },
+                }
+            )
+        )
+        time.sleep(max(2.0, min(float(settle_seconds), 12.0)))
+        ws.send(
+            json.dumps(
+                {
+                    "id": 5,
+                    "method": "Page.removeScriptToEvaluateOnNewDocument",
+                    "params": {"identifier": identifier},
+                }
+            )
+        )
+        deadline = time.time() + max(4.0, timeout_sec / 2)
+        while time.time() < deadline:
+            msg = json.loads(ws.recv())
+            if msg.get("id") == 5:
+                removed = "error" not in msg
+                break
+        return {"registered": True, "removed": removed}
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 def cdp_tab_get_html(ws_url: str) -> str:
     html = cdp_tab_eval(ws_url, "document.documentElement.outerHTML")
     return str(html or "")
@@ -2256,6 +2329,265 @@ def _state_active_tab_query(state: Dict[str, Any]) -> str:
     return str(tab.get("query") or tab.get("label") or "").strip().lower()
 
 
+# 页面内响应捕获策略参考 PCPrincipal67/xhs-favorites-exporter（MIT）：
+# https://github.com/PCPrincipal67/xhs-favorites-exporter
+# 这里只移植最小 XHR/fetch hook；不复制扩展 UI，也不读取或导出请求签名/Cookie。
+_XHS_FAVORITES_CAPTURE_INSTALL_JS = r"""(reset) => {
+    const KEY = '__SBA_XHS_FAVORITES_CAPTURE__';
+    const PATH = '/api/sns/web/v2/note/collect/page';
+    let store = window[KEY];
+    if (store && store.installed) {
+        if (reset) {
+            store.pages = [];
+            store.errors = [];
+            store.reset_at = Date.now();
+            store.run_id = Number(store.run_id || 0) + 1;
+        }
+        return { installed: true, run_id: store.run_id || 1, page_count: store.pages.length };
+    }
+    store = {
+        installed: true,
+        run_id: 1,
+        installed_at: Date.now(),
+        pages: [],
+        errors: [],
+    };
+    window[KEY] = store;
+
+    const safePath = (value) => {
+        try { return new URL(String(value || ''), location.href).pathname; }
+        catch (_) { return String(value || '').split('?')[0]; }
+    };
+    const noteList = (payload) => {
+        const data = payload && typeof payload === 'object' && payload.data
+            && typeof payload.data === 'object' ? payload.data : {};
+        for (const key of ['notes', 'note_list', 'feeds', 'items']) {
+            if (Array.isArray(data[key])) return data[key];
+        }
+        return [];
+    };
+    const record = (transport, url, status, payload, startedAt) => {
+        try {
+            if (safePath(url).indexOf(PATH) === -1) return;
+            const data = payload && typeof payload === 'object' && payload.data
+                && typeof payload.data === 'object' ? payload.data : {};
+            const items = noteList(payload);
+            if (!items.length) return;
+            store.pages.push({
+                transport: String(transport || 'xhr'),
+                path: PATH,
+                status: Number(status || 0),
+                duration_ms: Math.max(0, Date.now() - Number(startedAt || Date.now())),
+                cursor: data.cursor == null ? null : String(data.cursor),
+                has_more: Boolean(data.has_more ?? data.hasMore ?? false),
+                num: data.num == null ? null : Number(data.num),
+                items,
+            });
+            if (store.pages.length > 40) store.pages.splice(0, store.pages.length - 40);
+        } catch (error) {
+            store.errors.push(String(error).slice(0, 240));
+            if (store.errors.length > 10) store.errors.shift();
+        }
+    };
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        this.__sbaFavoritesMeta = { method: String(method || 'GET'), url: String(url || '') };
+        return originalOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function() {
+        const meta = this.__sbaFavoritesMeta;
+        const startedAt = Date.now();
+        if (meta && safePath(meta.url).indexOf(PATH) !== -1) {
+            this.addEventListener('load', function() {
+                try {
+                    let payload = this.response;
+                    if (!payload || typeof payload !== 'object') {
+                        payload = JSON.parse(this.responseText || '{}');
+                    }
+                    record('xhr', this.responseURL || meta.url, this.status, payload, startedAt);
+                } catch (error) {
+                    store.errors.push(String(error).slice(0, 240));
+                }
+            }, { once: true });
+        }
+        return originalSend.apply(this, arguments);
+    };
+
+    if (typeof window.fetch === 'function') {
+        const originalFetch = window.fetch;
+        window.fetch = function() {
+            const args = arguments;
+            const requestUrl = args[0] && args[0].url ? args[0].url : args[0];
+            const startedAt = Date.now();
+            return originalFetch.apply(this, args).then((response) => {
+                if (safePath(requestUrl).indexOf(PATH) !== -1) {
+                    response.clone().json()
+                        .then((payload) => record('fetch', response.url || requestUrl, response.status, payload, startedAt))
+                        .catch((error) => {
+                            store.errors.push(String(error).slice(0, 240));
+                        });
+                }
+                return response;
+            });
+        };
+    }
+    return { installed: true, run_id: 1, page_count: 0 };
+}"""
+
+_XHS_FAVORITES_CAPTURE_READ_JS = r"""() => {
+    const store = window.__SBA_XHS_FAVORITES_CAPTURE__ || {};
+    return {
+        installed: Boolean(store.installed),
+        run_id: Number(store.run_id || 0),
+        pages: Array.isArray(store.pages) ? store.pages : [],
+        errors: Array.isArray(store.errors) ? store.errors : [],
+    };
+}"""
+
+
+def favorites_response_capture_enabled() -> bool:
+    """默认启用；设 SBA_XHS_FAVORITES_RESPONSE_CAPTURE=0 可做同参数旧路径对照。"""
+    value = str(os.environ.get("SBA_XHS_FAVORITES_RESPONSE_CAPTURE") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _install_favorites_capture_via_cdp(ws_url: str, *, reset: bool = True) -> Dict[str, Any]:
+    if not favorites_response_capture_enabled():
+        return {"installed": False, "disabled": True}
+    result = cdp_tab_eval(
+        ws_url,
+        f"({_XHS_FAVORITES_CAPTURE_INSTALL_JS})({'true' if reset else 'false'})",
+        timeout_sec=8,
+    )
+    return result if isinstance(result, dict) else {"installed": False}
+
+
+def _read_favorites_capture_via_cdp(ws_url: str) -> Dict[str, Any]:
+    if not favorites_response_capture_enabled():
+        return {"installed": False, "pages": [], "errors": [], "disabled": True}
+    result = cdp_tab_eval(
+        ws_url,
+        f"({_XHS_FAVORITES_CAPTURE_READ_JS})()",
+        timeout_sec=8,
+    )
+    return result if isinstance(result, dict) else {"installed": False, "pages": [], "errors": []}
+
+
+def _reload_with_favorites_capture_via_cdp(
+    ws_url: str,
+    *,
+    settle_seconds: float = 4.0,
+) -> Dict[str, Any]:
+    """在下一次文档加载前注入一次性 hook，刷新后移除注册项。"""
+    if not favorites_response_capture_enabled():
+        return {"installed": False, "disabled": True}
+    reload_result = cdp_tab_reload_with_init_script(
+        ws_url,
+        f"({_XHS_FAVORITES_CAPTURE_INSTALL_JS})(false);",
+        settle_seconds=settle_seconds,
+        timeout_sec=20,
+    )
+    if not reload_result.get("registered"):
+        return _install_favorites_capture_via_cdp(ws_url, reset=True)
+    capture = _read_favorites_capture_via_cdp(ws_url)
+    return {
+        "installed": bool(capture.get("installed")),
+        "run_id": capture.get("run_id"),
+        "page_count": len(capture.get("pages") or []),
+        "registered": True,
+        "registration_removed": bool(reload_result.get("removed")),
+    }
+
+
+def _add_favorites_capture_init_script(context) -> None:
+    if not favorites_response_capture_enabled():
+        return
+    context.add_init_script(script=f"({_XHS_FAVORITES_CAPTURE_INSTALL_JS})(false)")
+
+
+def _install_favorites_capture_on_page(page, *, reset: bool = False) -> Dict[str, Any]:
+    if not favorites_response_capture_enabled():
+        return {"installed": False, "disabled": True}
+    result = page.evaluate(_XHS_FAVORITES_CAPTURE_INSTALL_JS, bool(reset))
+    return result if isinstance(result, dict) else {"installed": False}
+
+
+def _read_favorites_capture_on_page(page) -> Dict[str, Any]:
+    if not favorites_response_capture_enabled():
+        return {"installed": False, "pages": [], "errors": [], "disabled": True}
+    result = page.evaluate(_XHS_FAVORITES_CAPTURE_READ_JS)
+    return result if isinstance(result, dict) else {"installed": False, "pages": [], "errors": []}
+
+
+def _captured_favorite_items(
+    capture: Dict[str, Any],
+    *,
+    creator_id: str,
+    profile_url: str,
+) -> List[Any]:
+    from .xhs_favorites_adapter import parse_favorites_from_response_capture
+
+    return parse_favorites_from_response_capture(
+        capture,
+        owner_creator_id=creator_id,
+        profile_url=profile_url,
+        fetch_source="collect_page",
+    )
+
+
+def _favorite_item_score(item: Any) -> int:
+    return (
+        (8 if "xsec_token" in str(getattr(item, "canonical_url", "") or "") else 0)
+        + (4 if getattr(item, "author_id", "") else 0)
+        + (
+            2
+            if getattr(item, "title", "")
+            and not str(getattr(item, "title", "")).startswith("笔记 ")
+            else 0
+        )
+        + (1 if getattr(item, "cover_url", "") else 0)
+    )
+
+
+def _merge_favorite_items_by_note(
+    by_note: Dict[str, Any],
+    items: List[Any],
+    *,
+    prefer_incoming: bool = False,
+) -> None:
+    from .creator_feed_adapter import is_valid_xhs_note_id
+
+    fill_fields = (
+        "title",
+        "content_type",
+        "published_at",
+        "author_id",
+        "author_name",
+        "collected_at",
+        "published_date",
+        "cover_url",
+        "note_url",
+    )
+    for incoming in items:
+        nid = str(getattr(incoming, "note_id", "") or "")
+        if not is_valid_xhs_note_id(nid):
+            continue
+        current = by_note.get(nid)
+        if current is None:
+            by_note[nid] = incoming
+            continue
+        choose_incoming = _favorite_item_score(incoming) > _favorite_item_score(current)
+        if prefer_incoming and _favorite_item_score(incoming) >= _favorite_item_score(current):
+            choose_incoming = True
+        chosen, other = (incoming, current) if choose_incoming else (current, incoming)
+        for field in fill_fields:
+            if not getattr(chosen, field, None) and getattr(other, field, None):
+                setattr(chosen, field, getattr(other, field))
+        by_note[nid] = chosen
+
+
 def _scrape_favorites_via_cdp_ws(
     ws_url: str,
     tab_url: str,
@@ -2278,6 +2610,7 @@ def _scrape_favorites_via_cdp_ws(
     from .creator_feed_adapter import is_valid_xhs_note_id
 
     links: Dict[str, str] = {}
+    capture_install = _reload_with_favorites_capture_via_cdp(ws_url)
     for rnd in range(max(1, scroll_rounds)):
         dom_links = _collect_note_hrefs_via_cdp_ws(ws_url)
         html = cdp_tab_get_html(ws_url)
@@ -2297,6 +2630,18 @@ def _scrape_favorites_via_cdp_ws(
         if rnd + 1 < scroll_rounds:
             cdp_tab_scroll_bottom(ws_url, rounds=1, pause_sec=1.4)
 
+    capture = _read_favorites_capture_via_cdp(ws_url)
+    capture_links = {
+        item.note_id: item.canonical_url
+        for item in _captured_favorite_items(
+            capture,
+            creator_id=cid,
+            profile_url=tab_url,
+        )
+        if is_valid_xhs_note_id(item.note_id) and item.canonical_url
+    }
+    links = _merge_note_link_maps(links, capture_links)
+
     if not links:
         fav_url = tab_url if _page_on_favorites_tab_url(tab_url, cid) else (
             f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
@@ -2307,11 +2652,14 @@ def _scrape_favorites_via_cdp_ws(
             links[nid] = note_url
 
     _log.info(
-        "[%s|_scrape_favorites_via_cdp_ws|Agent执行|采集] rounds=%s; count=%s; with_token=%s",
+        "[%s|_scrape_favorites_via_cdp_ws|Agent执行|采集] "
+        "rounds=%s; count=%s; with_token=%s; capture_installed=%s; capture_pages=%s",
         _CHAIN,
         scroll_rounds,
         len(links),
         sum(1 for v in links.values() if "xsec_token" in v),
+        capture_install.get("installed"),
+        len(capture.get("pages") or []),
     )
     return links
 
@@ -2340,6 +2688,7 @@ def _scrape_favorites_on_page(
     from .xhs_favorites_adapter import parse_favorites_from_init_state
 
     links: Dict[str, str] = {}
+    _install_favorites_capture_on_page(page, reset=False)
     cur = page.url or ""
     if xhs_cdp_attach_only():
         if not _page_on_favorites_tab(page, creator_id):
@@ -2400,6 +2749,27 @@ def _scrape_favorites_on_page(
                     or ("xsec_token" in it.canonical_url and "xsec_token" not in links.get(nid, ""))
                 ):
                     links[nid] = it.canonical_url
+    capture = _read_favorites_capture_on_page(page)
+    captured_links = {
+        item.note_id: item.canonical_url
+        for item in _captured_favorite_items(
+            capture,
+            creator_id=cid,
+            profile_url=fav_url,
+        )
+        if item.canonical_url
+    }
+    links = _merge_note_link_maps(links, captured_links)
+    _log.info(
+        "[%s|_scrape_favorites_on_page|%s|Agent执行|响应捕获] "
+        "enabled=%s; pages=%s; items=%s; errors=%s",
+        _CHAIN,
+        cfg_kind,
+        favorites_response_capture_enabled(),
+        len(capture.get("pages") or []),
+        len(captured_links),
+        len(capture.get("errors") or []),
+    )
     return links
 
 
@@ -2655,6 +3025,7 @@ def scrape_favorites_feed_items_via_headless_cookies(
                 viewport={"width": 1920, "height": 1080},
                 locale="zh-CN",
             )
+            _add_favorites_capture_init_script(context)
             context.add_cookies(
                 [
                     {"name": k, "value": v, "domain": ".xiaohongshu.com", "path": "/"}
@@ -2694,14 +3065,23 @@ def scrape_favorites_feed_items_via_headless_cookies(
                 profile_url=fav_url,
                 fetch_source="headless_fav_meta",
             )
-            for it in parse_favorites_from_init_state(
+            state_items = parse_favorites_from_init_state(
                 state,
                 owner_creator_id=cid,
                 profile_url=fav_url,
                 fetch_source="headless_fav_state",
-            ):
-                if is_valid_xhs_note_id(it.note_id):
-                    by_note[it.note_id] = it
+            )
+            _merge_favorite_items_by_note(by_note, state_items)
+            capture = _read_favorites_capture_on_page(page)
+            _merge_favorite_items_by_note(
+                by_note,
+                _captured_favorite_items(
+                    capture,
+                    creator_id=cid,
+                    profile_url=fav_url,
+                ),
+                prefer_incoming=True,
+            )
             for nid, note_url in links.items():
                 if not is_valid_xhs_note_id(nid):
                     continue
@@ -2828,6 +3208,7 @@ def scrape_favorites_feed_items_via_playwright(
                 viewport=None,
                 ignore_default_args=["--enable-automation"],
             )
+            _add_favorites_capture_init_script(context)
             page = context.pages[0] if context.pages else context.new_page()
 
             # 先验证登录态
@@ -2874,12 +3255,21 @@ def scrape_favorites_feed_items_via_playwright(
                 state, owner_creator_id=cid, profile_url=fav_url,
                 fetch_source="playwright_fav_meta",
             )
-            for it in parse_favorites_from_init_state(
+            state_items = parse_favorites_from_init_state(
                 state, owner_creator_id=cid, profile_url=fav_url,
                 fetch_source="playwright_fav_state",
-            ):
-                if is_valid_xhs_note_id(it.note_id):
-                    by_note[it.note_id] = it
+            )
+            _merge_favorite_items_by_note(by_note, state_items)
+            capture = _read_favorites_capture_on_page(page)
+            _merge_favorite_items_by_note(
+                by_note,
+                _captured_favorite_items(
+                    capture,
+                    creator_id=cid,
+                    profile_url=fav_url,
+                ),
+                prefer_incoming=True,
+            )
             for nid, note_url in links.items():
                 if not is_valid_xhs_note_id(nid):
                     continue
@@ -3242,6 +3632,7 @@ def scrape_favorites_feed_items_via_cdp(
     fav_url = tab_url if _page_on_favorites_tab_url(tab_url, cid) else (
         f"https://www.xiaohongshu.com/user/profile/{cid}?tab=fav&subTab=note"
     )
+    capture_install = _reload_with_favorites_capture_via_cdp(ws_url)
     for rnd in range(max(1, scroll_rounds)):
         dom_links = _collect_note_hrefs_via_cdp_ws(ws_url)
         html = cdp_tab_get_html(ws_url)
@@ -3266,6 +3657,22 @@ def scrape_favorites_feed_items_via_cdp(
                 by_note[it.note_id] = it
         if rnd + 1 < scroll_rounds:
             cdp_tab_scroll_bottom(ws_url, rounds=1, pause_sec=1.4)
+
+    capture = _read_favorites_capture_via_cdp(ws_url)
+    capture_items = _captured_favorite_items(
+        capture,
+        creator_id=cid,
+        profile_url=fav_url,
+    )
+    _merge_favorite_items_by_note(by_note, capture_items, prefer_incoming=True)
+    link_by_id = _merge_note_link_maps(
+        link_by_id,
+        {
+            item.note_id: item.canonical_url
+            for item in capture_items
+            if item.canonical_url
+        },
+    )
 
     if not link_by_id:
         for nid, note_url in _collect_note_links_via_click_cdp_ws(
@@ -3356,10 +3763,14 @@ def scrape_favorites_feed_items_via_cdp(
             f"请确认 Chrome 已启用 --remote-debugging-port={CDP_PORT}"
         )
     _log.info(
-        "[%s|scrape_favorites_feed_items_via_cdp|Agent执行|完成] notes=%s; with_author=%s",
+        "[%s|scrape_favorites_feed_items_via_cdp|Agent执行|完成] "
+        "notes=%s; with_author=%s; capture_installed=%s; capture_pages=%s; capture_items=%s",
         _CHAIN,
         len(out),
         sum(1 for it in out if getattr(it, "author_id", "")),
+        capture_install.get("installed"),
+        len(capture.get("pages") or []),
+        len(capture_items),
     )
     return out
 
