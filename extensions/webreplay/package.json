@@ -5,6 +5,7 @@
   "description": "开源 DOM 录制重放扩展（webXport 思路复刻，无付费墙）",
   "scripts": {
     "build": "node scripts/gen-icons.mjs && node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
     "watch": "node scripts/build.mjs --watch"
   },
   "devDependencies": {

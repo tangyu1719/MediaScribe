@@ -13,9 +13,13 @@ interface CapturedRequest {
 }
 
 const byTab = new Map<number, Map<string, CapturedRequest>>();
+const recordingTabs = new Set<number>();
 let listenersInstalled = false;
 
 const INTERESTING = /export|download|report|excel|xlsx|csv|query|list|submit|task/i;
+const MAX_HINTS = 40;
+const MAX_REQUEST_SNIPPET = 2_048;
+const MAX_RESPONSE_SNIPPET = 16_384;
 
 function tabMap(tabId: number): Map<string, CapturedRequest> {
   let m = byTab.get(tabId);
@@ -36,13 +40,14 @@ export function installApiCapture(): void {
 
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
-      if (details.tabId < 0) return;
+      if (details.tabId < 0 || !recordingTabs.has(details.tabId)) return;
       const m = tabMap(details.tabId);
       const k = key(details.url, details.method, details.timeStamp);
       m.set(k, {
         url: details.url,
         method: details.method,
         startedAt: details.timeStamp,
+        bodyText: requestBodySnippet(details.requestBody),
       });
     },
     { urls: ['<all_urls>'] },
@@ -51,7 +56,7 @@ export function installApiCapture(): void {
 
   chrome.webRequest.onCompleted.addListener(
     (details) => {
-      if (details.tabId < 0) return;
+      if (details.tabId < 0 || !recordingTabs.has(details.tabId)) return;
       const m = tabMap(details.tabId);
       let hit: CapturedRequest | undefined;
       for (const r of m.values()) {
@@ -70,10 +75,38 @@ export function installApiCapture(): void {
   );
 }
 
+function requestBodySnippet(body: chrome.webRequest.WebRequestBodyDetails['requestBody']): string | undefined {
+  if (!body) return undefined;
+  try {
+    if (body.formData) {
+      return JSON.stringify(body.formData).slice(0, MAX_REQUEST_SNIPPET);
+    }
+    const bytes = body.raw?.[0]?.bytes;
+    if (bytes) {
+      return new TextDecoder().decode(bytes).slice(0, MAX_REQUEST_SNIPPET);
+    }
+  } catch {
+    /* 请求体可能不是文本 */
+  }
+  return undefined;
+}
+
+/** 开始一次干净的录制窗口，避免混入点击“开始录制”之前的历史请求。 */
+export function beginApiCapture(tabId: number): void {
+  byTab.delete(tabId);
+  recordingTabs.add(tabId);
+}
+
+export function cancelApiCapture(tabId: number): void {
+  recordingTabs.delete(tabId);
+  byTab.delete(tabId);
+}
+
 export function attachResponseBody(
   tabId: number,
-  hint: { url: string; method: string; startedAt: number; status?: number; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string }
+  hint: { url: string; method: string; startedAt: number; status?: number; contentType?: string; bodyText?: string; bodyTruncated?: boolean; bodyOmitted?: string }
 ): void {
+  if (!recordingTabs.has(tabId)) return;
   const m = tabMap(tabId);
   let best: CapturedRequest | null = null;
   let bestDelta = Infinity;
@@ -86,6 +119,7 @@ export function attachResponseBody(
     }
   }
   if (!best) return;
+  if (hint.contentType) best.contentType = hint.contentType;
   if (hint.bodyText !== undefined) {
     best.responseBodyText = hint.bodyText;
     if (hint.bodyTruncated) best.responseBodyTruncated = true;
@@ -96,20 +130,21 @@ export function attachResponseBody(
 }
 
 export function drainApiHints(tabId: number): ApiRequestHint[] {
+  recordingTabs.delete(tabId);
   const m = byTab.get(tabId);
   if (!m) return [];
   byTab.delete(tabId);
   const rows = Array.from(m.values())
-    .filter((r) => INTERESTING.test(r.url) || (r.method === 'POST' && (r.responseBodyText || r.status === 200)))
+    .filter((r) => INTERESTING.test(r.url) || !!r.responseBodyText || (r.method === 'POST' && r.status === 200))
     .sort((a, b) => a.startedAt - b.startedAt)
-    .slice(-40);
+    .slice(-MAX_HINTS);
   return rows.map((r) => ({
     url: r.url,
     method: r.method,
     startedAt: r.startedAt,
     status: r.status,
     contentType: r.contentType,
-    bodySnippet: r.bodyText?.slice(0, 500),
-    responseSnippet: r.responseBodyText?.slice(0, 500),
+    bodySnippet: r.bodyText?.slice(0, MAX_REQUEST_SNIPPET),
+    responseSnippet: r.responseBodyText?.slice(0, MAX_RESPONSE_SNIPPET),
   }));
 }

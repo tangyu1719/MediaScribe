@@ -118,7 +118,8 @@ function hookXhr(): void {
       abs = new URL(abs, location.href).href;
     } catch { /* ignore */ }
     meta.set(this, { url: abs, method, startedAt: 0 });
-    return openOrig.call(this, method, url, ...(rest as [boolean?, string?, string?]));
+    const [async = true, user, password] = rest as [boolean?, string?, string?];
+    return openOrig.call(this, method, url, async, user, password);
   };
 
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
