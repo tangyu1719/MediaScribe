@@ -33,6 +33,23 @@ _CHAIN = "社媒订阅-UP画像-五阶段编排"
 _PROFILE_LOCKS: Dict[str, asyncio.Lock] = {}
 
 
+def _public_note_url(value: Any) -> str:
+    return str(value or "").split("?", 1)[0].split("#", 1)[0]
+
+
+def _selected_access_notes_for_media(selected_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build process-local media inputs; callers must remove this field before tool serialization."""
+    return [
+        {
+            "note_id": note.get("note_id"),
+            "title": note.get("title"),
+            "content_type": note.get("content_type"),
+            "access_url": note.get("pipeline_url") or note.get("canonical_url"),
+        }
+        for note in selected_notes
+    ]
+
+
 def _lock_for(subscription_id: str) -> asyncio.Lock:
     if subscription_id not in _PROFILE_LOCKS:
         _PROFILE_LOCKS[subscription_id] = asyncio.Lock()
@@ -48,6 +65,17 @@ def _red_id_from_sub(sub: Dict[str, Any]) -> str:
 
 def _catalog_to_dicts(items) -> List[Dict[str, Any]]:
     return [it.to_dict() if hasattr(it, "to_dict") else dict(it) for it in items]
+
+
+def _display_name_from_catalog(items, fallback: str, red_id: str) -> str:
+    for item in items:
+        if isinstance(item, dict):
+            name = str(item.get("author_name") or "").strip()
+        else:
+            name = str(getattr(item, "author_name", "") or "").strip()
+        if name and name.casefold() != str(red_id or "").strip().casefold():
+            return name
+    return fallback
 
 
 def _enrich_selected_notes(
@@ -69,9 +97,15 @@ def _enrich_selected_notes(
             "task_id": r.get("task_id") or "",
             "char_len": len(art),
             "fetch_ok": usable,
+            "evidence_level": r.get("evidence_level") or "",
+            "media_processing": bool(r.get("media_processing")),
             "fetch_error": ""
             if usable
-            else ("页面不可访问或正文过短" if art.strip() else str(r.get("error") or "拉取失败")),
+            else (
+                "轻量网页正文不足（未做音视频下载/转写）"
+                if art.strip()
+                else str(r.get("error") or r.get("warning") or "拉取失败")
+            ),
         }
     out: List[Dict[str, Any]] = []
     for n in selected_notes:
@@ -81,8 +115,8 @@ def _enrich_selected_notes(
             {
                 "note_id": n.get("note_id"),
                 "title": n.get("title"),
-                "canonical_url": n.get("canonical_url"),
-                "pipeline_url": n.get("pipeline_url") or n.get("canonical_url"),
+                "canonical_url": _public_note_url(n.get("canonical_url") or n.get("pipeline_url")),
+                "pipeline_url": _public_note_url(n.get("pipeline_url") or n.get("canonical_url")),
                 "link_source": n.get("link_source") or "",
                 "content_type": n.get("content_type"),
                 "published_at": n.get("published_at"),
@@ -123,8 +157,8 @@ def _recover_articles_from_pipeline_results(
                 "title": note.get("title") or r.get("title") or task.get("link_title"),
                 "published_at": note.get("published_at"),
                 "content_type": note.get("content_type"),
-                "canonical_url": note.get("canonical_url") or r.get("canonical_url"),
-                "pipeline_url": note.get("pipeline_url") or r.get("pipeline_url"),
+                "canonical_url": _public_note_url(note.get("canonical_url") or r.get("canonical_url")),
+                "pipeline_url": _public_note_url(note.get("pipeline_url") or r.get("pipeline_url")),
                 "link_source": note.get("link_source") or r.get("link_source") or "recovered_ai_analysis",
                 "doc_path": r.get("doc_path") or task.get("doc_path") or "",
                 "article": body,
@@ -150,7 +184,8 @@ def _render_light_only_profile_md(
         f"- 小红书号：{red_id}",
         f"- Creator ID：{creator_id}",
         f"- 画像运行 ID：{profile_run_id}",
-        f"- 说明：深度采样 {fetch_fail_count} 篇均失败，以下为标题轻量画像。",
+        f"- 说明：{fetch_fail_count} 篇未得到足够的网页正文，以下为可追溯的轻量画像。",
+        "- 资源约束：本次未下载音视频，未调用 FFmpeg/Whisper，不将标题推断冒充为视频原文。",
         "",
         "## 轻量画像（标题推断）",
         "",
@@ -161,9 +196,14 @@ def _render_light_only_profile_md(
         "",
     ]
     for n in selected_notes:
+        meta = [str(n.get("content_type") or "unknown")]
+        if n.get("published_at"):
+            meta.append(str(n.get("published_at")))
+        if n.get("evidence_level"):
+            meta.append(f"证据={n.get('evidence_level')}")
         lines.append(
             f"- [{n.get('title', n.get('note_id'))}]({n.get('canonical_url', '')}) "
-            f"· {n.get('content_type', '')}"
+            f"· {' · '.join(meta)}"
         )
     if selection.get("rationale"):
         lines.extend(["", "## 选篇说明", "", str(selection.get("rationale"))])
@@ -266,6 +306,8 @@ async def run_creator_profile(
                     catalog=catalog,
                 ),
             )
+            # 访问参数只保留在本轮进程内，供后续深度媒体工具提交；公开工具结果仍只返回无 token 链接。
+            selected_access_notes = _selected_access_notes_for_media(selected_notes)
             unresolved_notes = [n for n in selected_notes if not n.get("link_resolved")]
             if unresolved_notes:
                 _log.warning(
@@ -418,7 +460,7 @@ async def run_creator_profile(
                 light_profile=light,
                 selection=selection,
                 deep_profile=deep,
-                selected_notes=selected_notes,
+                selected_notes=enriched_notes,
                 sampled_articles=articles,
             )
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", display_name)[:40] or creator_id[:12]
@@ -583,6 +625,7 @@ async def run_xhs_chat_profile(
         run_id = f"chat_profile_{uuid.uuid4().hex[:12]}"
         up = (user_prompt or "").strip()
         loop = asyncio.get_event_loop()
+        access_profile_url = (profile_url or "").strip()
 
         if not creator_id:
             from .creator_feed_adapter import resolve_xhs_red_id
@@ -595,17 +638,25 @@ async def run_xhs_chat_profile(
                 return {"ok": False, "error_code": code, "error": msg}
 
             creator_id = str(resolved.get("creator_id") or "")
-            profile_url = str(
+            resolved_profile_url = str(
                 resolved.get("profile_url") or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
             )
+            access_profile_url = str(
+                resolved.get("_access_profile_url") or resolved_profile_url
+            ).strip()
             if not display_name:
                 display_name = str(resolved.get("display_name") or rid)
         else:
-            profile_url = profile_url or f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+            access_profile_url = access_profile_url or (
+                f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+            )
             display_name = display_name or rid
 
         if not creator_id:
             return {"ok": False, "error_code": "SUB_RED_ID_NOT_FOUND", "error": "未能解析 creator_id"}
+
+        profile_url = f"https://www.xiaohongshu.com/user/profile/{creator_id}"
+        catalog_profile_url = access_profile_url or profile_url
 
         _log.info(
             "[%s|creator_profile_runner.run_xhs_chat_profile|%s|Agent执行|开始] red_id=%s; creator_id=%s",
@@ -623,8 +674,10 @@ async def run_xhs_chat_profile(
             adapter = get_feed_adapter("xiaohongshu")
             catalog_items = await loop.run_in_executor(
                 None,
-                lambda: adapter.fetch_catalog(creator_id, profile_url=profile_url),
+                lambda: adapter.fetch_catalog(creator_id, profile_url=catalog_profile_url),
             )
+            if not display_name or display_name == rid:
+                display_name = _display_name_from_catalog(catalog_items, display_name or rid, rid)
             catalog = _catalog_to_dicts(catalog_items)
             if not catalog:
                 raise RuntimeError("PROFILE_CATALOG_EMPTY: 主页未解析到笔记列表，请确认 CDP/Cookie 就绪")
@@ -664,10 +717,13 @@ async def run_xhs_chat_profile(
                 lambda: resolve_note_links_for_selection(
                     selected_notes,
                     creator_id=creator_id,
-                    profile_url=profile_url,
+                    profile_url=catalog_profile_url,
                     catalog=catalog,
                 ),
             )
+            # Keep signed access URLs process-local for async media submission. Public selected_notes
+            # are rebuilt through _enrich_selected_notes and therefore contain tokenless URLs only.
+            selected_access_notes = _selected_access_notes_for_media(selected_notes)
 
             per_timeout = int(os.environ.get("PROFILE_ARTICLE_TIMEOUT_SEC", "1800"))
             results = await asyncio.gather(
@@ -777,6 +833,8 @@ async def run_xhs_chat_profile(
                 "selected_count": len(selected_notes),
                 "deep_ok_count": ok_n,
                 "deep_fail_count": fail_n,
+                "resource_mode": "lightweight_no_media",
+                "media_processing": False,
                 "selected_notes": [
                     {
                         "note_id": n.get("note_id"),
@@ -785,6 +843,12 @@ async def run_xhs_chat_profile(
                         "pipeline_url": n.get("pipeline_url"),
                         "doc_path": n.get("doc_path"),
                         "fetch_ok": n.get("fetch_ok"),
+                        "fetch_error": n.get("fetch_error"),
+                        "content_type": n.get("content_type"),
+                        "published_at": n.get("published_at"),
+                        "char_len": n.get("char_len"),
+                        "evidence_level": n.get("evidence_level"),
+                        "media_processing": n.get("media_processing"),
                     }
                     for n in enriched_notes
                 ],
@@ -804,6 +868,7 @@ async def run_xhs_chat_profile(
                 }
                 if deep
                 else {},
+                "_selected_access_notes": selected_access_notes,
             }
 
         except Exception as ex:

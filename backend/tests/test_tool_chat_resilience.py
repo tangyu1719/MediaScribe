@@ -51,3 +51,17 @@ def test_failure_summary_block():
     )
     assert "xhs_user_search" in block
     assert "task_abc" in block
+
+
+def test_timeout_failure_keeps_user_visible_evidence():
+    info = classify_tool_failure(
+        tool_name="third_party_search",
+        error_message="工具超时（>60s）",
+    )
+    assert info["error_message"] == "工具超时（>60s）"
+    block = build_tool_failure_summary_block(
+        failures=[info],
+        task_id="task_timeout",
+    )
+    assert "third_party_search" in block
+    assert "工具超时" in block

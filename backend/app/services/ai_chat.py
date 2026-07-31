@@ -87,7 +87,7 @@ def chat_llm_config_diagnostics() -> Dict[str, Any]:
         "config_exists": Path(path).is_file(),
         "agent_dir": str(_AGENT_DIR),
         "volcengine_api_key_set": bool(str(cfg.get("volcengine_api_key") or "").strip()),
-        "ai_chat_model": str(cfg.get("ai_chat_model") or creds.get("model") or ""),
+        "ai_chat_model": str(creds.get("model") or cfg.get("ai_chat_model") or ""),
         "api_key_resolved": bool(creds.get("api_key")),
         "model_resolved": bool(creds.get("model")),
         "gateway_nodes": len(cfg.get("api_gateway_nodes") or []),
@@ -96,16 +96,28 @@ def chat_llm_config_diagnostics() -> Dict[str, Any]:
 
 def resolve_chat_api_credentials(cfg: Dict[str, Any]) -> Dict[str, str]:
     """从 config 与 api_gateway_nodes 解析 provider / api_key / base_url / 默认 model。"""
-    provider = str(cfg.get("gateway_provider") or "ark").strip().lower()
-    api_key = str(cfg.get("volcengine_api_key") or cfg.get("openai_api_key") or "").strip()
+    provider = str(cfg.get("gateway_provider") or os.environ.get("AI_CHAT_PROVIDER") or "ark").strip().lower()
+    api_key = str(
+        cfg.get("volcengine_api_key")
+        or cfg.get("openai_api_key")
+        or os.environ.get("VOLC_API_KEY")
+        or os.environ.get("VOLCENGINE_API_KEY")
+        or os.environ.get("ARK_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    ).strip()
     base_url = str(
         cfg.get("volcengine_base_url")
         or cfg.get("openai_base_url")
+        or os.environ.get("VOLCENGINE_BASE_URL")
+        or os.environ.get("ARK_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
         or "https://ark.cn-beijing.volces.com/api/v3"
     ).strip()
-    model = str(cfg.get("ai_chat_model") or "").strip()
+    model_override = str(os.environ.get("LLM_MODEL_QA") or "").strip()
+    model = str(model_override or cfg.get("ai_chat_model") or os.environ.get("AI_CHAT_MODEL") or "").strip()
     route_map = cfg.get("gateway_task_type_route") or {}
-    if isinstance(route_map, dict):
+    if not model_override and isinstance(route_map, dict):
         qa_ep = str(route_map.get("qa") or route_map.get("chat") or "").strip()
         if qa_ep:
             model = qa_ep
@@ -480,6 +492,229 @@ def _parse_tool_result_obj(raw: Any) -> Dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _configured_fake_tool_result(
+    tool_name: str,
+    tool_args: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return an explicit development-only fake result for selected chat tools.
+
+    The switch is intentionally opt-in and process-local.  It lets the UI and
+    checkpoint/resume chain be exercised without opening a browser or touching
+    a third-party site.  Fake evidence is always labelled so it cannot be
+    mistaken for a real platform response.
+    """
+    enabled = {
+        item.strip()
+        for item in str(os.environ.get("SBA_AGENT_FAKE_TOOL_RESULTS") or "").split(",")
+        if item.strip()
+    }
+    name = str(tool_name or "").strip()
+    if name not in enabled:
+        return None
+
+    args = dict(tool_args or {})
+    if name == "xhs_user_search":
+        red_id = str(args.get("red_id") or "mock_account").strip() or "mock_account"
+        return {
+            "ok": True,
+            "mocked": True,
+            "mock_notice": (
+                "开发回归模拟结果：未访问小红书、未启动 CDP，也未下载或解析任何媒体；"
+                "仅用于验证工具等待、checkpoint、断点恢复、同气泡续写和红心提示。"
+            ),
+            "profile_run_id": f"mock-profile-{uuid.uuid4().hex[:8]}",
+            "creator_id": f"mock-creator-{red_id}",
+            "red_id": red_id,
+            "display_name": f"模拟账号 {red_id}",
+            "profile_summary": "模拟画像：AI Agent、模型微调与工程化内容创作者。",
+            "resource_mode": "mock_no_browser",
+            "pipeline_task_ids": [],
+            "selected_notes": [
+                {
+                    "note_id": f"mock-note-{idx}",
+                    "title": title,
+                    "url": f"mock://xiaohongshu/{red_id}/note-{idx}",
+                    "evidence_level": "mock",
+                    "mocked": True,
+                }
+                for idx, title in enumerate(
+                    (
+                        "[模拟] SFT 微调入门与数据准备",
+                        "[模拟] LoRA 与全参数微调的取舍",
+                        "[模拟] Agent 工程化落地实践",
+                        "[模拟] 模型评测与幻觉治理",
+                        "[模拟] AI 岗位面试与项目复盘",
+                    ),
+                    start=1,
+                )
+            ],
+        }
+    return None
+
+
+def _hydrate_xhs_user_search_args(
+    args: Dict[str, Any],
+    *,
+    current_message: str = "",
+    task_user_query: str = "",
+) -> Dict[str, Any]:
+    """把主任务目标回灌给账号工具，避免模型缩写参数后丢失深媒体要求。"""
+    merged = dict(args or {})
+    current = str(current_message or "").strip()
+    task_query = str(task_user_query or "").strip()
+    tool_prompt = str(merged.get("user_prompt") or "").strip()
+
+    # 当前轮明确取消重媒体时，必须覆盖早期主任务中的下载/转写要求。
+    try:
+        from .chat_tool_registry import _XHS_DEEP_MEDIA_NEGATION_RE
+
+        media_cancelled = bool(_XHS_DEEP_MEDIA_NEGATION_RE.search(current))
+    except Exception:
+        media_cancelled = False
+
+    prompt_parts: List[str] = []
+    for value in (("" if media_cancelled else task_query), current, tool_prompt):
+        if value and value not in prompt_parts:
+            prompt_parts.append(value)
+    if prompt_parts:
+        merged["user_prompt"] = "\n".join(prompt_parts)[:1600]
+
+    if not str(merged.get("red_id") or "").strip():
+        try:
+            from .link_doc_routing import extract_xhs_account_id
+
+            merged["red_id"] = (
+                extract_xhs_account_id(current)
+                or extract_xhs_account_id(task_query)
+                or ""
+            )
+        except Exception:
+            pass
+    return merged
+
+
+def _should_skip_fixed_web_for_specialized_xhs(
+    current_message: str = "",
+    task_user_query: str = "",
+) -> bool:
+    """账号画像/站内主题检索优先走登录态 CDP，泛网搜索仅作失败后的显式兜底。"""
+    texts = [str(current_message or "").strip(), str(task_user_query or "").strip()]
+    combined = "\n".join(text for text in texts if text)
+    if not combined:
+        return False
+    try:
+        from .link_doc_routing import extract_xhs_account_id
+        from .web_search_plan import extract_xhs_content_search_query
+
+        return bool(
+            extract_xhs_account_id(combined)
+            or extract_xhs_content_search_query(combined)
+        )
+    except Exception:
+        return False
+
+
+def _is_terminal_xhs_profile_result(raw: Any) -> bool:
+    """小红书画像（含等待后的 submission_result）已经具备最终总结材料。"""
+    data = _parse_tool_result_obj(raw)
+    submitted = _parse_tool_result_obj(data.get("submission_result"))
+    if submitted:
+        data = submitted
+    return bool(
+        data.get("ok")
+        and data.get("profile_run_id")
+        and isinstance(data.get("selected_notes"), list)
+        and data.get("selected_notes")
+    )
+
+
+def _xhs_profile_used_deep_media(raw: Any) -> bool:
+    data = _parse_tool_result_obj(raw)
+    submitted = _parse_tool_result_obj(data.get("submission_result"))
+    if submitted:
+        data = submitted
+    return bool(
+        data.get("resource_mode") == "deep_media_async"
+        or data.get("pipeline_task_ids")
+    )
+
+
+def _build_xhs_content_search_fallback(raw: Any, user_message: str = "") -> str:
+    """模型限额时基于站内搜索卡片完成可核验报告，避免丢失已成功的工具证据。"""
+    data = _parse_tool_result_obj(raw)
+    rows = [row for row in (data.get("results") or []) if isinstance(row, dict)]
+    if not data.get("ok") or not rows:
+        return ""
+    categories = [
+        ("入门介绍", ("入门", "5 分钟", "5分钟", "每天拆解", "一文", "看懂")),
+        ("深度原理", ("原理", "到底", "loss", "为什么", "三阶段", "指令微调")),
+        ("训练框架", ("框架", "lora", "项目", "部署", "qwen", "完整思路")),
+        ("实践经验", ("实践", "经验", "心得", "训练到", "效果", "数据来源")),
+        ("关键知识点", ("rlhf", "数据", "格式", "幻觉", "困难数据", "prompt")),
+    ]
+    chosen: List[tuple[str, Dict[str, Any]]] = []
+    used: set[str] = set()
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("engagement_count") or 0),
+            -int(row.get("rank") or 999),
+        ),
+        reverse=True,
+    )
+    for label, hints in categories:
+        match = next(
+            (
+                row for row in ranked
+                if str(row.get("note_id") or "") not in used
+                and any(hint in str(row.get("title") or "").casefold() for hint in hints)
+            ),
+            None,
+        )
+        if match:
+            used.add(str(match.get("note_id") or ""))
+            chosen.append((label, match))
+    for row in ranked:
+        if len(chosen) >= 5:
+            break
+        note_id = str(row.get("note_id") or "")
+        if note_id in used:
+            continue
+        used.add(note_id)
+        chosen.append(("补充材料", row))
+
+    lines = [
+        "## 小红书 SFT 微调资料筛选（模型限额下的证据降级报告）",
+        "",
+        "站内搜索工具已经成功，本报告直接依据登录态搜索结果卡片生成；"
+        "最终总结模型当前触发 429 配额限制，因此不把标题/互动量推断成完整正文结论。",
+        "",
+    ]
+    if user_message:
+        lines.extend([f"- 原始目标：{user_message[:240]}", ""])
+    for index, (label, row) in enumerate(chosen[:5], start=1):
+        title = str(row.get("title") or f"笔记 {index}").strip()
+        author = str(row.get("author") or "作者未显示").strip()
+        interaction = str(row.get("interaction_text") or "未显示").strip()
+        url = str(row.get("canonical_url") or "").strip()
+        lines.extend([
+            f"### {index}. {label}｜{title}",
+            f"- 作者：{author}",
+            f"- 页面可见互动量：{interaction}",
+            f"- 选择依据：标题与“{label}”方向匹配，并结合当前结果中的互动量排序。",
+            f"- 公开链接：{url}",
+            "",
+        ])
+    lines.extend([
+        "## 证据边界",
+        "",
+        "- 已确认：标题、作者、页面可见互动量、公开 canonical URL。",
+        "- 未确认：笔记全文论证质量、收藏/评论细节及作者专业资质；需要打开单篇后再核验。",
+        "- 模型服务恢复后可继续在当前主任务上做逐篇深读，无需重新创建任务。",
+    ])
+    return "\n".join(lines)
 
 
 def _async_pipeline_ids_from_tool_outputs(tool_outputs: Any) -> List[str]:
@@ -2159,6 +2394,24 @@ async def chat_stream_v2(
     if use_main_task and link_ctx.get("guidance"):
         link_guidance_block = {"guidance": link_ctx["guidance"], "link_doc_relevant": True}
 
+    task_user_q_prefetch = ""
+    if task_id:
+        try:
+            from .span_audit import get_task
+
+            _prefetch_task = get_task(str(task_id)) or {}
+            task_user_q_prefetch = str(
+                _prefetch_task.get("user_query")
+                or _prefetch_task.get("query_summary")
+                or ""
+            )
+        except Exception:
+            pass
+    specialized_xhs_prefetch = _should_skip_fixed_web_for_specialized_xhs(
+        message,
+        task_user_q_prefetch,
+    )
+
     web_block = None
     if web_search and use_main_task and not tools_inventory_query:
         import logging as _lg_ws
@@ -2168,6 +2421,11 @@ async def chat_stream_v2(
             _ws_log.info(
                 "[AI问答-执行段|ai_chat.chat_stream_v2|web_search|硬编执行|跳过] "
                 "链接文档化路由跳过联网预取; link_doc_relevant=true"
+            )
+        elif specialized_xhs_prefetch:
+            _ws_log.info(
+                "[AI问答-执行段|ai_chat.chat_stream_v2|web_search|硬编执行|跳过] "
+                "小红书账号/主题请求优先专用 CDP 工具，泛网搜索仅作失败兜底"
             )
         elif not task_id:
             _ws_log.warning(
@@ -2179,19 +2437,12 @@ async def chat_stream_v2(
         and use_main_task
         and task_id
         and not link_ctx.get("skip_web_search")
+        and not specialized_xhs_prefetch
         and not tools_inventory_query
     ):
         from .web_search_plan import build_web_search_plan
 
-        task_user_q = ""
-        if task_id:
-            try:
-                from .span_audit import get_task
-
-                mt = get_task(str(task_id)) or {}
-                task_user_q = str(mt.get("user_query") or mt.get("query_summary") or "")
-            except Exception:
-                pass
+        task_user_q = task_user_q_prefetch
         web_plan = build_web_search_plan(
             rewritten_query=(
                 intent_rewrite_snapshot.get("rewritten_query") or message or ""
@@ -2634,11 +2885,29 @@ async def chat_stream_v2(
                 failed_tool_names: set[str] = set()
                 tool_fail_counts: Dict[str, int] = {}
                 tool_failure_log: List[Dict[str, Any]] = []
+                force_terminal_xhs_answer = False
+                force_terminal_xhs_deep_media = False
+                xhs_content_evidence: Dict[str, Any] = {}
                 pipeline_poll_sec = float(cfg.get("chat_pipeline_poll_sec") or 4.0)
                 pipeline_wait_sec = float(cfg.get("chat_pipeline_wait_sec") or 0) or max(
                     float(cfg.get("chat_tool_timeout_sec", 60) or 60) * 5,
                     600.0,
                 )
+                direct_xhs_id = ""
+                try:
+                    from .link_doc_routing import extract_xhs_account_id
+
+                    direct_xhs_id = str(extract_xhs_account_id(message) or "").strip()
+                except Exception:
+                    direct_xhs_id = ""
+                direct_xhs_topic = ""
+                if not direct_xhs_id:
+                    try:
+                        from .web_search_plan import extract_xhs_content_search_query
+
+                        direct_xhs_topic = extract_xhs_content_search_query(message)
+                    except Exception:
+                        direct_xhs_topic = ""
                 for _rnd in range(max_rounds):
                     if task_id:
                         from .chat_context_memory import (
@@ -2663,21 +2932,61 @@ async def chat_stream_v2(
                             tool_choice="auto",
                         )
 
-                    try:
-                        data = await loop.run_in_executor(_executor, _call_raw)
-                    except Exception as e:
-                        from .chat_error_handler import llm_analyze_error_for_user
+                    if _rnd == 0 and direct_xhs_id and "xhs_user_search" in by_name:
+                        msg_o = {
+                            "content": "已识别明确的小红书账号，优先调用专用用户分析工具。",
+                            "tool_calls": [
+                                {
+                                    "id": _new_id("tc_xhs_"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "xhs_user_search",
+                                        "arguments": json.dumps(
+                                            {"red_id": direct_xhs_id, "user_prompt": message},
+                                            ensure_ascii=False,
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    elif _rnd == 0 and direct_xhs_topic and "xhs_content_search" in by_name:
+                        msg_o = {
+                            "content": "已识别小红书主题检索，优先通过已登录网页搜索卡片获取证据。",
+                            "tool_calls": [
+                                {
+                                    "id": _new_id("tc_xhs_topic_"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "xhs_content_search",
+                                        "arguments": json.dumps(
+                                            {"query": direct_xhs_topic, "limit": 15},
+                                            ensure_ascii=False,
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    else:
+                        try:
+                            data = await loop.run_in_executor(_executor, _call_raw)
+                        except Exception as e:
+                            full_answer = _build_xhs_content_search_fallback(
+                                xhs_content_evidence,
+                                message,
+                            )
+                            if not full_answer:
+                                from .chat_error_handler import llm_analyze_error_for_user
 
-                        full_answer = await llm_analyze_error_for_user(
-                            error_type=type(e).__name__,
-                            error_message=str(e)[:500],
-                            stage="MCP 工具链",
-                            user_message=message,
-                            trace_id=trace_id,
-                        )
-                        break
+                                full_answer = await llm_analyze_error_for_user(
+                                    error_type=type(e).__name__,
+                                    error_message=str(e)[:500],
+                                    stage="模型工具决策",
+                                    user_message=message,
+                                    trace_id=trace_id,
+                                )
+                            break
 
-                    msg_o = _extract_openai_message_dict(data)
+                        msg_o = _extract_openai_message_dict(data)
                     content = msg_o.get("content") or ""
                     if isinstance(content, str):
                         pass
@@ -2710,6 +3019,17 @@ async def chat_stream_v2(
                                 args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args or {})
                             except Exception:
                                 args = {}
+                            if fn == "xhs_user_search":
+                                _task_user_query = str(
+                                    (mem_ctx.get("task_redis") or {}).get("user_query")
+                                    or (mem_ctx.get("task_redis") or {}).get("query_summary")
+                                    or ""
+                                )
+                                args = _hydrate_xhs_user_search_args(
+                                    args,
+                                    current_message=message,
+                                    task_user_query=_task_user_query,
+                                )
                             react_round_idx += 1
                             tool_sub_plan_id, tool_sub_index = _alloc_step_group()
                             react_step_id = _new_id("step_")
@@ -2810,6 +3130,55 @@ async def chat_stream_v2(
                                 tools_meta=tools_meta,
                             )
                             yield _sse("thought_step_start", _tool_invoke)
+                            pretool_wait_emitted = False
+                            if fn == "xhs_user_search":
+                                try:
+                                    from .chat_graph_runner import persist_tool_execution_checkpoint
+
+                                    pretool_checkpoint_saved = await persist_tool_execution_checkpoint(
+                                        session_id=session_id,
+                                        checkpoint_ns=trace_id,
+                                        task_id=task_id or "",
+                                        trace_id=trace_id,
+                                        tool_name=fn,
+                                        pipeline_task_ids=[],
+                                        status="tool_calling",
+                                    )
+                                except Exception:
+                                    pretool_checkpoint_saved = False
+                                pretool_wait_emitted = True
+                                if task_id:
+                                    _span_patch_snapshot(
+                                        task_id,
+                                        fixed={
+                                            "task_id": task_id,
+                                            "session_id": session_id,
+                                            "async_pipeline_pending": True,
+                                            "pipeline_task_ids": [],
+                                            "tool_wait_checkpoint": {
+                                                "status": "tool_calling",
+                                                "tool_name": fn,
+                                                "trace_id": trace_id,
+                                                "pipeline_task_ids": [],
+                                                "phase": "profile_and_selection",
+                                            },
+                                        },
+                                        open_layer={
+                                            "current_assessment": "工具调用中，正在解析账号、目录与待处理视频",
+                                            "decision": "continue",
+                                        },
+                                    )
+                                yield _sse("tool_wait_checkpoint", {
+                                    "trace_id": trace_id,
+                                    "task_id": task_id or "",
+                                    "tool_name": fn,
+                                    "pipeline_task_ids": [],
+                                    "status": "tool_calling",
+                                    "status_text": "工具调用中",
+                                    "checkpoint_saved": pretool_checkpoint_saved,
+                                    "phase": "profile_and_selection",
+                                    "message": "账号与主页目录解析已开始；选出视频后会自动提交媒体任务并从当前快照续接。",
+                                })
                             tool_obj = by_name.get(fn)
                             tool_err: Optional[str] = None
                             raw_out: Any = None
@@ -2892,6 +3261,18 @@ async def chat_stream_v2(
                                     tool_err = None if _tg.get("skipped") else str(
                                         _tg.get("reason") or _tg.get("error") or ""
                                     )
+                            if raw_out is None:
+                                fake_out = _configured_fake_tool_result(fn, args)
+                                if fake_out is not None:
+                                    try:
+                                        fake_delay = float(
+                                            os.environ.get("SBA_AGENT_FAKE_TOOL_DELAY_SEC") or 1.0
+                                        )
+                                    except (TypeError, ValueError):
+                                        fake_delay = 1.0
+                                    await asyncio.sleep(max(0.0, min(fake_delay, 10.0)))
+                                    raw_out = fake_out
+                                    tool_err = None
                             if raw_out is None:
                                 from .tool_chat_resilience import (
                                     classify_tool_failure,
@@ -3045,6 +3426,10 @@ async def chat_stream_v2(
                                     break
                             if tool_err is None and isinstance(raw_out, dict) and raw_out.get("error"):
                                 tool_err = str(raw_out.get("error"))
+                            if fn == "xhs_content_search" and not tool_err:
+                                parsed_xhs_content = _parse_tool_result_obj(raw_out)
+                                if parsed_xhs_content.get("ok") and parsed_xhs_content.get("results"):
+                                    xhs_content_evidence = parsed_xhs_content
                             if not tool_err and fn and not str(fn).startswith("skill_"):
                                 try:
                                     from .board_usage_stats import record_tool_usage_by_name
@@ -3101,6 +3486,51 @@ async def chat_stream_v2(
                             cost_tool = int(tool_payload.get("cost_ms") or 0)
 
                             if pipeline_ids_wait:
+                                submission_result = raw_out
+                                try:
+                                    from .chat_graph_runner import persist_tool_execution_checkpoint
+
+                                    checkpoint_saved = await persist_tool_execution_checkpoint(
+                                        session_id=session_id,
+                                        checkpoint_ns=trace_id,
+                                        task_id=task_id or "",
+                                        trace_id=trace_id,
+                                        tool_name=fn,
+                                        pipeline_task_ids=pipeline_ids_wait,
+                                        status="tool_calling",
+                                    )
+                                except Exception:
+                                    checkpoint_saved = False
+                                if task_id:
+                                    _span_patch_snapshot(
+                                        task_id,
+                                        fixed={
+                                            "task_id": task_id,
+                                            "session_id": session_id,
+                                            "async_pipeline_pending": True,
+                                            "pipeline_task_ids": pipeline_ids_wait,
+                                            "tool_wait_checkpoint": {
+                                                "status": "tool_calling",
+                                                "tool_name": fn,
+                                                "trace_id": trace_id,
+                                                "pipeline_task_ids": pipeline_ids_wait,
+                                            },
+                                        },
+                                        open_layer={
+                                            "current_assessment": "工具调用中，等待后台产出后自动续接",
+                                            "decision": "continue",
+                                        },
+                                    )
+                                yield _sse("tool_wait_checkpoint", {
+                                    "trace_id": trace_id,
+                                    "task_id": task_id or "",
+                                    "tool_name": fn,
+                                    "pipeline_task_ids": pipeline_ids_wait,
+                                    "status": "tool_calling",
+                                    "status_text": "工具调用中",
+                                    "checkpoint_saved": checkpoint_saved,
+                                    "message": "已提交耗时工具，正在等待执行完成；完成后会从快照自动续接当前回答。",
+                                })
                                 yield _sse(
                                     "thought_step_end",
                                     {
@@ -3142,13 +3572,27 @@ async def chat_stream_v2(
                                     timeout=timed_out and any_active,
                                     rows=rows_wait,
                                 )
+                                if fn == "xhs_user_search":
+                                    # 画像、选篇等同步结果与媒体流水线结果一起回灌，不能被 wait 快照覆盖。
+                                    raw_out["submission_result"] = (
+                                        _parse_tool_result_obj(submission_result)
+                                        or submission_result
+                                    )
+                                terminal_xhs_wait = bool(
+                                    fn == "xhs_user_search"
+                                    and _is_terminal_xhs_profile_result(raw_out)
+                                )
                                 cost_tool = int((time.perf_counter() - wait_t0) * 1000)
                                 if span_handle:
                                     tool_payload = end_tool_span(
                                         span_handle,
                                         tool_args=args,
                                         raw_out=raw_out,
-                                        tool_err=None if raw_out.get("ok") else str(raw_out.get("hint") or ""),
+                                        tool_err=(
+                                            None
+                                            if raw_out.get("ok") or terminal_xhs_wait
+                                            else str(raw_out.get("hint") or "")
+                                        ),
                                         phase="tool",
                                     )
                                 else:
@@ -3156,11 +3600,74 @@ async def chat_stream_v2(
                                         tool_name=fn,
                                         tool_args=args,
                                         tool_result=raw_out,
-                                        error=None if raw_out.get("ok") else str(raw_out.get("hint") or ""),
+                                        error=(
+                                            None
+                                            if raw_out.get("ok") or terminal_xhs_wait
+                                            else str(raw_out.get("hint") or "")
+                                        ),
                                         cost_ms=cost_tool,
                                         phase="tool",
                                     )
-                                tool_err = None if raw_out.get("ok") else str(raw_out.get("hint") or "")
+                                tool_err = (
+                                    None
+                                    if raw_out.get("ok") or terminal_xhs_wait
+                                    else str(raw_out.get("hint") or "")
+                                )
+                                if not any_active:
+                                    try:
+                                        checkpoint_resumed = await persist_tool_execution_checkpoint(
+                                            session_id=session_id,
+                                            checkpoint_ns=trace_id,
+                                            task_id=task_id or "",
+                                            trace_id=trace_id,
+                                            tool_name=fn,
+                                            pipeline_task_ids=pipeline_ids_wait,
+                                            status="resumed",
+                                        )
+                                    except Exception:
+                                        checkpoint_resumed = False
+                                    yield _sse("tool_checkpoint_resumed", {
+                                        "trace_id": trace_id,
+                                        "task_id": task_id or "",
+                                        "tool_name": fn,
+                                        "pipeline_task_ids": pipeline_ids_wait,
+                                        "status": "resumed",
+                                        "checkpoint_saved": checkpoint_resumed,
+                                        "message": "工具执行结束，已从快照恢复 Agent，继续生成当前回答。",
+                                    })
+
+                            if pretool_wait_emitted and not pipeline_ids_wait and not tool_err:
+                                try:
+                                    pretool_checkpoint_resumed = await persist_tool_execution_checkpoint(
+                                        session_id=session_id,
+                                        checkpoint_ns=trace_id,
+                                        task_id=task_id or "",
+                                        trace_id=trace_id,
+                                        tool_name=fn,
+                                        pipeline_task_ids=[],
+                                        status="resumed",
+                                    )
+                                except Exception:
+                                    pretool_checkpoint_resumed = False
+                                yield _sse("tool_checkpoint_resumed", {
+                                    "trace_id": trace_id,
+                                    "task_id": task_id or "",
+                                    "tool_name": fn,
+                                    "pipeline_task_ids": [],
+                                    "status": "resumed",
+                                    "checkpoint_saved": pretool_checkpoint_resumed,
+                                    "message": "工具执行结束，已从快照恢复 Agent，继续生成当前回答。",
+                                })
+
+                            if (
+                                fn == "xhs_user_search"
+                                and not tool_err
+                                and _is_terminal_xhs_profile_result(raw_out)
+                            ):
+                                # xhs_user_search 已完成画像；若提交了深媒体任务，此处也已等待并回灌结果。
+                                # 直接进入总结，防止同一批链接被模型重复提交。
+                                force_terminal_xhs_answer = True
+                                force_terminal_xhs_deep_media = _xhs_profile_used_deep_media(raw_out)
 
                             out_s = dumps_step_output(tool_payload)
                             tool_brief = brief_from_payload(tool_payload)
@@ -3244,6 +3751,24 @@ async def chat_stream_v2(
                         exec_ctx.web_block = web_block if isinstance(web_block, dict) else exec_ctx.web_block
                         if task_marked_abnormal:
                             break
+                        if force_terminal_xhs_answer:
+                            working.append({
+                                "role": "system",
+                                "content": (
+                                    "【小红书画像工具已完成】请立即基于 xhs_user_search 的画像、"
+                                    "selected_notes、submission_result 与 pipelines 生成最终报告。"
+                                    "禁止再次提交同一批 link_pipeline_start 或 video_visual_extract。"
+                                    + (
+                                        "本轮已按用户要求完成视频下载、Whisper 与画面 OCR 流水线等待；"
+                                        "必须结合流水线成功/失败状态和产出路径说明证据，不得把失败项写成已转写。"
+                                        if force_terminal_xhs_deep_media
+                                        else
+                                        "本轮没有明确的视频内证据请求，正文不足的笔记必须标注轻量证据限制，"
+                                        "不得根据标题编造视频内容。"
+                                    )
+                                ),
+                            })
+                            break
                         continue
 
                     exec_ctx.react_round_idx = react_round_idx
@@ -3323,22 +3848,76 @@ async def chat_stream_v2(
                     ) or ""
 
             if not full_answer and use_tools:
-                # 工具链未产出最终文本时再降级一次无工具调用
-                full_answer = (
-                    await loop.run_in_executor(
-                        _executor,
-                        lambda: invoke_unified(
-                            provider=provider,
-                            base_url=base_url,
-                            api_key=api_key,
-                            model=model_resolved,
-                            messages=messages,
-                            temperature=0.3,
-                            max_tokens=1800,
-                            timeout=120.0,
-                        )
+                # Tool execution may exhaust the configured round budget before
+                # a final prose answer. Stream the no-tool synthesis so the UI
+                # remains visibly alive during long reasoning responses.
+                fallback_messages = list(working if openai_tools else messages)
+                fallback_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "【最终答复阶段】工具执行轮次已经结束。请立即基于上面的工具结果和已知事实，"
+                            "直接给出完整、可交付的用户答复。禁止只说将继续搜索、稍后处理或重复任务计划；"
+                            "如果证据不足，必须明确列出已经确认的事实、缺失证据和可理解的阻塞原因。"
+                        ),
+                    }
+                )
+                if not answer_started:
+                    yield _sse(
+                        "answer_start",
+                        {
+                            "trace_id": trace_id,
+                            "task_id": task_id or "",
+                            "ephemeral": not use_main_task,
+                        },
                     )
-                ) or ""
+                    answer_started = True
+                try:
+                    async for piece in _async_iter_llm_token_stream(
+                        provider=provider,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model_resolved,
+                        messages=fallback_messages,
+                        temperature=0.3,
+                        max_tokens=1800,
+                        timeout=120.0,
+                        thinking_enabled=False,
+                    ):
+                        piece_vis = sanitize_user_visible_answer_text(piece)
+                        if not piece_vis:
+                            continue
+                        streamed_tokens = True
+                        full_answer += piece_vis
+                        yield _sse(
+                            "answer_delta",
+                            {
+                                "trace_id": trace_id,
+                                "task_id": task_id or "",
+                                "content": piece_vis,
+                                "kind": "body",
+                                "stream_mode": "token",
+                            },
+                        )
+                except Exception:
+                    streamed_tokens = False
+                    full_answer = ""
+                if not full_answer:
+                    full_answer = (
+                        await loop.run_in_executor(
+                            _executor,
+                            lambda: invoke_unified(
+                                provider=provider,
+                                base_url=base_url,
+                                api_key=api_key,
+                                model=model_resolved,
+                                messages=fallback_messages,
+                                temperature=0.3,
+                                max_tokens=1800,
+                                timeout=120.0,
+                            )
+                        )
+                    ) or ""
 
             if not full_answer:
                 full_answer = "（未得到模型文本：请确认网关支持 function calling、MCP 可连，或稍后重试）"

@@ -18,6 +18,11 @@ DEFAULT_CDP_PORT = int(os.environ.get("SBA_CHROME_CDP_PORT", "9223") or "9223")
 EXTRA_LAUNCH_FLAGS = (
     "--disable-session-crashed-bubble",
     "--disable-infobars",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--renderer-process-limit=2",
 )
 
 
@@ -331,24 +336,26 @@ def _launch_chrome_exe(exe: str, tokens: List[str], *, initial_url: str = "") ->
         launch_tokens.append(start_url)
 
     if sys.platform == "win32":
-        ps_tokens = ",".join(json.dumps(t) for t in launch_tokens)
-        ps = f"Start-Process -FilePath {json.dumps(exe)} -ArgumentList @({ps_tokens})"
+        # 直接由长驻后端进程拉起 Chrome，避免经短命 PowerShell/作业对象启动后
+        # 端口刚就绪便随包装进程退出。list argv 可正确保留含空格的 user-data-dir。
         try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=True,
+            subprocess.Popen(
+                # Popen(list) 本身会安全引用含空格参数；Chrome flags 必须保留 --key=value。
+                [exe, *launch_tokens],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
             )
-        except subprocess.CalledProcessError as ex:
+        except Exception as ex:
             return {
                 "ok": False,
-                "error_code": "CHROME_START_PROCESS_FAILED",
-                "error": (ex.stderr or ex.stdout or str(ex)).strip(),
+                "error_code": "CHROME_POPEN_FAILED",
+                "error": str(ex),
                 "exe": exe,
             }
-        method = "powershell_start_process"
+        method = "python_popen"
     else:
         argv = [exe, *launch_tokens]
         try:

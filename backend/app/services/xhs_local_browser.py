@@ -698,6 +698,165 @@ def _xhs_user_search_urls(red_id: str) -> List[str]:
     ]
 
 
+_XHS_CONTENT_CARDS_JS = r"""(limit) => {
+    const rows = [];
+    const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    const textOf = (root, selectors) => {
+        for (const selector of selectors) {
+            const node = root.querySelector(selector);
+            const value = clean(node && (node.innerText || node.textContent));
+            if (value) return value;
+        }
+        return '';
+    };
+    for (const card of document.querySelectorAll('section.note-item')) {
+        // 搜索页 cover href 是 /search_result/<id>?xsec_token=...；优先取隐藏的公开 explore href。
+        const anchor = card.querySelector('a[href*="/explore/"]')
+            || card.querySelector('a[href*="/discovery/item/"]');
+        const href = anchor ? (anchor.getAttribute('href') || '') : '';
+        const match = href.match(/\/(?:explore|discovery\/item)\/([a-f0-9]{24})/i);
+        if (!match) continue;
+        const title = textOf(card, ['.title', '.note-title', '[class*="title"]']);
+        const author = textOf(card, [
+            '.author-wrapper .name', '.author .name', '[class*="author"] [class*="name"]',
+            'a[href*="/user/profile/"] span'
+        ]);
+        const interaction = textOf(card, [
+            '.like-wrapper .count', '.like-wrapper', '[class*="like"] [class*="count"]',
+            '[class*="interaction"]'
+        ]);
+        rows.push({
+            note_id: match[1],
+            title,
+            author,
+            interaction,
+            snippet: clean(card.innerText || card.textContent).slice(0, 320),
+        });
+        if (rows.length >= limit) break;
+    }
+    return rows;
+}"""
+
+
+def _xhs_interaction_count(value: Any) -> int:
+    """把 1.2万 / 3k 等页面互动文本归一为可排序整数。"""
+    raw = str(value or "").strip().lower().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([万wk]?)", raw)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    unit = match.group(2)
+    if unit in {"万", "w"}:
+        number *= 10000
+    elif unit == "k":
+        number *= 1000
+    return int(number)
+
+
+def search_xhs_content_via_cdp(keyword: str, *, limit: int = 12) -> Dict[str, Any]:
+    """复用已登录 CDP Chrome 搜索主题笔记；只返回无 token 的公开证据。"""
+    from urllib.parse import quote
+
+    query = (keyword or "").strip()
+    if not query:
+        return {"ok": False, "error_code": "XHS_QUERY_EMPTY", "error": "搜索词为空"}
+    port = find_cdp_port()
+    if not port:
+        # 与人物画像链路一致：只启动独立 SBA-Chrome-CDP，不触碰日常 Chrome。
+        from .chrome_profile_prep import ensure_sba_cdp_chrome_running
+
+        port = ensure_sba_cdp_chrome_running(wait_sec=45.0)
+    max_items = max(1, min(int(limit or 12), 30))
+    search_url = (
+        "https://www.xiaohongshu.com/search_result?keyword="
+        + quote(query, safe="")
+        + "&source=web_search_result_notes"
+    )
+    tabs = cdp_list_tabs(port)
+    tab = next(
+        (
+            row for row in tabs
+            if "xiaohongshu.com/search_result" in str(row.get("url") or "")
+            and "/login" not in str(row.get("url") or "")
+        ),
+        None,
+    ) or _pick_cdp_tab_meta(tabs)
+    if tab is None:
+        if any("/login" in str(row.get("url") or "") for row in tabs):
+            raise RuntimeError("SUB_OWNER_XHS_LOGIN_REQUIRED: CDP Chrome 当前仅有小红书登录页")
+        raise RuntimeError("SUB_OWNER_CDP_NO_XHS_TAB: CDP Chrome 中没有可用的小红书标签页")
+    ws_url = str(tab.get("webSocketDebuggerUrl") or "").strip()
+    if not ws_url:
+        raise RuntimeError("SUB_OWNER_CDP_NO_WEBSOCKET: 小红书标签页缺少 CDP WebSocket")
+
+    cdp_tab_eval(ws_url, f"location.assign({json.dumps(search_url)})", timeout_sec=8)
+    deadline = time.time() + 45.0
+    rows: List[Dict[str, Any]] = []
+    while time.time() < deadline:
+        time.sleep(1.2)
+        current_url = str(cdp_tab_eval(ws_url, "location.href", timeout_sec=8) or "")
+        if "/login" in current_url:
+            raise RuntimeError("SUB_OWNER_XHS_LOGIN_REQUIRED: 小红书主题搜索跳转到登录页")
+        try:
+            _cdp_eval_iife(ws_url, _DISMISS_XHS_OVERLAY_JS, timeout_sec=8)
+        except Exception:
+            pass
+        raw = _cdp_eval_iife(
+            ws_url,
+            f"() => ({_XHS_CONTENT_CARDS_JS})({max_items})",
+            timeout_sec=12,
+        )
+        rows = raw if isinstance(raw, list) else []
+        if rows:
+            break
+
+    for _ in range(6):
+        if len(rows) >= max_items:
+            break
+        cdp_tab_eval(ws_url, "window.scrollBy(0, Math.max(900, window.innerHeight * 1.2))")
+        time.sleep(1.0)
+        raw = _cdp_eval_iife(
+            ws_url,
+            f"() => ({_XHS_CONTENT_CARDS_JS})({max_items})",
+            timeout_sec=12,
+        )
+        rows = raw if isinstance(raw, list) else rows
+
+    results: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for rank, row in enumerate(rows, start=1):
+        note_id = str(row.get("note_id") or "").strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{24}", note_id) or note_id in seen:
+            continue
+        seen.add(note_id)
+        interaction_text = str(row.get("interaction") or "").strip()
+        results.append({
+            "rank": rank,
+            "note_id": note_id,
+            "title": str(row.get("title") or "").strip() or f"笔记 {note_id[:8]}",
+            "author": str(row.get("author") or "").strip(),
+            "interaction_text": interaction_text,
+            "engagement_count": _xhs_interaction_count(interaction_text),
+            "snippet": str(row.get("snippet") or "").strip()[:320],
+            "canonical_url": f"https://www.xiaohongshu.com/explore/{note_id}",
+            "evidence_level": "logged_in_search_card",
+        })
+
+    return {
+        "ok": bool(results),
+        "query": query,
+        "count": len(results),
+        "results": results,
+        "source": "xhs_cdp_websocket",
+        "evidence_boundary": "仅依据已登录搜索结果卡片；互动量为页面可见值，未读取私密数据。",
+        "hint": (
+            "可按互动量与标题相关性筛选，再对公开链接做进一步内容核验。"
+            if results
+            else "已打开小红书搜索页，但未解析到公开笔记卡片；可能是登录态、风控或页面结构变化。"
+        ),
+    }
+
+
 def _search_on_page(page, red_id: str, *, attempt: int = 1) -> Tuple[List[Dict], List[str], Optional[Dict]]:
     """在**当前标签**内搜索用户；依次尝试 type=user / type=51 / 无 type。"""
     search_urls = _xhs_user_search_urls(red_id)
@@ -1111,6 +1270,11 @@ def _resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
                             )
                             got = _pick_result(api_payloads, profile_ids, state, red_id)
                             if got:
+                                access_url = _profile_url_from_open_pages(
+                                    context, str(got.get("creator_id") or "")
+                                )
+                                if access_url:
+                                    got["_access_profile_url"] = access_url
                                 _log.info(
                                     "[%s|resolve|Agent执行|复用标签] creator_id=%s; url=%s",
                                     _CHAIN,
@@ -1142,6 +1306,11 @@ def _resolve_with_cdp_playwright(red_id: str, port: int) -> Dict[str, Any]:
 
                 got = _pick_result(api_payloads, profile_ids, state, red_id)
                 if got:
+                    access_url = _profile_url_from_open_pages(
+                        context, str(got.get("creator_id") or "")
+                    )
+                    if access_url:
+                        got["_access_profile_url"] = access_url
                     _log.info(
                         "[%s|resolve|Agent执行|成功] creator_id=%s; mode=cdp_attach",
                         _CHAIN,
@@ -3596,15 +3765,8 @@ def _scrape_profile_on_page(
         except Exception:
             pass
 
-    def _tokenless_note_count() -> int:
-        return sum(
-            1
-            for it in by_note.values()
-            if "xsec_token" not in (str(getattr(it, "canonical_url", "") or ""))
-        )
-
-    # 条数不足或存在裸 explore 链时：逐条点击 note-item，从跳转 URL 补全 xsec_token
-    if need <= 0 or len(by_note) < need or _tokenless_note_count() > 0:
+    # Catalog only needs metadata. Resolve access URLs later for the selected 3-5 notes.
+    if need <= 0 or len(by_note) < need:
         load_rounds = 0
         while need > 0 and load_rounds < 24:
             dom_count = page.evaluate("document.querySelectorAll('section.note-item').length") or 0
@@ -3622,7 +3784,7 @@ def _scrape_profile_on_page(
         max_clicks = min(max(dom_count, need, 20), 80)
         seen_ids = set(by_note.keys())
         for idx in range(max_clicks):
-            if need > 0 and len(by_note) >= need and _tokenless_note_count() == 0:
+            if need > 0 and len(by_note) >= need:
                 break
             click_res = page.evaluate(_CLICK_PROFILE_NOTE_BY_INDEX_JS, idx)
             if not (isinstance(click_res, dict) and click_res.get("ok")):
@@ -3694,6 +3856,7 @@ def scrape_profile_feed_items_via_headless_cookies(
     *,
     creator_id: str = "",
     scroll_rounds: int = 6,
+    min_count: int = 0,
 ) -> List[Any]:
     """Cookie + headless Playwright 采集他人 UP 主页（与收藏夹同链路）。"""
     from playwright.sync_api import sync_playwright
@@ -3779,6 +3942,50 @@ def scrape_profile_feed_items_via_headless_cookies(
     return out
 
 
+def _pick_existing_profile_page(context, creator_id: str):
+    """Reuse a loaded creator page so its short-lived access context is preserved."""
+    cid = (creator_id or "").strip()
+    if not cid:
+        return None
+    for candidate in context.pages:
+        try:
+            current_url = str(candidate.url or "")
+            if (
+                not candidate.is_closed()
+                and "/user/profile/" in current_url
+                and cid in current_url
+                and "/login" not in current_url
+            ):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _profile_url_from_open_pages(context, creator_id: str) -> str:
+    """Read a matching profile href from a loaded XHS page without persisting it."""
+    from urllib.parse import urljoin
+
+    cid = (creator_id or "").strip()
+    if not cid:
+        return ""
+    selector = f'a[href*="/user/profile/{cid}"]'
+    for candidate in context.pages:
+        try:
+            current_url = str(candidate.url or "")
+            if candidate.is_closed() or "xiaohongshu.com" not in current_url:
+                continue
+            matches = candidate.locator(selector)
+            if matches.count() <= 0:
+                continue
+            href = str(matches.first.get_attribute("href") or "").strip()
+            if href:
+                return urljoin(current_url, href)
+        except Exception:
+            continue
+    return ""
+
+
 def scrape_profile_feed_items_via_cdp(
     profile_url: str,
     *,
@@ -3806,7 +4013,6 @@ def scrape_profile_feed_items_via_cdp(
         )
 
     port = find_cdp_port() or CDP_PORT
-    page = None
     last_err: Optional[Exception] = None
     for cfg in _iter_browser_configs():
         if not is_browser_google_signed_in(cfg):
@@ -3814,14 +4020,27 @@ def scrape_profile_feed_items_via_cdp(
         p = _ensure_cdp_port(cfg)
         if not p:
             continue
+        page = None
+        owns_page = False
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{p}")
                 context = browser.contexts[0] if browser.contexts else browser.new_context()
-                page = context.new_page()
+                page = _pick_existing_profile_page(context, cid)
+                effective_url = url
+                if page is None:
+                    effective_url = _profile_url_from_open_pages(context, cid) or url
+                    page = context.new_page()
+                    owns_page = True
+                else:
+                    _log.info(
+                        "[%s|scrape_profile_feed_items_via_cdp|Agent执行|复用主页标签] creator=%s",
+                        _CHAIN,
+                        cid,
+                    )
                 out = _scrape_profile_on_page(
                     page,
-                    url,
+                    effective_url,
                     target_creator_id=cid,
                     scroll_rounds=scroll_rounds,
                     min_count=min_count,
@@ -3832,7 +4051,8 @@ def scrape_profile_feed_items_via_cdp(
                         save_cookies_if_better("xiaohongshu", fresh)
                 except Exception:
                     pass
-                page.close()
+                if owns_page:
+                    page.close()
             out = [it for it in out if is_valid_xhs_note_id(getattr(it, "note_id", ""))]
             if not out:
                 raise RuntimeError("SUB_PROFILE_CATALOG_EMPTY: CDP 滚动后仍未解析到 UP 笔记")
@@ -3846,7 +4066,7 @@ def scrape_profile_feed_items_via_cdp(
             return out
         except Exception as ex:
             last_err = ex
-            if page is not None:
+            if page is not None and owns_page:
                 try:
                     page.close()
                 except Exception:
@@ -3907,7 +4127,10 @@ def scrape_profile_feed_items(
         )
         try:
             return scrape_profile_feed_items_via_headless_cookies(
-                url, creator_id=cid, scroll_rounds=sr
+                url,
+                creator_id=cid,
+                scroll_rounds=sr,
+                min_count=min_count or 60,
             )
         except Exception as ex:
             last_err = ex
@@ -3935,7 +4158,10 @@ def scrape_profile_feed_items(
     if favorites_playwright_fallback_enabled():
         try:
             return scrape_profile_feed_items_via_headless_cookies(
-                url, creator_id=cid, scroll_rounds=sr
+                url,
+                creator_id=cid,
+                scroll_rounds=sr,
+                min_count=min_count or 60,
             )
         except Exception as ex:
             last_err = ex
@@ -3972,6 +4198,7 @@ def fetch_catalog_via_headless_cookies(
         url,
         creator_id=creator_id,
         scroll_rounds=sr,
+        min_count=min_count or 60,
     )
 
 

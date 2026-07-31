@@ -9,6 +9,35 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _LOG = logging.getLogger("sba.chat_tools")
 
+_XHS_DEEP_MEDIA_TERMS = (
+    "视频内容", "视频原文", "视频信息", "最近视频", "近几条视频", "转写",
+    "字幕", "语音内容", "画面内容", "逐字稿", "音视频", "whisper", "ffmpeg", "ocr",
+)
+
+_XHS_DEEP_MEDIA_PATTERNS = (
+    r"(?:视频|音视频).{0,10}(?:实际内容|具体内容|音频|语音|画面|字幕|转写|逐字稿)",
+    r"(?:实际读取|实际分析|深入分析).{0,10}(?:视频|音频|画面)",
+    r"(?:处理|提取|读取).{0,8}(?:视频|音频|语音|画面)",
+    r"(?:最近|近)(?:几个|几条|[一二三四五六七八九十\d]+个?)?视频.{0,8}(?:实际|内容|信息)",
+)
+
+_XHS_DEEP_MEDIA_NEGATION_RE = re.compile(
+    r"(?:不要|无需|不需要|不用|别|停止|取消|跳过).{0,12}"
+    r"(?:下载|视频|音频|ffmpeg|whisper|ocr|转写|字幕|画面)",
+    re.I,
+)
+
+
+def wants_xhs_deep_media(user_prompt: str) -> bool:
+    """只有用户明确要视频内证据时才启动下载、Whisper 与画面 OCR。"""
+    prompt = (user_prompt or "").strip().casefold()
+    if not prompt or _XHS_DEEP_MEDIA_NEGATION_RE.search(prompt):
+        return False
+    return bool(
+        any(term.casefold() in prompt for term in _XHS_DEEP_MEDIA_TERMS)
+        or any(re.search(pattern, prompt, re.I) for pattern in _XHS_DEEP_MEDIA_PATTERNS)
+    )
+
 # 与 builtin_tools.list_builtin_tools 对齐的 function 名映射（AI 对话实际可调用名）
 _BUILTIN_ID_TO_FN = {
     "tool_link_pipeline": "link_pipeline_start",
@@ -32,6 +61,9 @@ _BUILTIN_ID_TO_FN = {
     "tool_local_file_copy": "local_file_copy",
     "tool_local_file_find": "local_file_find",
     "tool_local_file_grep": "local_file_grep",
+    "tool_local_file_changes": "local_file_changes",
+    "tool_local_file_change_diff": "local_file_change_diff",
+    "tool_local_file_rollback": "local_file_rollback",
 }
 
 
@@ -199,7 +231,7 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         comment_sort: str = "hot",
         video_transcript_mode: str = "audio_only",
     ) -> str:
-        from .task_manager import reuse_or_enqueue_task, add_log
+        from .task_manager import reuse_or_enqueue_task, add_log, list_tasks
         from .video_pipeline import process_video_pipeline
         from .link_doc_routing import platform_from_url
         from .span_orchestration import get_active_span_context
@@ -207,6 +239,31 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         url = (link or "").strip()
         if not url.startswith(("http://", "https://")):
             return _json_result({"ok": False, "error": "link 须为 http(s) URL"})
+        from .link_hash import url_hash as _url_hash
+
+        target_hash = _url_hash(url)
+        profile_light_match = next(
+            (
+                row
+                for row in list_tasks()
+                if _url_hash(str(row.get("link") or "")) == target_hash
+                and str((row.get("pipeline_options") or {}).get("source") or "")
+                == "creator_profile"
+            ),
+            None,
+        )
+        if profile_light_match:
+            return _json_result({
+                "ok": False,
+                "skipped": True,
+                "error_code": "PROFILE_LIGHTWEIGHT_NO_MEDIA",
+                "error": (
+                    "该链接已属于小红书人物画像的轻量采样任务；"
+                    "禁止再次进入视频下载、FFmpeg/Whisper 或画面抽帧流水线。"
+                ),
+                "task_id": profile_light_match.get("task_id"),
+                "hint": "直接使用 xhs_user_search 返回的 selected_notes 和画像摘要形成最终报告。",
+            })
         span_ctx = get_active_span_context() or {}
         main_tid = str(span_ctx.get("task_id") or "").strip()
         if main_tid:
@@ -310,12 +367,15 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         red_id: str,
         user_prompt: str = "",
     ) -> str:
-        """通过小红书号解析用户并执行五阶段人物画像（主页 catalog → 选篇 → 笔记流水线 → 深度画像）。"""
+        """通过小红书号解析用户并执行五阶段人物画像（主页 catalog → 选篇 → 轻量网页采样 → 深度画像）。"""
         rid = (red_id or "").strip()
         if not rid:
             return _json_result({"ok": False, "error": "请提供小红书号（数字 ID）"})
-        if not rid.isdigit() or len(rid) < 6:
-            return _json_result({"ok": False, "error": f"小红书号格式异常：{rid}，应为纯数字（6-15 位）"})
+        if not re.fullmatch(r"[A-Za-z0-9_-]{5,24}", rid):
+            return _json_result({
+                "ok": False,
+                "error": f"小红书号格式异常：{rid}，应为 5-24 位字母、数字、下划线或短横线",
+            })
 
         from .creator_profile_runner import run_xhs_chat_profile
         from .tool_chat_resilience import extract_error_code
@@ -340,13 +400,58 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
                 hint = "请先启动 CDP Chrome（9223）并调用 sync_xhs_cookies 同步 Cookie"
             return _json_result({**result, "error_code": code, "hint": hint})
 
+        # 短期访问 URL 只能在本轮进程内用于提交媒体流水线，绝不返回前端/LLM。
+        access_notes = result.pop("_selected_access_notes", [])
+        pipeline_ids: List[str] = []
+        deep_media_requested = wants_xhs_deep_media(up)
+        if deep_media_requested:
+            from .pipeline_scheduler import request_video_pipeline_async
+            from .task_manager import reuse_or_enqueue_task
+
+            for note in list(access_notes or [])[:5]:
+                content_type = str(note.get("content_type") or "").strip().lower()
+                access_url = str(note.get("access_url") or "").strip()
+                if content_type not in {"video", "视频", "unknown", ""}:
+                    continue
+                if not access_url.startswith(("http://", "https://")):
+                    continue
+                tid, _reused, _conflict = reuse_or_enqueue_task(
+                    "小红书",
+                    access_url,
+                    user_prompt=up[:500],
+                    comments={"enabled": False, "count": 10, "sort": "hot"},
+                    action="rerun",
+                    pipeline_route="xhs_chat_deep_media",
+                    pipeline_options={
+                        "source": "xhs_chat_deep_media",
+                        "media_processing": True,
+                        "video_transcript_mode": "hybrid",
+                        "skip_feishu": True,
+                    },
+                )
+                if tid and tid not in pipeline_ids:
+                    pipeline_ids.append(tid)
+                    await request_video_pipeline_async(tid)
+
         return _json_result({
             **result,
-            "async": False,
+            "async": bool(pipeline_ids),
+            "pipeline_task_ids": pipeline_ids,
+            "resource_mode": "deep_media_async" if pipeline_ids else "lightweight_no_media",
+            "media_processing": bool(pipeline_ids),
             "hint": (
                 f"已完成人物画像：{result.get('display_name')}（{result.get('creator_id')}），"
                 f"采样 {result.get('deep_ok_count')} 篇笔记。"
-                f"完整文档：{result.get('profile_md_path')}"
+                + (
+                    f"已提交 {len(pipeline_ids)} 个视频深度任务，Agent 将等待完成后从快照续接。"
+                    if pipeline_ids
+                    else (
+                        "用户未明确要求视频内证据，未启动下载、FFmpeg、Whisper 或 OCR。"
+                        if not deep_media_requested
+                        else "未取得可提交的视频访问链接，保留轻量证据边界。"
+                    )
+                )
+                + f"完整文档：{result.get('profile_md_path')}"
             ),
         })
 
@@ -354,12 +459,46 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         coroutine=xhs_user_search,
         name="xhs_user_search",
         description=(
-            "通过小红书号（数字 ID）搜索用户并生成人物画像。"
-            "当用户提到「小红书号」「red id」「搜小红书用户」「人物画像」并提供数字 ID 时优先调用。"
+            "通过小红书号（支持纯数字或字母数字账号）搜索用户并生成人物画像。"
+            "当用户提到「小红书号」「red id」「搜小红书用户」「人物画像」并提供账号时优先调用。"
             "流程：解析 red_id → 拉主页笔记目录 → 轻量画像 → 选取若干笔记链接（非主页 URL）"
-            "→ 逐条链接分析拉原文 → LLM 深度画像整合。"
-            "red_id 为纯数字；user_prompt 为分析侧重点（如内容风格、行业定位）。"
+            "→ 逐条轻量网页正文/元数据采样 → LLM 深度画像整合。"
+            "默认只做轻量网页采样；当 user_prompt 明确要求视频内容、转写、字幕或画面 OCR 时，"
+            "会为最多 5 条视频提交 hybrid 深度媒体任务并等待完成后续接当前回答。"
+            "不得自行把未被用户要求的视频提交 link_pipeline_start。"
+            "red_id 为 5-24 位账号；user_prompt 为分析侧重点（如内容风格、行业定位）。"
             "不将用户主页 profile URL 当作单条链接提交流水线。"
+        ),
+    ))
+
+    async def xhs_content_search(query: str, limit: int = 12) -> str:
+        """通过已登录 CDP Chrome 搜索公开小红书笔记卡片。"""
+        q = (query or "").strip()
+        if not q:
+            return _json_result({"ok": False, "error": "请提供小红书主题搜索词"})
+        try:
+            from .xhs_local_browser import search_xhs_content_via_cdp
+
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: search_xhs_content_via_cdp(q, limit=max(1, min(int(limit or 12), 30))),
+            )
+            return _json_result(result)
+        except Exception as ex:
+            return _json_result({
+                "ok": False,
+                "error_code": "XHS_CONTENT_SEARCH_FAILED",
+                "error": str(ex),
+                "hint": "请确认 CDP Chrome 9223 已启动、已登录小红书且保留一个小红书标签页。",
+            })
+
+    tools.append(StructuredTool.from_function(
+        coroutine=xhs_content_search,
+        name="xhs_content_search",
+        description=(
+            "在已登录的小红书网页中按主题搜索公开笔记，返回标题、作者、互动量、摘要和公开链接。"
+            "适合“小红书上搜索 SFT 微调博客/笔记”等主题检索；账号/人物画像仍用 xhs_user_search。"
+            "结果不返回 xsec_token 等短期访问凭据。"
         ),
     ))
 
@@ -676,6 +815,45 @@ def build_internal_chat_tools(*, read_comments: bool = False) -> List[Any]:
         description=(
             "复制/粘贴白名单内文件或目录（source -> dest，等同文件管理器复制粘贴）。"
             "recursive=true 复制整个目录树。备份、批量整理时调用。"
+        ),
+    ))
+
+    def local_file_changes(limit: int = 50, session_id: str = "", task_id: str = "") -> str:
+        from .local_file_ops import list_local_file_changes
+
+        return _json_result(list_local_file_changes(limit=limit, session_id=session_id, task_id=task_id))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_changes,
+        name="local_file_changes",
+        description=(
+            "列出 Agent 文件工具的变更事务。每条记录包含 change_id、操作类型、状态和可回退标记；"
+            "需要查看或撤销文件修改时先调用。"
+        ),
+    ))
+
+    def local_file_change_diff(change_id: str) -> str:
+        from .local_file_ops import get_local_file_change
+
+        return _json_result(get_local_file_change(change_id))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_change_diff,
+        name="local_file_change_diff",
+        description="按 change_id 查看逐文件新增、删除、修改清单及 UTF-8 文本 unified diff。",
+    ))
+
+    def local_file_rollback(change_id: str, force: bool = False) -> str:
+        from .local_file_ops import rollback_local_file_change
+
+        return _json_result(rollback_local_file_change(change_id, force=force))
+
+    tools.append(StructuredTool.from_function(
+        func=local_file_rollback,
+        name="local_file_rollback",
+        description=(
+            "回退指定 change_id 的文件变更。默认会检测后续修改并拒绝覆盖；"
+            "只有用户明确接受覆盖风险时才可使用 force=true。"
         ),
     ))
 
