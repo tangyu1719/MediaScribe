@@ -34,13 +34,22 @@ def _coerce_dict(raw: Any) -> Dict[str, Any]:
 def extract_async_pipeline_ids(tool_name: str, raw_out: Any) -> List[str]:
     """从 link_pipeline_start 等返回中解析后台流水线 task_id。"""
     name = (tool_name or "").strip()
-    if name != "link_pipeline_start":
+    if name not in {"link_pipeline_start", "xhs_user_search"}:
         return []
     tr = _coerce_dict(raw_out)
     if tr.get("ok") is not True and not tr.get("async"):
         return []
-    tid = str(tr.get("task_id") or "").strip()
-    return [tid] if tid else []
+    candidates: List[Any] = []
+    if name == "link_pipeline_start":
+        candidates.append(tr.get("task_id"))
+    else:
+        candidates.extend(tr.get("pipeline_task_ids") or [])
+    out: List[str] = []
+    for value in candidates:
+        tid = str(value or "").strip()
+        if tid and tid not in out:
+            out.append(tid)
+    return out
 
 
 def pipeline_snapshot_row(pid: str) -> Dict[str, Any]:

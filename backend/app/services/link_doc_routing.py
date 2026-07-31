@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 
 _URL_RE = re.compile(r"https?://[^\s\]\)\"'<>]+", re.I)
 _XHS_ID_RE = re.compile(
-    r"(?:小红书\s*(?:号|账号|用户)?|xhs\s*(?:id)?|red\s*id)\s*[:：]?\s*(\d{6,12})",
+    r"(?:小红书\s*(?:号|账号|用户)?|xhs(?![A-Za-z0-9_])\s*(?:id)?|red\s*id)"
+    r"\s*[:：]?\s*([A-Za-z0-9_-]{5,24})",
     re.I,
 )
 _LINK_DOC_KW = (
@@ -82,15 +83,28 @@ def pipeline_route_hint(url: str) -> str:
     return "video|web_article"
 
 
-def extract_xhs_numeric_id(text: str) -> Optional[str]:
-    m = _XHS_ID_RE.search(text or "")
-    if m:
-        return m.group(1)
+def extract_xhs_account_id(text: str) -> Optional[str]:
+    for match in _XHS_ID_RE.finditer(text or ""):
+        candidate = match.group(1)
+        # Internal tool identifiers are not Xiaohongshu accounts. In particular,
+        # `xhs_user_search` used in a recovery instruction used to become `_user_search`.
+        if candidate.startswith("_") or candidate.casefold() in {
+            "user_search",
+            "content_search",
+            "search_result",
+        }:
+            continue
+        return candidate
     if re.search(r"小红书|xhs|red\s*book", text or "", re.I):
         digits = re.findall(r"\b(\d{8,12})\b", text or "")
         if len(digits) == 1:
             return digits[0]
     return None
+
+
+def extract_xhs_numeric_id(text: str) -> Optional[str]:
+    """Backward-compatible alias; Xiaohongshu accounts may also be alphanumeric."""
+    return extract_xhs_account_id(text)
 
 
 def analyze_link_doc_intent(message: str, *, read_comments: bool = False) -> Dict[str, Any]:

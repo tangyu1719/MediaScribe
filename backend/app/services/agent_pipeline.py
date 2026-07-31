@@ -313,9 +313,9 @@ def should_skip_pipeline_llm(query: str) -> bool:
     code, _ = _rule_domain(q)
     if code != "social":
         return False
-    if re.search(r"小红书号[：:\s]*[0-9]{5,12}", q):
+    if re.search(r"小红书号[：:\s]*[A-Za-z0-9_-]{5,24}", q, re.I):
         return True
-    if re.search(r"(?:red_id|user_id)[=:\s]*[0-9]{5,12}", q, re.I):
+    if re.search(r"(?:red_id|user_id)[=:\s]*[A-Za-z0-9_-]{5,24}", q, re.I):
         return True
     return False
 

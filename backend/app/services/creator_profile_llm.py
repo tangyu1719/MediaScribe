@@ -194,11 +194,27 @@ def build_note_selection(
     if not llm.get("ok"):
         return {"ok": False, "error": llm.get("error")}
     data = _parse_json_block(llm.get("content") or "")
-    ids = [str(x) for x in (data.get("selected_note_ids") or []) if x]
+    valid_ids = {str(it.get("note_id") or "") for it in pool if it.get("note_id")}
+    raw_ids = [str(x) for x in (data.get("selected_note_ids") or []) if x]
+    for selected in data.get("selected") or []:
+        if isinstance(selected, dict) and selected.get("note_id"):
+            raw_ids.append(str(selected.get("note_id")))
+    ids: List[str] = []
+    for note_id in raw_ids:
+        if note_id in valid_ids and note_id not in ids:
+            ids.append(note_id)
     if len(ids) < min_pick:
-        # 规则兜底：按时间分桶均匀抽取
+        # LLM 可能返回序号/截断 ID/编造 ID；必须先与真实目录取交集。
+        # 交集不足时按时间分桶确定性兜底，禁止把空选篇交给后续链路。
         ids = _fallback_select(pool, min_pick, max_pick)
-        data = {"selected_note_ids": ids, "rationale": "LLM 选篇不足，规则分桶兜底", "fallback": True}
+        data = {
+            "selected_note_ids": ids,
+            "rationale": "LLM 有效选篇不足，规则分桶兜底",
+            "fallback": True,
+            "invalid_selected_count": len([nid for nid in raw_ids if nid not in valid_ids]),
+        }
+    else:
+        data["selected_note_ids"] = ids[:max_pick]
     data["ok"] = True
     data["llm_model"] = llm.get("model") or ""
     return data

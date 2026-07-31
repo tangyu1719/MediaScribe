@@ -23,6 +23,10 @@ _XHS_PROFILE_RE = re.compile(
 )
 
 
+def _safe_log_url(url: str) -> str:
+    return re.sub(r"(?i)([?&]xsec_token=)[^&\s]+", r"\1***", str(url or ""))
+
+
 @dataclass
 class FeedItem:
     platform: str
@@ -786,6 +790,6 @@ def resolve_note_links_for_selection(
             note.get("link_source"),
             has_token,
             note.get("link_resolved"),
-            resolved[:120],
+            _safe_log_url(resolved)[:120],
         )
     return out

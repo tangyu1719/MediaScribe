@@ -18,7 +18,39 @@ _STATUS_INQUIRY_FRAGMENTS = (
     "什么情况", "到底什么情况", "执行到哪", "任务执行",
 )
 
-_DOMAIN_HINTS = ("小红书", "小红薯", "笔记", "账号", "B站", "bilibili", "微博", "抖音")
+_DOMAIN_HINTS = (
+    "小红书", "小红薯", "笔记", "账号", "B站", "bilibili", "微博", "抖音",
+    "BOSS直聘", "Boss直聘", "淘宝", "京东", "知乎", "GitHub",
+)
+
+_SEARCH_INSTRUCTION_PATTERNS = (
+    r"大概\s*[一二三四五六七八九十\d]+\s*篇(?:左右)?",
+    r"(?:给我|帮我)?\s*(?:找|搜|整理|筛选|列出|返回)\s*[一二三四五六七八九十\d]+\s*(?:篇|条|个)(?:左右)?",
+    r"尽量[^，。；;]*",
+    r"比较权威(?:的)?",
+    r"点赞量多(?:的)?",
+    r"你(?:分析|觉得)[^，。；;]*",
+    r"综合(?:点赞|收藏|评论|互动|内容质量)[^，。；;]*",
+    r"(?:请)?(?:整理|汇总|生成|写成|做成)(?:一份)?(?:报告|表格|清单|列表)[^，。；;]*",
+    r"(?:并|然后)?\s*(?:给出|附上|标注|列出)(?:至少)?[一二三四五六七八九十\d]*\s*(?:个|条|篇)?(?:可靠|权威|可核验)?(?:来源|链接|引用)[^，。；;]*",
+    r"按[^，。；;]*(?:排序|分组|分类)",
+)
+
+_SEARCH_ACTION_PREFIX_RE = re.compile(
+    r"^(?:请|麻烦|能否|可以|帮我|请帮我|你帮我|我想|我要|继续)?\s*"
+    r"(?:(?:联网|上网|网络|全网|网上)\s*)?"
+    r"(?:搜索一下|搜一下|搜索|搜搜|查一下|查询一下|查询|查找|找一下|找找)\s*",
+    re.I,
+)
+
+_SEARCH_DELIVERY_TAIL_RE = re.compile(
+    r"(?:[，,。；;]\s*|\s+)(?:并且|并|然后|再)?\s*"
+    r"(?:最后\s*)?(?:整理|汇总|输出|生成|写成|做成|列出|返回|给出|附上|标注|筛选)"
+    r"(?:成|为)?(?:一份)?(?:报告|表格|清单|列表|来源|链接|引用|[一二三四五六七八九十\d]+\s*(?:篇|条|个))?[\s\S]*$",
+    re.I,
+)
+
+_SEARCH_FOCUS_RE = re.compile(r"(?:重点(?:关注|看)|侧重|主要关注|尤其关注|覆盖|包括)\s*", re.I)
 
 
 def _normalize_space(text: str) -> str:
@@ -30,6 +62,99 @@ def _strip_conversational(text: str) -> str:
     for frag in _STOP_FRAGMENTS:
         t = t.replace(frag, " ")
     return _normalize_space(t)
+
+
+def _strip_search_instructions(text: str) -> str:
+    value = _normalize_space(text)
+    # 先整体截掉交付尾巴；若先删“筛选 10 条”等局部短语，会只剩孤立连接词。
+    value = _SEARCH_DELIVERY_TAIL_RE.sub(" ", value)
+    for pattern in _SEARCH_INSTRUCTION_PATTERNS:
+        value = re.sub(pattern, " ", value, flags=re.I)
+    value = re.sub(r"[（）()]", " ", value)
+    return _normalize_space(value)
+
+
+def _search_topic_parts(text: str) -> tuple[str, List[str]]:
+    """拆成核心主题和少量关注面；交付格式、数量、排序要求不进入搜索词。"""
+    value = _strip_search_instructions(text)
+    value = _SEARCH_ACTION_PREFIX_RE.sub("", value)
+    value = re.sub(
+        r"^(?:在\s*)?(?:小红书|小红薯|B站|bilibili|微博|抖音|BOSS直聘|Boss直聘|淘宝|京东|知乎|GitHub)\s*(?:上|里|中)?\s*(?:搜索一下|搜一下|搜索|搜搜|查一下|查询|查找|找一下|找找)?\s*",
+        "",
+        value,
+        flags=re.I,
+    )
+    pieces = _SEARCH_FOCUS_RE.split(value, maxsplit=1)
+    core = pieces[0].strip(" ，,。；;：:")
+    focus_raw = pieces[1] if len(pieces) > 1 else ""
+    core = re.sub(r"^(?:一下|一下子)\s*", "", core)
+    core = re.sub(r"(?:方面)?相关(?:的)?(?:博客|笔记|文章|内容|资料|教程)?$", "", core)
+    core = re.sub(r"(?:的)?(?:博客|笔记|文章|内容|资料|教程)$", "", core)
+    core = re.sub(r"(?:[，,]\s*)?(?:并且|并|然后|再|最后)$", "", core)
+    core = _normalize_space(core.strip(" ，,。；;：:"))
+
+    focuses: List[str] = []
+    if focus_raw:
+        for item in re.split(r"[、/]|(?:以及|和|与|及)", focus_raw):
+            clean = _strip_search_instructions(item).strip(" ，,。；;：:")
+            if clean and len(clean) >= 2 and clean not in focuses:
+                focuses.append(_normalize_space(clean)[:32])
+    return core[:72], focuses[:3]
+
+
+def _focused_topic(text: str) -> str:
+    """从口语长句提炼检索主题，避免把数量、评价标准和交付要求塞进 query。"""
+    raw = _strip_search_instructions(text)
+    if not raw:
+        return ""
+    if re.search(r"(?<![A-Za-z0-9])SFT(?![A-Za-z0-9])", raw, re.I) and "微调" in raw:
+        return "SFT 微调"
+    candidate, _focuses = _search_topic_parts(raw)
+    candidate = re.sub(r"(?:的)?(?:介绍|深度内容|学习框架|知识点)(?:等)?$", "", candidate)
+    # candidate 已经过动作前缀和交付尾巴清洗；这里不能再跑全局 STOP 替换，
+    # 否则会把“限流的官方说明”里的结构助词删掉，破坏实体短语。
+    candidate = candidate.strip(" ，,。；;：:")
+    if len(candidate) > 72:
+        candidate = candidate[:72].rstrip()
+    return _normalize_space(candidate)
+
+
+def extract_xhs_content_search_query(message: str) -> str:
+    """识别“小红书上搜主题”并返回主题；账号/人物画像请求返回空。"""
+    text = _normalize_space(message)
+    if not text or not any(name in text for name in ("小红书", "小红薯")):
+        return ""
+    if "小红书号" in text or "人物画像" in text or re.search(r"\bred\s*id\b", text, re.I):
+        return ""
+    if not any(verb in text for verb in ("搜索", "搜一下", "搜搜", "找一下", "找找", "查找")):
+        return ""
+    return _focused_topic(text)
+
+
+def _focused_web_queries(text: str, *, max_queries: int) -> List[str]:
+    topic = _focused_topic(text)
+    if not topic:
+        return []
+    limit = max(1, min(int(max_queries or 3), 5))
+    if topic.casefold() == "sft 微调":
+        candidates = [
+            "小红书 SFT 微调" if any(x in text for x in ("小红书", "小红薯")) else "SFT 微调",
+            "SFT 微调 原理",
+            "SFT 微调 学习框架",
+            "SFT 微调 实践 评测",
+        ]
+        return candidates[:limit]
+    domain = next((name for name in _DOMAIN_HINTS if name.casefold() in text.casefold()), "")
+    primary = _normalize_space(f"{domain} {topic}") if domain else topic
+    queries = [primary]
+    _core, focuses = _search_topic_parts(text)
+    for focus in focuses:
+        candidate = _normalize_space(f"{primary} {focus}")[:120]
+        if candidate and candidate not in queries:
+            queries.append(candidate)
+        if len(queries) >= limit:
+            break
+    return queries[:limit]
 
 
 def is_status_inquiry_message(message: str) -> bool:
@@ -149,6 +274,10 @@ def build_web_search_keyword_queries(
         rewritten = original
     elif is_status_inquiry_message(rewritten) and not original:
         return []
+
+    focused = _focused_web_queries(original or rewritten, max_queries=max_queries)
+    if focused:
+        return focused
 
     base_terms = extract_base_keywords(original or rewritten, rewritten)
     if not base_terms and rewritten:
@@ -274,6 +403,7 @@ def build_web_search_plan(
     search_queries = build_web_search_keyword_queries(
         original_query=original,
         rewritten_query=rewritten,
+        max_queries=4,
     )
     objective = _strip_conversational(rewritten)[:160] or _strip_conversational(original)[:160]
     skip = bool(is_status_inquiry_message(_normalize_space(original_query)) and not task_q and not search_queries)
