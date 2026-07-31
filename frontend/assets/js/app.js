@@ -4437,6 +4437,7 @@ function onUserAvatarFile(ev){
   ev.target.value='';
 }
 function switchPage(key){
+  if(key==="chat")clearChatCompletionHeart();
   if(page.value===key)return;
   closeSidePanelFs();
   // 检查权限
@@ -5650,7 +5651,16 @@ function mergeOrchPipelineNodes(src){
   }
   return m;
 }
-const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:false,readComments:false,includeRss:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskHistFilterSession:"",taskHistFilterStatus:"",taskHistFilterKind:"all",taskHistLoading:false,taskHistRemoteList:[],taskHistTotal:0,taskHistStats:null,taskHistMysqlInfo:null,taskHistSyncingId:"",taskHistDetailCache:{},taskHistDetailLoading:"",taskHistModalOpen:false,taskHistModalRow:null,taskHistModalFromChat:false,taskSubPlanSel:null,taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatWarmup:{loading:false,ready:false,warming:false,readCommentsCached:false,toolsTotal:0,elapsedMs:0,phases:{},error:''},chatConnect:{active:false,doneFlash:false,stallWarn:false,stallDetail:''},chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
+const c=reactive({sid:"",mode:"normal",search:"",inp:"",msgs:[],th:"",model:"",agentId:"default",deepThink:false,webSearch:false,ragPrefetch:false,readComments:false,includeRss:false,uploads:[],recording:false,curTask:null,mainTaskHistory:[],taskExpanded:false,mainTaskHistoryOpen:false,taskHistPick:"",taskHistMenuOpen:false,taskHistSearchId:"",taskHistSearchName:"",taskHistSort:"time_desc",taskHistFilterSession:"",taskHistFilterStatus:"",taskHistFilterKind:"all",taskHistLoading:false,taskHistRemoteList:[],taskHistTotal:0,taskHistStats:null,taskHistMysqlInfo:null,taskHistSyncingId:"",taskHistDetailCache:{},taskHistDetailLoading:"",taskHistModalOpen:false,taskHistModalRow:null,taskHistModalFromChat:false,taskSubPlanSel:null,taskStatusMenuOpen:false,chatContextExpanded:false,chatStreaming:false,chatAbort:null,summaryPatches:[],rewriteDraft:"",rewriteCountdown:0,rewriteTimer:null,rewriteConfirmOpen:false,rewriteSnapshot:null,chatHitl:{active:false,kind:"",title:"",message:"",payload:null,traceId:"",checkpointNs:"",taskId:"",threadId:"",phase:"",editText:"",keywordsLines:"",slotDomain:"",slotModule:"",slotNeedsRag:false,ragFilter:{domain:"",module:"",doc_type:"",keyword1:"",keyword2:""},ragVocab:{domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]},termNotes:"",toolOptions:[]},chatHitlResumeMsg:null,platformHealth:null,platformHealthLoading:false,platformHealthOpen:false,memoryMeta:null,chatWarmup:{loading:false,ready:false,warming:false,readCommentsCached:false,toolsTotal:0,elapsedMs:0,phases:{},error:''},chatConnect:{active:false,doneFlash:false,stallWarn:false,stallDetail:''},chatPrefs:{showToolIo:false,autoFoldChain:true,showThinkBlocks:true,showTaskRail:false,showFooterOps:true,showCopyExport:true,wideChatArea:true,maxToolRounds:15,toolTimeoutSec:60,maxToolRetry:3,distinctToolFailLimit:3,streamIntervalMs:14,streamIntervalFastMs:5,contextMaxTokens:128000,contextWarnPct:80,orchPipelineNodes:defaultOrchPipelineNodes()},chatPanelTab:"room",sessionMenuId:""});
+c.chatCompletionHeart=localStorage.getItem("sba_chat_completion_heart")==="1";
+function markChatCompletionHeart(){
+  c.chatCompletionHeart=true;
+  try{localStorage.setItem("sba_chat_completion_heart","1")}catch(_){}
+}
+function clearChatCompletionHeart(){
+  c.chatCompletionHeart=false;
+  try{localStorage.removeItem("sba_chat_completion_heart")}catch(_){}
+}
 function switchChatPanel(tab){
   const t=tab==="config"?"config":"room";
   c.chatPanelTab=t;
@@ -9393,7 +9403,7 @@ function hitlKindTitle(kind){return HITL_KIND_LABELS[kind]||HITL_KIND_LABELS.unk
 function clearChatHitl(){
   const h=c.chatHitl;
   h.active=false;h.kind="";h.title="";h.message="";h.payload=null;
-  h.traceId="";h.taskId="";h.threadId="";h.phase="";
+  h.traceId="";h.checkpointNs="";h.taskId="";h.threadId="";h.phase="";
   h.editText="";h.keywordsLines="";h.slotDomain="";h.slotModule="";h.slotNeedsRag=false;
   h.ragFilter={domain:"",module:"",doc_type:"",keyword1:"",keyword2:""};
   h.ragVocab={domain:[],module:[],doc_type:[],keyword1:[],keyword2:[]};h.termNotes="";
@@ -9455,6 +9465,7 @@ function applyChatHitlFromSse(d,aiMsg){
   h.message=String(d.message||inner.message||"请确认后继续编排");
   h.payload=inner;
   h.traceId=String(d.trace_id||inner.trace_id||"");
+  h.checkpointNs=String(d.checkpoint_ns||inner.checkpoint_ns||h.traceId||"");
   h.taskId=String(d.task_id||inner.task_id||"");
   h.threadId=String(d.thread_id||d.session_id||c.sid||"");
   h.phase=String(d.orchestration_phase||"");
@@ -9497,7 +9508,7 @@ function buildChatStreamBasePayload(extra){
 }
 function buildHitlResumeBody(action,extra){
   const act=String(action||"confirm").trim().toLowerCase();
-  const hitl={action:act};
+  const hitl={action:act,checkpoint_ns:c.chatHitl.checkpointNs||c.chatHitl.traceId||""};
   const kind=c.chatHitl.kind||"";
   if(kind==="rewrite_confirm"){
     const q=String((extra&&extra.rewritten_query)||c.chatHitl.editText||c.rewriteDraft||"").trim();
@@ -9527,6 +9538,7 @@ function buildHitlResumeBody(action,extra){
   return buildChatStreamBasePayload({
     session_id:c.sid||c.chatHitl.threadId,
     thread_id:c.chatHitl.threadId||c.sid,
+    checkpoint_ns:c.chatHitl.checkpointNs||c.chatHitl.traceId||"",
     message:String((extra&&extra.message)||c.inp||"(HITL resume)").trim()||"(HITL resume)",
     hitl,
   });
@@ -10051,6 +10063,20 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
       tw.curTask.status='executing';
       tw.curTask.pipeline_wait=true;
     }
+  }else if(curEvent==='tool_wait_checkpoint'){
+    aiMsg._hadToolWait=true;
+    aiMsg.toolWaitCheckpoint=d;
+    setChatProgressText(
+      aiMsg,
+      d.message||'已提交耗时工具，正在等待执行完成；完成后会自动继续当前回答。',
+      '工具调用中'
+    );
+    if(tw.curTask){
+      tw.curTask.status='executing';
+      tw.curTask.execution_state='tool_calling';
+      tw.curTask.execution_status_text='工具调用中';
+      tw.curTask.tool_wait_checkpoint=d;
+    }
   }else if(curEvent==='pipeline_wait_progress'){
     const st=d.statuses||{};
     const parts=Object.keys(st).map(k=>k+':'+st[k]);
@@ -10061,6 +10087,20 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     if(tw.curTask){
       tw.curTask.pipeline_wait=false;
       if(d.ok)tw.curTask.status='executing';
+    }
+  }else if(curEvent==='tool_checkpoint_resumed'){
+    aiMsg._toolCheckpointResumed=true;
+    aiMsg.toolWaitCheckpoint=d;
+    setChatProgressText(
+      aiMsg,
+      d.message||'工具执行结束，已恢复 Agent，正在继续生成当前回答。',
+      '正在继续回答'
+    );
+    if(tw.curTask){
+      tw.curTask.status='executing';
+      tw.curTask.execution_state='agent_resumed';
+      tw.curTask.execution_status_text='已恢复执行';
+      tw.curTask.tool_wait_checkpoint=d;
     }
   }else if(curEvent==='answer_generating'){
     aiMsg.answerStageLabel=formatUserChatProgressText(d.label||'正在生成最终回答');
@@ -10135,6 +10175,7 @@ function ingestChatSseEvent(curEvent,d,aiMsg){
     aiMsg._answerStreaming=false;
     flushAnswerStream(aiMsg,{force:true});
     aiMsg.span={...aiMsg.span,...d};
+    if(aiMsg._hadToolWait&&aiMsg._toolCheckpointResumed)markChatCompletionHeart();
     if(Array.isArray(d.tool_outputs))aiMsg.span.tool_outputs=d.tool_outputs;
     if(d.snapshot_json)aiMsg.span.snapshot_json=d.snapshot_json;
     const persist=d.persist_main_task!==false&&!d.ephemeral&&!!(d.task_id||'').trim();

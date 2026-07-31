@@ -3,10 +3,12 @@ uvicorn
 aiohttp
 pydantic
 pymilvus>=2.3.0,<2.4.0
-langchain-mcp-adapters>=0.1.0
+langchain-mcp-adapters>=0.1.14,<0.2.0
 langchain-core>=0.3.0
-langgraph>=0.2.0
-langgraph-checkpoint>=2.0.0
+langgraph>=1.0.0,<1.1.0
+langgraph-checkpoint>=3.0.0,<4.0.0
+langgraph-checkpoint-sqlite>=3.0.0,<4.0.0
+setuptools>=68.0.0,<82.0.0
 mcp>=1.0.0
 sqlalchemy>=2.0.0
 pymysql>=1.1.0

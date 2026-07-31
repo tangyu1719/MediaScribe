@@ -456,6 +456,11 @@ def _startup_auth_and_db():
 @app.on_event("startup")
 def _startup_ffmpeg_path():
     """进程启动时解析并缓存 ffmpeg/ffprobe 绝对路径，避免转写线程内偶发找不到。"""
+    if os.environ.get("SBA_AGENT_ONLY_MODE", "0").strip().lower() in ("1", "true", "yes", "on"):
+        logging.getLogger("sba.ffmpeg").info(
+            "SBA_AGENT_ONLY_MODE=1: skip FFmpeg/ffprobe path probe"
+        )
+        return
     try:
         agent = None
         for p in Path(__file__).resolve().parents:
@@ -512,6 +517,11 @@ def _startup_deferred_services():
         asyncio.create_task(schedule_startup_health_check())
     except Exception as e:
         logging.getLogger("uvicorn.error").warning("platform health startup: %s", e)
+    if os.environ.get("SBA_AGENT_ONLY_MODE", "0").strip().lower() in ("1", "true", "yes", "on"):
+        logging.getLogger("uvicorn.error").info(
+            "SBA_AGENT_ONLY_MODE=1: skip subscriptions, RSS, favorites, scheduled jobs and Whisper warmup"
+        )
+        return
     unified_ok = False
     try:
         from .services.scheduled_job_scheduler import start_scheduled_job_scheduler
@@ -3141,6 +3151,19 @@ async def route_orch_pipeline_nodes():
     }
 
 
+@app.get("/api/chat/checkpoints/{session_id}")
+async def route_chat_checkpoints(session_id: str, checkpoint_ns: str = "", limit: int = 100):
+    """列出节点级 LangGraph checkpoint，供调试、审计和前端状态恢复。"""
+    from .services.chat_graph_checkpointer import list_session_checkpoints
+
+    rows = list_session_checkpoints(
+        session_id,
+        checkpoint_ns=checkpoint_ns,
+        limit=limit,
+    )
+    return {"ok": True, "session_id": session_id, "checkpoints": rows, "count": len(rows)}
+
+
 @app.post("/api/chat/stream")
 async def route_chat_stream(request: Request):
     raw = await request.body()
@@ -3357,7 +3380,9 @@ async def route_chat_graph_resume(request: Request):
     except Exception:
         body = {}
     sid = (body.get("session_id") or body.get("thread_id") or "default").strip()
-    hitl = body.get("hitl") if isinstance(body.get("hitl"), dict) else body
+    hitl = dict(body.get("hitl")) if isinstance(body.get("hitl"), dict) else dict(body)
+    if body.get("checkpoint_ns") and not hitl.get("checkpoint_ns"):
+        hitl["checkpoint_ns"] = body.get("checkpoint_ns")
 
     from .services.chat_graph_runner import stream_langgraph_resume
 

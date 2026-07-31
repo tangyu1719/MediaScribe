@@ -402,6 +402,10 @@ button.ni.ni-sub{
 .user-dd-li-danger:hover{background:rgba(220,38,38,.06)}
 /* 侧栏 + 缝内折叠钮 */
 .nav-rail{display:flex;align-items:stretch;flex-shrink:0;gap:0;position:relative}
+.ni-ic{position:relative}
+.chat-completion-heart{position:absolute;right:-7px;top:-8px;color:#ef4444;font-size:12px;line-height:1;text-shadow:0 1px 4px rgba(239,68,68,.35);animation:chat-heart-pulse 1.4s ease-in-out infinite}
+.app-tab-heart{margin-left:5px;color:#ef4444;font-size:13px;line-height:1;animation:chat-heart-pulse 1.4s ease-in-out infinite}
+@keyframes chat-heart-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
 .sidebar.collapsed{width:68px;padding:14px 8px 16px;border-radius:24px}
 .sidebar.collapsed .ni{
   justify-content:center;width:48px;margin:5px auto;padding:8px 0;
