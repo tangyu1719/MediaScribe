@@ -17,6 +17,9 @@ _log = logging.getLogger("sba.ops.hooks")
 _incident_lock = threading.Lock()
 _incident_last_ts: Dict[str, float] = {}
 _INCIDENT_COOLDOWN_SEC = 300.0
+_OPS_WORKER_SLOTS = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("OPS_ASYNC_MAX_CONCURRENCY", "2") or 2))
+)
 
 
 def _agent_dir() -> Path:
@@ -90,14 +93,24 @@ def _collect_logs(task_id: Optional[str] = None, max_lines: int = 120) -> List[s
 
 
 def _run_async(fn, *args, **kwargs) -> None:
-    threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
+    def _limited_worker() -> None:
+        with _OPS_WORKER_SLOTS:
+            fn(*args, **kwargs)
+
+    threading.Thread(target=_limited_worker, daemon=True).start()
 
 
 def ops_dispatch_log_incident(msg: str, level: str, *, task_id: Optional[str] = None) -> None:
     """ERROR/EXCEPTION 日志上报运维 Agent（去重冷却）。"""
     if not _should_forward_log(msg, level):
         return
-    fp = _fingerprint(f"log_{level}", msg)
+    # 同一流水线失败通常同时产生 ERROR 日志和 failed SPAN；一个任务只需一份
+    # 运维报告，避免并发媒体批次为同一失败风暴重复启动 LLM/数据库回写。
+    fp = (
+        _fingerprint("task_failure", str(task_id))
+        if task_id
+        else _fingerprint(f"log_{level}", msg)
+    )
     if not _incident_allow(fp):
         return
 
@@ -148,7 +161,14 @@ def ops_dispatch_span_failure(step: Dict[str, Any]) -> None:
         return
     sid = str(step.get("step_id") or "")
     tid = str(step.get("task_id") or "")
-    fp = _fingerprint("span_fail", f"{tid}:{sid}:{step.get('error_message') or step.get('status')}")
+    fp = (
+        _fingerprint("task_failure", tid)
+        if tid
+        else _fingerprint(
+            "span_fail",
+            f"{sid}:{step.get('error_message') or step.get('status')}",
+        )
+    )
     if not _incident_allow(fp):
         return
 

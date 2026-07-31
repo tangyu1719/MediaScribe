@@ -12,6 +12,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # 确保项目路径可导入
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
