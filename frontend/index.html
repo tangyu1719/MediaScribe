@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=68">
+<link rel="stylesheet" href="/assets/css/app.css?v=69">
 <link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
 <link rel="preload" href="/vendor/vue.global.prod.js" as="script">
-<link rel="preload" href="/assets/js/app.js?v=147" as="script">
+<link rel="preload" href="/assets/js/app.js?v=148" as="script">
 <!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
 <script src="/assets/js/auth.js?v=8"></script>
 <script>
@@ -23,7 +23,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
 })();
 </script>
 <script src="/vendor/vue.global.prod.js" defer></script>
-<script src="/assets/js/app.js?v=147" defer></script>
+<script src="/assets/js/app.js?v=148" defer></script>
 <script src="/vendor/marked.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/vendor/mermaid.min.js" defer></script>
@@ -125,8 +125,13 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
     <span class="ni-txt">{{m.label}}</span>
   </button>
   </div>
-  <div class="sb-foot">
-  <div class="sb-foot-label" v-show="!navCollapsed">工具 · 设置</div>
+  <div class="sb-foot" :class="{'is-collapsed':sbFootCollapsed&&!navCollapsed}">
+  <div class="sb-foot-head" v-show="!navCollapsed">
+    <div class="sb-foot-label">工具 · 设置</div>
+    <button type="button" class="sb-foot-collapse" :aria-expanded="!sbFootCollapsed" :aria-label="sbFootCollapsed?'展开工具与设置':'向下折叠工具与设置'" :title="sbFootCollapsed?'展开工具与设置':'向下折叠工具与设置'" @click="toggleSbFoot">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+  </div>
   <div class="ni-grp subscribe-grp" :class="{expanded:subscribeOpen&&!navCollapsed}">
     <button type="button" class="ni ni-parent" :class="{on:page==='subscribe',expanded:subscribeOpen}" :title="navCollapsed?'订阅':'订阅（展开子项）'" @click="onSubscribeNavClick">
       <span class="ni-ic" aria-hidden="true">
