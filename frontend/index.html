@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=63">
+<link rel="stylesheet" href="/assets/css/app.css?v=64">
 <link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
 <link rel="preload" href="/vendor/vue.global.prod.js" as="script">
-<link rel="preload" href="/assets/js/app.js?v=142" as="script">
+<link rel="preload" href="/assets/js/app.js?v=143" as="script">
 <!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
 <script src="/assets/js/auth.js?v=8"></script>
 <script>
@@ -23,7 +23,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
 })();
 </script>
 <script src="/vendor/vue.global.prod.js" defer></script>
-<script src="/assets/js/app.js?v=142" defer></script>
+<script src="/assets/js/app.js?v=143" defer></script>
 <script src="/vendor/marked.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/vendor/mermaid.min.js" defer></script>
@@ -120,6 +120,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
   <button v-for="m in menuMain" :key="m.key" type="button" class="ni" :class="{on:page===m.key}" :title="m.label" @click="switchPage(m.key)">
     <span class="ni-ic" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><use :href="'#icon-'+m.key"/></svg>
+      <span v-if="m.key==='chat'&&c.chatCompletionHeart" class="chat-completion-heart" title="耗时工具已完成，Agent 已续接">♥</span>
     </span>
     <span class="ni-txt">{{m.label}}</span>
   </button>
@@ -254,6 +255,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
               @contextmenu.prevent="showTabContextMenu(tab.key,$event)">
         <span class="app-tab-body">
           <span class="app-tab-label">{{ tab.label }}</span>
+          <span v-if="tab.key==='chat'&&c.chatCompletionHeart" class="app-tab-heart" title="耗时工具已完成，Agent 已续接">♥</span>
           <template v-if="tab.key==='orch' && page==='orch'">
             <span class="app-tab-subsep">/</span>
             <span v-for="(sub,idx) in orchSubTabs" :key="sub.key">

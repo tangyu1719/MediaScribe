@@ -49,6 +49,114 @@ _CONTINUE_HINTS = (
 )
 # 禁止子串盲目命中（如「分析这个人物的画像」中的「这个」）
 _CONTINUE_HINTS_AMBIGUOUS = frozenset({"这个", "那个", "还有", "然后", "上面", "补充"})
+_CONTINUE_ACKS = frozenset({"嗯", "嗯嗯", "好", "好的", "行", "可以", "收到"})
+
+_TASK_TOPIC_STOPWORDS = frozenset({
+    "可以", "帮我", "请帮", "一下", "这个", "那个", "任务", "问题", "当前", "之前",
+    "刚才", "上面", "继续", "接着", "恢复", "重新", "执行", "处理", "分析", "查询",
+    "搜索", "查找", "相关", "方面", "内容", "信息", "结果", "进度", "情况", "完成",
+    "进行", "整理", "生成", "报告", "一个", "一些", "怎么", "什么", "为什么", "是否",
+    "用户", "我的", "你的", "一下子", "比较", "大概", "尽量", "需要", "要求",
+})
+
+
+def _task_topic_tokens(text: str) -> List[str]:
+    """抽取任务主题锚点；用于 task_id 归属，不把窗口最后一句直接当主任务。"""
+    raw = (text or "").strip().lower()
+    if not raw:
+        return []
+    # 先拆掉口语连接词，再保留技术词、账号/链接 ID 和有区分度的中文短语。
+    normalized = re.sub(
+        r"(?:请|麻烦|能不能|可不可以|我想让你|帮我|给我|关于|对于|针对|然后|还有|以及|或者|并且|并|和|与|的)",
+        " ",
+        raw,
+    )
+    chunks = re.findall(r"[a-z][a-z0-9_.+\-]{1,31}|\d{5,24}|[\u4e00-\u9fff]{2,16}", normalized)
+    out: List[str] = []
+    for chunk in chunks:
+        token = chunk.strip("_-.")
+        if len(token) < 2 or token in _TASK_TOPIC_STOPWORDS:
+            continue
+        if token not in out:
+            out.append(token)
+    return out[:16]
+
+
+def _task_topic_score(message: str, task_row: Optional[Dict[str, Any]]) -> float:
+    """计算当前句与某个主任务的主题相似度；通用动作词不参与评分。"""
+    if not isinstance(task_row, dict):
+        return 0.0
+    msg_tokens = _task_topic_tokens(message)
+    anchor = " ".join(
+        str(task_row.get(k) or "")
+        for k in ("user_query", "query_summary", "rewritten_query")
+    )
+    anchor_tokens = _task_topic_tokens(anchor)
+    if not msg_tokens or not anchor_tokens:
+        return 0.0
+    msg_set = set(msg_tokens)
+    anchor_set = set(anchor_tokens)
+    exact = msg_set & anchor_set
+    score = float(len(exact) * 3)
+    # 中文任务摘要常是一整段；允许有区分度的主题词包含匹配。
+    for mt in msg_set - exact:
+        if len(mt) < 3:
+            continue
+        if any(mt in at or at in mt for at in anchor_set if len(at) >= 3):
+            score += 1.5
+    # ASCII 技术词/账号 ID 单个命中就具有较强区分度。
+    for token in exact:
+        if re.fullmatch(r"[a-z][a-z0-9_.+\-]{1,31}|\d{5,24}", token):
+            score += 2.0
+    # 中文短语常被正则切成整段，插入“能力/形成/改成”等词后整段 token 不再相等。
+    # 用最长连续中文主题片段补分，但长度 4 以下不加分，避免“继续/任务/方案”等泛词误召回。
+    msg_zh = "".join(re.findall(r"[\u4e00-\u9fff]+", message or ""))[:320]
+    anchor_zh = "".join(re.findall(r"[\u4e00-\u9fff]+", anchor))[:640]
+    longest = 0
+    max_size = min(12, len(msg_zh), len(anchor_zh))
+    for size in range(max_size, 3, -1):
+        if any(msg_zh[idx : idx + size] in anchor_zh for idx in range(len(msg_zh) - size + 1)):
+            longest = size
+            break
+    if longest >= 4:
+        score += min(7.5, float(longest - 2) * 1.5)
+    return score
+
+
+def _task_candidates(
+    cur_task: Optional[Dict[str, Any]],
+    main_task_history: Optional[List],
+) -> List[Dict[str, Any]]:
+    """按新到旧返回主任务候选，当前指针与历史按 task_id 去重。"""
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    raw: List[Any] = []
+    if isinstance(cur_task, dict):
+        raw.append(cur_task)
+    raw.extend(reversed(main_task_history or []))
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("task_id") or "").strip()
+        if not tid or tid in seen or str(item.get("task_kind") or "main") == "simple":
+            continue
+        seen.add(tid)
+        rows.append(dict(item))
+    return rows
+
+
+def _best_topic_task(
+    message: str,
+    cur_task: Optional[Dict[str, Any]],
+    main_task_history: Optional[List],
+) -> tuple[Optional[Dict[str, Any]], float]:
+    best: Optional[Dict[str, Any]] = None
+    best_score = 0.0
+    for row in _task_candidates(cur_task, main_task_history):
+        score = _task_topic_score(message, row)
+        if score > best_score:
+            best, best_score = row, score
+    return best, best_score
 
 
 def _has_explicit_continue_hint(message: str) -> bool:
@@ -56,6 +164,8 @@ def _has_explicit_continue_hint(message: str) -> bool:
     m = (message or "").strip()
     if not m:
         return False
+    if m.rstrip("。！!?？") in _CONTINUE_ACKS:
+        return True
     for h in _CONTINUE_HINTS:
         if h in _CONTINUE_HINTS_AMBIGUOUS:
             continue
@@ -1166,12 +1276,8 @@ def _message_belongs_to_task_row(message: str, task_row: Dict[str, Any]) -> bool
         return True
     if _looks_like_continuation(msg, task_row):
         return True
-    anchor = str(task_row.get("user_query") or task_row.get("query_summary") or "").strip()
-    if anchor and len(anchor) >= 4:
-        tokens = [w for w in re.split(r"[\s，,、；;：:]+", anchor) if len(w) >= 2][:8]
-        hits = sum(1 for w in tokens if w in msg)
-        if hits >= 2 or (len(tokens) == 1 and tokens[0] in msg):
-            return True
+    if _task_topic_score(msg, task_row) >= 4.5:
+        return True
     return False
 
 
@@ -1219,8 +1325,9 @@ def resolve_task_affiliation(
 ) -> Optional[Dict[str, Any]]:
     """
     任务归属（优先于 simple/复杂分流）：
-    1) 消息显式 task_id；2) 当前主任务指针；3) 最近一轮主任务（含已结案）。
-    命中则 continue_main，否则返回 None。
+    1) 消息显式 task_id；2) 对全部主任务历史做主题匹配；3) 无主题的明确进度/恢复句
+    才回落到当前指针或最近主任务。任务是否 executing 不能单独作为续接依据。
+    命中则 continue_main；自包含的新目标返回 None，由上层判 new_main/simple。
     """
     msg = (message or "").strip()
     hist = main_task_history if isinstance(main_task_history, list) else []
@@ -1247,11 +1354,27 @@ def resolve_task_affiliation(
     if _is_unrelated_new_work(msg, recent):
         return None
 
+    # 全量扫描主任务历史，支持“继续之前的 MCP 调研”等非最近任务召回。
+    topic_row, topic_score = _best_topic_task(msg, cur_task, hist)
+    explicit_follow = bool(
+        _looks_like_task_resume(msg)
+        or _looks_like_task_status_inquiry(msg)
+        or _looks_like_task_recall(msg)
+        or _has_explicit_continue_hint(msg)
+    )
+    if topic_row and topic_score >= 4.5:
+        recent = topic_row
+    elif explicit_follow:
+        # 无主题锚点的“继续/进度呢”才回落到当前或最近主任务。
+        recent = _get_recent_main_task(cur_task, hist) or recent
+
     tid = str(recent.get("task_id") or "").strip()
     if not tid:
         return None
 
     belongs = _message_belongs_to_task_row(msg, recent)
+    if topic_row and str(topic_row.get("task_id") or "") == tid and topic_score >= 4.5:
+        belongs = True
     if not belongs and isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid:
         try:
             from .ai_chat import _is_simple_intent
@@ -1290,9 +1413,13 @@ def resolve_task_affiliation(
         "mode": "continue_main",
         "task_id": tid,
         "skip_orchestration": True,
-        "reason": "判定属于当前/最近主任务，续接执行",
+        "reason": "判定属于当前指针或历史主任务，续接执行",
         "cur_task": ct,
-        "affiliation": "current_or_recent_main",
+        "affiliation": (
+            "current_main"
+            if isinstance(cur_task, dict) and str(cur_task.get("task_id") or "") == tid
+            else "semantic_history_main"
+        ),
     }
 
 
@@ -1361,27 +1488,19 @@ async def llm_resolve_intent_mode(
         "判定顺序：① 是否属于当前/最近主任务（含已结案，含消息内 task_ 与任务恢复说明）→ continue_main；"
         "② 是否显式新课题 → new_main；③ 最后才 simple。"
     ]
-    if isinstance(cur_task, dict) and cur_task.get("task_id"):
-        ctx_lines.append(
-            f"当前主任务 task_id={cur_task.get('task_id')}; "
-            f"status={cur_task.get('status')}; "
-            f"摘要={(cur_task.get('query_summary') or cur_task.get('user_query') or '')[:120]}"
-        )
-    recent = _get_recent_main_task(cur_task, main_task_history)
-    if recent and (not isinstance(cur_task, dict) or not cur_task.get("task_id")):
-        ctx_lines.append(
-            f"最近主任务 task_id={recent.get('task_id')}; "
-            f"status={recent.get('status')}; "
-            f"摘要={(recent.get('query_summary') or recent.get('user_query') or '')[:120]}"
-        )
-    elif main_task_history:
-        last = main_task_history[-1] if isinstance(main_task_history[-1], dict) else {}
-        if last.get("task_id") and not recent:
+    candidates = _task_candidates(cur_task, main_task_history)
+    if candidates:
+        ctx_lines.append("候选主任务（按新到旧；continue_main 的 task_id 必须来自此列表）：")
+        for idx, row in enumerate(candidates[:6], start=1):
             ctx_lines.append(
-                f"最近主任务 task_id={last.get('task_id')}; "
-                f"status={last.get('status')}; "
-                f"摘要={(last.get('query_summary') or last.get('user_query') or '')[:120]}"
+                f"{idx}. task_id={row.get('task_id')}; status={row.get('status')}; "
+                f"摘要={(row.get('query_summary') or row.get('user_query') or '')[:160]}"
             )
+    ctx_lines.extend([
+        "规则：自包含的新目标即使没说‘新任务’也判 new_main；",
+        "只有进度/结果追问、修改同一交付物、明确恢复或与某候选主题高度一致时才 continue_main；",
+        "寒暄、能力询问和与业务无关的一次性问答判 simple；低置信度不得盲目绑定最近任务。",
+    ])
     user_block = (message or "").strip()
     switch_line = f"用户开关：rag_prefetch={bool(rag_prefetch)}; web_search={bool(web_search)}"
     if ctx_lines:
@@ -1453,7 +1572,15 @@ async def llm_resolve_intent_mode(
         return None
     tid = str(j.get("task_id") or "").strip()
     if mode == "continue_main" and not tid:
-        tid = _resolve_continue_task_id(cur_task, main_task_history)
+        topic_row, topic_score = _best_topic_task(message, cur_task, main_task_history)
+        if topic_row and topic_score >= 4.5:
+            tid = str(topic_row.get("task_id") or "").strip()
+        else:
+            tid = _resolve_continue_task_id(cur_task, main_task_history)
+    if mode == "continue_main":
+        allowed = {str(x.get("task_id") or "") for x in _task_candidates(cur_task, main_task_history)}
+        if not tid or (allowed and tid not in allowed):
+            return None
     qk = j.get("query_keywords")
     if not isinstance(qk, list):
         qk = []
@@ -1568,9 +1695,15 @@ def resolve_intent_mode(
                 "skip_orchestration": True,
                 "reason": "元问答/寒暄，不续接未结案主任务",
             }
-        # 主任务未结案时：仅明确续接/同主题追问才延续，禁止吞掉明显新课题
+        # 主任务未结案时：仅明确续接或主题匹配才延续；没有“新任务”字样不等于续接。
+        topic_row, topic_score = _best_topic_task(msg, cur_task, hist)
         if not _is_unrelated_new_work(msg, cur_task) and (
-            _looks_like_continuation(msg, cur_task) or not _looks_like_new_task(msg)
+            _looks_like_continuation(msg, cur_task)
+            or (
+                topic_row
+                and str(topic_row.get("task_id") or "") == str(tid)
+                and topic_score >= 4.5
+            )
         ):
             return {
                 "mode": "continue_main",
@@ -1590,10 +1723,17 @@ def resolve_intent_mode(
                 "reason": "元问答/寒暄，不续接未结案主任务",
             }
         recent = _get_recent_main_task(cur_task, hist)
-        if recent and not _looks_like_new_task(msg) and not _is_unrelated_new_work(msg, recent):
-            tid = str(recent.get("task_id") or "").strip() or _resolve_continue_task_id(cur_task, hist)
+        topic_row, topic_score = _best_topic_task(msg, cur_task, hist)
+        if (
+            recent
+            and topic_row
+            and topic_score >= 4.5
+            and not _looks_like_new_task(msg)
+            and not _is_unrelated_new_work(msg, topic_row)
+        ):
+            tid = str(topic_row.get("task_id") or "").strip() or _resolve_continue_task_id(cur_task, hist)
             if tid:
-                ct = dict(cur_task) if isinstance(cur_task, dict) else dict(recent)
+                ct = dict(topic_row)
                 ct.setdefault("task_id", tid)
                 return {
                     "mode": "continue_main",
@@ -1603,15 +1743,6 @@ def resolve_intent_mode(
                     "cur_task": ct,
                 }
         return {"mode": "simple", "task_id": "", "skip_orchestration": True, "reason": "简单问答，不建主任务"}
-
-    if active and tid and not _looks_like_new_task(msg) and not _is_unrelated_new_work(msg, cur_task):
-        return {
-            "mode": "continue_main",
-            "task_id": tid,
-            "skip_orchestration": True,
-            "reason": "存在进行中主任务，默认延续",
-            "cur_task": cur_task,
-        }
 
     return {"mode": "new_main", "task_id": "", "skip_orchestration": False, "reason": "复杂新任务"}
 

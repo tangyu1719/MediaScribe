@@ -84,6 +84,8 @@ class ChatGraphState(TypedDict, total=False):
     failed_tool_names: Annotated[List[str], _merge_failed_tools]
     distinct_tool_fail_limit: int
     tool_round: int
+    tool_wait_checkpoint: Dict[str, Any]
+    tool_resume_count: int
     abnormal: bool
     error_message: str
 

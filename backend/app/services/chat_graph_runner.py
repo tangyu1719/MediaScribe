@@ -13,7 +13,7 @@ from langgraph.types import Command, RunnableConfig
 
 from . import ai_chat
 from .chat_graph import get_compiled_chat_graph
-from .chat_graph_checkpointer import clear_session_checkpointer, get_session_checkpointer
+from .chat_graph_checkpointer import checkpoint_thread_id, get_session_checkpointer
 from .chat_graph_runtime import ChatGraphRuntime
 
 _RUNTIME_REGISTRY: Dict[str, ChatGraphRuntime] = {}
@@ -66,19 +66,29 @@ def _sync_final_state_from_snap(final_state: Dict[str, Any], snap: Any) -> None:
         final_state.update(values)
 
 
-def _graph_config(session_id: str, runtime: ChatGraphRuntime) -> RunnableConfig:
+def _graph_config(
+    session_id: str,
+    runtime: ChatGraphRuntime,
+    *,
+    checkpoint_ns: str = "",
+) -> RunnableConfig:
     _RUNTIME_REGISTRY[session_id] = runtime
+    turn_id = str(checkpoint_ns or "")
     cfg: RunnableConfig = {
         "configurable": {
-            "thread_id": session_id,
+            "thread_id": checkpoint_thread_id(session_id, turn_id),
             "session_id": session_id,
             "runtime_key": session_id,
             "runtime": runtime,
             "runtime_config": runtime.snapshot_config(),
+            # LangGraph 1.x reserves this key for nested subgraphs. The public
+            # turn namespace is encoded into thread_id by checkpoint_thread_id().
+            "checkpoint_ns": "",
         },
         "metadata": {
             "session_id": session_id,
             "trace_id": getattr(runtime, "trace_id", "") or "",
+            "checkpoint_ns": turn_id,
         },
         "tags": ["sba", "chat_orchestration"],
     }
@@ -98,6 +108,68 @@ def _graph_config(session_id: str, runtime: ChatGraphRuntime) -> RunnableConfig:
             ex,
         )
     return cfg
+
+
+async def persist_tool_execution_checkpoint(
+    *,
+    session_id: str,
+    checkpoint_ns: str,
+    task_id: str,
+    trace_id: str,
+    tool_name: str,
+    pipeline_task_ids: List[str],
+    status: str,
+) -> bool:
+    """在执行段长工具前后补写 LangGraph 快照，供断线/重启后审计与续接。"""
+    sid = str(session_id or "default").strip() or "default"
+    ns = str(checkpoint_ns or trace_id or "").strip()
+    if not ns:
+        return False
+    runtime = _RUNTIME_REGISTRY.get(sid)
+    if runtime is not None:
+        config = _graph_config(sid, runtime, checkpoint_ns=ns)
+    else:
+        config = {
+            "configurable": {
+                "thread_id": checkpoint_thread_id(sid, ns),
+                "checkpoint_ns": "",
+                "session_id": sid,
+                "runtime_key": sid,
+            },
+            "metadata": {"session_id": sid, "trace_id": trace_id, "checkpoint_ns": ns},
+        }
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    normalized = str(status or "tool_calling").strip().lower()
+    payload = {
+        "status": normalized,
+        "tool_name": str(tool_name or ""),
+        "pipeline_task_ids": [str(x) for x in pipeline_task_ids if str(x)],
+        "trace_id": str(trace_id or ""),
+        "task_id": str(task_id or ""),
+        "started_at": now if normalized == "tool_calling" else "",
+        "resumed_at": now if normalized == "resumed" else "",
+    }
+    values: Dict[str, Any] = {
+        "task_id": str(task_id or ""),
+        "trace_id": str(trace_id or ""),
+        "orchestration_phase": "tool_calling" if normalized == "tool_calling" else "waiting_observation",
+        "parent_status": "executing",
+        "tool_wait_checkpoint": payload,
+    }
+    if normalized == "resumed":
+        values["tool_resume_count"] = 1
+    try:
+        graph = get_compiled_chat_graph(checkpointer=get_session_checkpointer(sid))
+        await graph.aupdate_state(config, values, as_node="react_entry")
+        return True
+    except Exception as ex:
+        _LOG.warning(
+            "[AI问答-LangGraph|工具等待快照|session:%s|降级] status=%s; error=%s",
+            sid,
+            normalized,
+            str(ex)[:200],
+        )
+        return False
 
 
 def _yield_sse_batches(state_update: Dict[str, Any]) -> List[str]:
@@ -793,8 +865,28 @@ async def stream_langgraph_chat(
             else mem.get("main_task_history")
         ),
     )
-    _tid = str((_cur or {}).get("task_id") or "").strip()
-    _continue = peek_fast_continue_eligible(message, cur_task=_cur, main_task_history=_hist)
+    _affiliation = resolve_task_affiliation(message, cur_task=_cur, main_task_history=_hist)
+    _tid = str(
+        (_affiliation or {}).get("task_id")
+        or (_cur or {}).get("task_id")
+        or ""
+    ).strip()
+    _continue = bool(_affiliation) or peek_fast_continue_eligible(
+        message, cur_task=_cur, main_task_history=_hist
+    )
+    if _affiliation and _tid:
+        selected_cur = _affiliation.get("cur_task")
+        if isinstance(selected_cur, dict):
+            _cur = dict(selected_cur)
+        elif not isinstance(_cur, dict) or str(_cur.get("task_id") or "") != _tid:
+            _cur = next(
+                (
+                    dict(row)
+                    for row in reversed(_hist)
+                    if isinstance(row, dict) and str(row.get("task_id") or "") == _tid
+                ),
+                {"task_id": _tid},
+            )
     if _continue and not _tid:
         from .chat_context_memory import _resolve_continue_task_id
 
@@ -878,6 +970,19 @@ async def stream_langgraph_chat(
         fast_upd = fast_result[0] if fast_result else {}
         final_state.update(fast_upd)
         _sync_span_context(session_id, trace_id, final_state)
+        try:
+            checkpointer = get_session_checkpointer(session_id)
+            graph = get_compiled_chat_graph(checkpointer=checkpointer)
+            config = _graph_config(session_id, runtime, checkpoint_ns=trace_id)
+            await graph.aupdate_state(config, final_state, as_node="react_entry")
+        except Exception as ex:
+            _LOG.warning(
+                "[AI chat-LangGraph|fast continue checkpoint|session:%s] "
+                "persist_failed; error_type=%s; error_message=%s",
+                session_id,
+                type(ex).__name__,
+                str(ex)[:200],
+            )
         # live_q 已实时刷出编排 SSE；sse_events 仅落库，勿 replay 避免「知识库检索」等步骤双份
         for line in runtime.drain_sse():
             yield line
@@ -919,11 +1024,10 @@ async def stream_langgraph_chat(
         )
         for line in runtime.drain_sse():
             yield line
-        # 新用户消息走全新编排：清掉同 thread 上未 resume 的 HITL 中断，避免 checkpoint 缺 runtime_key
-        clear_session_checkpointer(session_id)
+        # 每轮使用独立 namespace：保留历史节点快照，同时避免未恢复的 HITL 污染新消息。
         checkpointer = get_session_checkpointer(session_id)
         graph = get_compiled_chat_graph(checkpointer=checkpointer)
-        config = _graph_config(session_id, runtime)
+        config = _graph_config(session_id, runtime, checkpoint_ns=trace_id)
 
         try:
             async for line in _iter_graph_astream_with_live_sse(
@@ -952,7 +1056,7 @@ async def stream_langgraph_chat(
                         _infer_hitl_kind(snap),
                         _attempt + 1,
                     )
-                    config = _graph_config(session_id, runtime)
+                    config = _graph_config(session_id, runtime, checkpoint_ns=trace_id)
                     async for chunk in graph.astream(
                         Command(resume={"action": "confirm"}),
                         config=config,
@@ -1158,6 +1262,7 @@ def _build_graph_interrupt_payload(
     final_state: Dict[str, Any],
     snap: Any,
     runtime: Optional[ChatGraphRuntime] = None,
+    checkpoint_ns: str = "",
 ) -> Dict[str, Any]:
     """统一 graph_interrupt 载荷，供前端 HITL 面板渲染与 resume。"""
     kind = str(final_state.get("hitl_kind") or "").strip()
@@ -1199,9 +1304,12 @@ def _build_graph_interrupt_payload(
                 )
 
     msg = str(hitl_payload.get("message") or _hitl_default_message(kind))
+    checkpoint_ns = str(checkpoint_ns or trace_id or "")
+    hitl_payload.setdefault("checkpoint_ns", checkpoint_ns)
     return {
         "session_id": session_id,
         "trace_id": trace_id,
+        "checkpoint_ns": checkpoint_ns,
         "thread_id": session_id,
         "hitl_kind": kind,
         "hitl_payload": hitl_payload,
@@ -1238,6 +1346,12 @@ async def stream_langgraph_resume(
 ) -> AsyncIterator[str]:
     """HITL resume：Command(resume=...) 继续编排或进入执行段。"""
     trace_id = _new_trace()
+    inner_hitl = hitl_payload.get("hitl") if isinstance(hitl_payload.get("hitl"), dict) else {}
+    checkpoint_ns = str(
+        hitl_payload.get("checkpoint_ns")
+        or inner_hitl.get("checkpoint_ns")
+        or ""
+    ).strip()
     message = str(hitl_payload.get("message") or "").strip()
     if not message:
         message = "(HITL resume)"
@@ -1264,7 +1378,7 @@ async def stream_langgraph_resume(
 
     checkpointer = get_session_checkpointer(session_id)
     graph = get_compiled_chat_graph(checkpointer=checkpointer)
-    config = _graph_config(session_id, runtime)
+    config = _graph_config(session_id, runtime, checkpoint_ns=checkpoint_ns)
 
     resume_val = hitl_payload.get("hitl") if isinstance(hitl_payload.get("hitl"), dict) else hitl_payload
     final_state: Dict[str, Any] = {}
@@ -1329,6 +1443,7 @@ async def stream_langgraph_resume(
             final_state=final_state,
             snap=snap,
             runtime=runtime,
+            checkpoint_ns=checkpoint_ns,
         )
         yield f"event: graph_interrupt\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         clear_active_span_context()

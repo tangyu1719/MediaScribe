@@ -804,8 +804,21 @@ async def fast_continue_main_to_handoff(
         resolve_intent_mode,
     )
 
-    tid = str(task_id or "").strip()
     task_aff = resolve_task_affiliation(message, cur_task=cur_task, main_task_history=main_hist)
+    tid = str((task_aff or {}).get("task_id") or task_id or "").strip()
+    if task_aff and tid:
+        selected_cur = task_aff.get("cur_task")
+        if isinstance(selected_cur, dict):
+            cur_task = dict(selected_cur)
+        elif not isinstance(cur_task, dict) or str(cur_task.get("task_id") or "") != tid:
+            cur_task = next(
+                (
+                    dict(row)
+                    for row in reversed(main_hist or [])
+                    if isinstance(row, dict) and str(row.get("task_id") or "") == tid
+                ),
+                {"task_id": tid},
+            )
     gs = graph_state if isinstance(graph_state, dict) else state
     from .orchestration_step_emit import _next_step_group
 
@@ -1321,7 +1334,7 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
             "task_id": "",
             "reason": "规则覆盖：社媒/链接画像分析为新主任务",
         }
-    elif tid_fix and (
+    elif tid_fix and not str(intent_decision.get("task_id") or "").strip() and (
         _looks_like_task_status_inquiry(message)
         or _looks_like_task_recall(message)
         or _looks_like_task_resume(message)
@@ -1338,15 +1351,24 @@ async def node_intent_recognition(state: Dict[str, Any], config: RunnableConfig 
         }
     if continue_main:
         rid = str(intent_decision.get("task_id") or "").strip()
-        if not cur_task and rid:
-            cur_task = {"task_id": rid}
-            for h in reversed(main_hist):
-                if isinstance(h, dict) and str(h.get("task_id") or "") == rid:
-                    cur_task = {**h, **cur_task}
-                    break
-    task_id = (state.get("task_id") or intent_decision.get("task_id") or "").strip() or None
+        if rid and (
+            not isinstance(cur_task, dict)
+            or str(cur_task.get("task_id") or "") != rid
+        ):
+            cur_task = next(
+                (
+                    dict(h)
+                    for h in reversed(main_hist)
+                    if isinstance(h, dict) and str(h.get("task_id") or "") == rid
+                ),
+                {"task_id": rid},
+            )
+    decision_task_id = str(intent_decision.get("task_id") or "").strip()
+    task_id = (decision_task_id or state.get("task_id") or "").strip() or None
     if continue_main and cur_task:
-        task_id = str(cur_task.get("task_id") or task_id or "").strip() or task_id
+        task_id = str(
+            decision_task_id or cur_task.get("task_id") or task_id or ""
+        ).strip() or task_id
     use_main = mode in ("new_main", "continue_main")
     task_kind = "simple" if simple else "main"
     framework = "assistant" if simple else "react"

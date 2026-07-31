@@ -68,6 +68,7 @@ def _get_task_state_store() -> Any:
 @dataclass
 class ToolSpanHandle:
     step_id: str
+    state_step_id: str
     step_name: str
     began_at: float
     task_id: str
@@ -110,6 +111,7 @@ def begin_tool_span(
         "tool_io_brief": {"tool_name": tool_name, "input": tool_args},
     }
     store = _get_task_state_store()
+    state_step_id = ""
     if store and task_id:
         try:
             ids = store.create_step(
@@ -117,16 +119,25 @@ def begin_tool_span(
                 task_id=task_id,
                 step_type="tool_call",
                 status="running",
-                input_payload={"tool": tool_name, "arguments": tool_args, "phase": phase},
-                step_id=step_id,
+                input_payload={
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "phase": phase,
+                    "span_step_id": step_id,
+                },
             )
+            state_step_id = str(ids.step_id or "")
             store.upsert_open_layer(step_id=ids.step_id, open_layer=open_init)
             store.append_event(
                 session_id=session_id,
                 task_id=task_id,
                 step_id=ids.step_id,
                 event_type="step_started",
-                payload={"tool": tool_name, "arguments": tool_args},
+                payload={
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "span_step_id": step_id,
+                },
             )
         except Exception as ex:
             _LOG.warning(
@@ -146,6 +157,7 @@ def begin_tool_span(
     )
     return ToolSpanHandle(
         step_id=step_id,
+        state_step_id=state_step_id,
         step_name=display,
         began_at=time.perf_counter(),
         task_id=task_id,
@@ -218,12 +230,12 @@ def end_tool_span(
             },
         )
     store = _get_task_state_store()
-    if store and handle.task_id:
+    if store and handle.task_id and handle.state_step_id:
         try:
             store.record_step_finished(
                 session_id=handle.session_id,
                 task_id=handle.task_id,
-                step_id=handle.step_id,
+                step_id=handle.state_step_id,
                 status="completed" if ok else "failed",
                 output_payload=tool_payload,
                 error_message=tool_err or "",
@@ -231,7 +243,7 @@ def end_tool_span(
             store.record_step_decision(
                 session_id=handle.session_id,
                 task_id=handle.task_id,
-                step_id=handle.step_id,
+                step_id=handle.state_step_id,
                 open_layer=open_done,
             )
         except Exception as ex:
