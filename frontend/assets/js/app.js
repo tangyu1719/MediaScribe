@@ -1107,6 +1107,13 @@ const favSession=reactive({chrome_profile_ok:false,chrome_gaia:"",xhs_nickname:"
 const favDigest=reactive({digest_md:"",rag_degraded:false,digest_id:""});
 const favHabit=reactive({top_authors:[],interest_topics:[],preferred_content_types:[],persona_md:"",total_analyzed:0});
 const favCards=ref([]);
+const favDetail=reactive({open:false,fullscreen:false,card:null});
+const favDetailCard=computed(()=>{
+  const fallback=favDetail.card||{};
+  const noteId=String(fallback.note_id||"").trim();
+  if(!noteId)return fallback;
+  return (favCards.value||[]).find(row=>String(row.note_id||"").trim()===noteId)||fallback;
+});
 const subLinkCards=ref([]);
 const subLinkPaging=reactive({page:1,page_size:20,total:0,view:"grid",loading:false,subscription_id:""});
 const favSyncReport=reactive({hasRun:false,run:null,items:[],summary:{},digest_md:"",loading:false});
@@ -1546,6 +1553,10 @@ async function loadSubscriptionLinkCards(subscriptionId,opts={}){
       return;
     }
     target.value=_attachCatalogSeqToCards(d.items||[]);
+    if(target===favCards&&favDetail.open){
+      const selectedId=String((favDetail.card||{}).note_id||"").trim();
+      if(selectedId&&!target.value.some(row=>String(row.note_id||"").trim()===selectedId))closeFavDetail();
+    }
     subLinkPaging.page=d.page||page;
     subLinkPaging.page_size=d.page_size||pageSize;
     subLinkPaging.total=d.total||target.value.length;
@@ -1836,6 +1847,31 @@ function favCardSourceText(c){
 }
 function favCardSourceClass(c){
   return favCardSourceText(c)==="页面响应"?"fav-note-source-badge--capture":"";
+}
+function openFavDetail(c){
+  if(!c)return;
+  favDetail.card={...c};
+  favDetail.open=true;
+}
+function closeFavDetail(){
+  favDetail.open=false;
+  favDetail.fullscreen=false;
+  favDetail.card=null;
+  document.body.classList.remove("fav-detail-fullscreen-active");
+}
+function toggleFavDetailFullscreen(){
+  if(!favDetail.open)return;
+  favDetail.fullscreen=!favDetail.fullscreen;
+  document.body.classList.toggle("fav-detail-fullscreen-active",favDetail.fullscreen);
+}
+async function openFavTaskFromDetail(){
+  const card={...(favDetailCard.value||{})};
+  closeFavDetail();
+  await openSubscriptionLinkTask(card);
+}
+function favDetailDisplay(value,fallback="暂无"){
+  if(value===null||value===undefined||value==="")return fallback;
+  return String(value);
 }
 function favCardKeywords(c){
   const kws=Array.isArray(c.hashtags)?c.hashtags:[];
@@ -3045,6 +3081,7 @@ function closeAllPageOverlays(opts){
   if(except!=="chatExpand")chatExpandOpen.value=false;
   if(except!=="taskHistModal"){c.taskHistModalOpen=false;c.taskHistModalRow=null;c.taskHistModalFromChat=false;}
   if(except!=="opsSpanModal")closeOpsSpanModal();
+  if(except!=="favDetail")closeFavDetail();
 }
 function openPageOverlay(kind,openFn){
   closeAllPageOverlays({except:kind});
@@ -13516,6 +13553,12 @@ onMounted(async()=>{
   bumpModalLayer();
   window.addEventListener("keydown",(ev)=>{
     if(ev.key!=="Escape")return;
+    if(favDetail.open){
+      ev.preventDefault();
+      if(favDetail.fullscreen)toggleFavDetailFullscreen();
+      else closeFavDetail();
+      return;
+    }
     if(sidePanelFs.open){
       ev.preventDefault();
       closeSidePanelFs();
@@ -13538,6 +13581,7 @@ onMounted(async()=>{
 });
 return{page,menuMain,isAdmin,mobilePortrait,mobileNavOpen,mobileAgpzStep,mobilePageTitle,mobileBottomTabs,mobileDrawerItems,onMobileBottomTap,onMobileDrawerTap,setMobileAgpzStep,authUser,authDisplayName,authAvatarChar,userAvatarUrl,userAvatarInp,pickUserAvatar,onUserAvatarFile,uiPrefs,navTabCompact,navTabExpanded,onNavIslandEnter,onNavIslandLeave,onUiPrefsChange,persistUiPrefs,prof,portrait,goPersonalSettings,saveProfile,savePassword,saveUserPortrait,ldUserPortrait,closeUserDd,doLogout,wfs,navCollapsed,toggleNav,settingsOpen,onSettingsNavClick,openSettingsSec,webreplayOpen,onWebreplayNavClick,openWebreplaySec,schedOpen,onSchedNavClick,onSchedSubNavClick,openSchedSec,sched,ldSchedJobs,pollSchedActive,schedStatusLabel,schedCardStatusColor,schedCardBorderStyle,schedCardMetricsLine,schedFmtTime,schedDescPreview,schedErrPreview,schedShowProgress,cancelSchedRun,retrySchedRun,schedSaveJob,schedTestRun,schedPresetChange,subscribeOpen,schedSubOpen:subscribeOpen,subscribeXhsOpen,onSubscribeNavClick,onSubscribeXhsNavClick,openSubscribeSec,sub,wr,wrMcpSnippet,ldWrScripts,wrSelectScript,wrDeleteScript,wrExportAll,wrExportOne,wrImportFile,ldWrBridge,wrSaveBridge,wrCopyMcpSnippet,wrHost,wrFmtTime,wrStepKindLabel,wrStepDesc,wrStepShotUrl,ldWrCdpStatus,wrCdpStartRecord,wrCdpStopRecord,wrReplayCdp,wrReplayExt,appBreadcrumbs,goAppBreadcrumb,openTabs,appTabs,canCloseTab,switchPage,closeTab,closeOtherTabs,showTabContextMenu,sidePanelFs,isSidePanelFs,toggleSidePanelFs,closeSidePanelFs,
   v,vec,videoSubTab,subForm,subList,subSelId,subSelRow,subFmtTime,upAvatarText,upPublicId,upStatusLabel,upStatusClass,upSourceLabel,selectSubscription,subDigest,subProfile,subBlogNotes,subProfileViewMode,subViewTab,subProfileRunLabel,subProfileRunClass,ldSubscriptions,addSubscription,syncSubscription,syncAllSubscriptions,loadSubDigest,loadSubProfile,loadSubBlogNotes,seedSubCatalog,repairSubCatalogLinks,subLinkCards,subLinkPaging,loadSubLinkCards,openSubscriptionLinkTask,subLinkArtifactClass,subLinkArtifactLabel,setSubLinkPageSize,setSubLinkViewMode,subLinkPagePrev,subLinkPageNext,runCreatorProfile,pauseSubscription,resumeSubscription,deleteSubscription,favForm,favProgress,favSub,favSession,favCards,favSyncReport,favDigest,favHabit,favUpForm,favUpList,favUpSelId,favUpSelRow,upUnifiedList,upSelId,selectUpCard,ldUpPage,ldXhsBinding,ldFavorites,loadFavBoard,syncFavorites,refreshFavoritesCookies,favCardClass,favCardStatusText,favCardStatusColor,favCardSeqTitle,favCardSeqText,favCardMetaLine,favCardKeywords,favCardKeywordsLine,favCardCollectedText,favCardFollowersText,favCardSourceText,favCardSourceClass,onFavCoverError,pullFollowUps,loadFollowUps,subscribeFollowUp,profileFollowUp,removeFollowUp,renderSubDigestMd,pathBasename,outputMdPreviewUrl,openOutputMdByPath,taskQueue,taskQueueFilter,filteredTaskQueue,displayedTaskQueue,taskQueuePaging,taskQueueViewMode,taskQueuePageCount,setTaskQueuePageSize,taskQueuePagePrev,taskQueuePageNext,jumpTaskQueuePage,toggleTaskQueueViewMode,taskQueueViewModeLabel,taskQueueViewModeTitle,filteredHistTasks,taskQueueAuthorFacets,displayedTaskQueueAuthorFacets,taskQueueAuthorFacetsHiddenCount,taskQueueRecentSearches,taskQueueSearchTags,taskQueueSearchDropdownOpen,TASK_QUEUE_COND_FIELDS,TASK_QUEUE_SOURCE_OPTIONS,onTaskQueueSearchFocus,onTaskQueueSearchBlur,onTaskQueueSearchEnter,applyTaskQueueRecentSearch,applyTaskQueueSearchTag,promoteTaskQueueSearchToTag,taskQueueSearchTagExists,toggleTaskQueueAdvanced,addTaskQueueCondition,removeTaskQueueCondition,onTaskQueueCondFieldChange,taskQueueCondModes,taskQueueCondValuePlaceholder,taskQueueAdvancedActive,taskQueueAdvancedActiveCount,taskSourceLabel,taskActionLabel,taskAuthorName,taskAuthorProfileUrl,taskOpsReportId,taskCardPlatform,linkCardSourceLine,linkCardPublishedLine,linkCardAsTask,linkCardHasMd,linkCardHasHtml,openLinkCardMd,onLinkCardHtmlClick,openLinkCardFeishu,onTaskQueueFilterQueryInput,onTaskQueueAiSearchToggle,taskQueueAiSearchStatusVisible,taskQueueAiSearchStatusClass,toggleTaskQueueAuthorPick,toggleTaskQueueReadFilter,resetTaskQueueFilter,taskQueueFilterActive,sortTaskQueueFifo,pendingQueueIndex,isFirstPendingTask,isLastPendingTask,logFocusId,logHighlightIdx,jumpToTaskErrorLog,outDirInp,toast,modalOut,modalDupLink,modalTaskOps,openTaskOpsReport,closeTaskOpsReport,resubmitDupLink,startProcInternal,modalArtifact,logs,logRowClass,startProc,clrV,persistLinkPipelinePrefs,ldLinkPipelinePrefs,openOut,copyOutPath,saveServerOutPath,configureOutputFolder,onOutDirNative,shortLink,clampTaskText,histStatusLabel,taskShowProgress,taskCardLinkUrl,taskCardStatusText,taskCardStatusColor,histPipelineSteps,histFailedStageLabel,histResumeHint,copyHistLink,detectPlatform,taskContentKind,taskRouteLabel,taskRouteTagClass,taskCardLinkTitle,taskCardHeadTitle,taskCardPureTitle,taskCardSubTitle,taskCardMetricsLine,taskFeishuHint,taskCardDocSubTitle,taskCoverUrl,onTaskCoverError,histTaskTitle,histTaskSubTitle,histStatusStyle,taskHasMd,taskHasHtml,taskHtmlReady,taskHtmlPending,taskHtmlClickTitle,histHasMd,histHasHtml,openTaskMd,openTaskHtml,openTaskHtmlExplorer,openTaskArtifactsLocation,openArtifactModalExplorer,openHistMd,openHistHtml,openHistHtmlExplorer,openLocalOutput,copyArtifactItem,selectQueueTask,onLogFocusChange,moveQueueTask,cancelQueueTask,cleanupQueueTasks,taskQueueFmtTime,clampImportance,taskImportancePct,taskImportanceColor,taskImportanceBg,queueCardBorderStyle,updateQueueImportance,saveQueueTaskMeta,queueTaskHasNote,isQueueTaskNoteOpen,toggleQueueTaskNote,closeQueueTaskNoteEdit,getQueueNoteDraft,setQueueNoteDraft,queueTaskNoteBtnClass,queueTaskNoteBtnTitle,taskCardExtractedKeywordsLine,taskCardMetaRows,linkMetaSchema,linkMetaCardDisplayEnabled,LINK_META_FIELDS_EXAMPLE,saveLinkMetaSettings,resetLinkMetaFieldsExample,refreshLinkMetaFieldsEdit,linkApplyKbMetaSchema,taskShowReadBadge,taskIsUnread,taskReadCount,taskReadLabel,markQueueTaskRead,onQueueReadBadgeClick,onQueueReadBadgeContext,openQueueReadHistory,closeQueueReadHistory,formatReadHistTime,queueReadHistModal,taskCardStatusInline,taskCardStatusExtra,cancelQueueTaskNoteEdit,deleteQueueTask,queueBatchMode,toggleQueueBatchMode,exitQueueBatchMode,onQueueCardClick,isQueueBatchSelected,toggleQueueBatchSel,queueBatchSelCount,queueBatchSelAllChecked,toggleQueueBatchSelAll,batchDeleteQueueTasks,onTaskHtmlClick,
+  favDetail,favDetailCard,openFavDetail,closeFavDetail,toggleFavDetailFullscreen,openFavTaskFromDetail,favDetailDisplay,favFormatCount,favCardPublishedText,
   showHist,openHistPanel,ht,hs,ldHist,filteredHistTasks,restartTask,stopTask,moveTask,deleteTask,clearCompleted,regenerateHtml,
   histTaskId,histShowReadBadge,histTaskIsUnread,histTaskReadLabel,markHistTaskRead,onHistReadBadgeClick,onHistReadBadgeContext,
   histLogPanel,openHistLogs,closeHistLogPanel,histLogSourceLabel,

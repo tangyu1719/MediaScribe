@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>SuperBizAgent Web</title>
-<link rel="stylesheet" href="/assets/css/app.css?v=67">
+<link rel="stylesheet" href="/assets/css/app.css?v=68">
 <link rel="stylesheet" href="/assets/css/mobile-shell.css?v=4">
 <link rel="preload" href="/vendor/vue.global.prod.js" as="script">
-<link rel="preload" href="/assets/js/app.js?v=146" as="script">
+<link rel="preload" href="/assets/js/app.js?v=147" as="script">
 <!-- 脚本放 head+defer：在解析 370KB 模板期间并行下载，避免脚本堵在 </body> 末尾 -->
 <script src="/assets/js/auth.js?v=8"></script>
 <script>
@@ -23,7 +23,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
 })();
 </script>
 <script src="/vendor/vue.global.prod.js" defer></script>
-<script src="/assets/js/app.js?v=146" defer></script>
+<script src="/assets/js/app.js?v=147" defer></script>
 <script src="/vendor/marked.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/vendor/mermaid.min.js" defer></script>
@@ -1041,7 +1041,7 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
       </div>
       <div class="glass" style="margin-top:10px">
         <div class="st" style="margin-bottom:8px"><div class="ico"><svg class="ic ic-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></div>收藏内容卡片</div>
-        <p style="font-size:11px;color:var(--t3);margin-bottom:8px">序号：<strong>收藏#N</strong>=小红书收藏夹顺序；<strong>页内#N</strong>=当前分页内顺序（按入库时间）。点击卡片跳转链接页任务卡。</p>
+        <p style="font-size:11px;color:var(--t3);margin-bottom:8px">序号：<strong>收藏#N</strong>=小红书收藏夹顺序；<strong>页内#N</strong>=当前分页内顺序（按入库时间）。点击卡片或「详情」在右侧查看完整字段。</p>
         <div class="fr" style="flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center">
           <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='grid'}" @click="setSubLinkViewMode('grid')">卡片铺开</button>
           <button type="button" class="btn btn-o btn-xs" :class="{on:subLinkPaging.view==='row'}" @click="setSubLinkViewMode('row')">一行显示</button>
@@ -1053,45 +1053,118 @@ if (window.AuthManager && AuthManager.router && AuthManager.router.init) {
           <span style="font-size:11px;color:var(--t3)">{{subLinkPaging.page}} / {{Math.max(1,Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20)))}} · 共 {{subLinkPaging.total||0}}</span>
           <button type="button" class="btn btn-o btn-xs" :disabled="subLinkPaging.page>=Math.ceil((subLinkPaging.total||0)/(subLinkPaging.page_size||20))" @click="subLinkPageNext">下一页</button>
         </div>
-        <div v-if="favSyncReport.loading||subLinkPaging.loading" class="rss-empty">加载收藏卡片…</div>
-        <div v-else :class="subLinkPaging.view==='row'?'sub-link-rows':'q-grid fav-card-grid'">
-          <div v-for="c in favCards" :key="c.url_hash||c.note_id||c.seq" class="q-card fav-card sub-link-card" :class="favCardClass(c)" @click="openSubscriptionLinkTask(c)">
-            <div v-if="c.seq" class="fav-card-seq" :title="favCardSeqTitle(c)">{{favCardSeqText(c)}}</div>
-            <div class="fav-note-layout">
-              <figure v-if="c.cover_url" class="fav-note-cover-wrap">
-                <img :src="c.cover_url" :alt="(c.title||'收藏笔记')+'封面'" loading="lazy" referrerpolicy="no-referrer" @error="onFavCoverError"/>
-              </figure>
-              <div class="fav-note-content">
-                <div class="qt">
-                  <span class="q-title-main">{{c.title||c.note_id||'未命名'}}</span>
-                  <span class="q-platform">· {{c.content_type==='video'?'视频':'图文'}}</span>
+        <div class="fav-library-layout" :class="{'fav-library-layout--with-detail':favDetail.open}">
+          <div class="fav-library-list">
+            <div v-if="favSyncReport.loading||subLinkPaging.loading" class="rss-empty">加载收藏卡片…</div>
+            <div v-else :class="subLinkPaging.view==='row'?'sub-link-rows':'q-grid fav-card-grid'">
+              <article v-for="c in favCards" :key="c.url_hash||c.note_id||c.seq" class="q-card fav-card sub-link-card" :class="[favCardClass(c),{'is-selected':favDetail.open&&favDetailCard.note_id===c.note_id}]" @click="openFavDetail(c)">
+                <div v-if="c.seq" class="fav-card-seq" :title="favCardSeqTitle(c)">{{favCardSeqText(c)}}</div>
+                <div class="fav-note-layout">
+                  <figure v-if="c.cover_url" class="fav-note-cover-wrap">
+                    <img :src="c.cover_url" :alt="(c.title||'收藏笔记')+'封面'" loading="lazy" referrerpolicy="no-referrer" @error="onFavCoverError"/>
+                  </figure>
+                  <div class="fav-note-content">
+                    <div class="qt">
+                      <span class="q-title-main">{{c.title||c.note_id||'未命名'}}</span>
+                      <span class="q-platform">· {{c.content_type==='video'?'视频':'图文'}}</span>
+                    </div>
+                    <div v-if="c.author_name||c.author_id" class="fav-note-author">
+                      <span class="fav-author-avatar">{{upAvatarText({author_name:c.author_name})}}</span>
+                      <span class="fav-note-author-name">{{c.author_name||c.author_id}}</span>
+                    </div>
+                    <div class="fav-card-summary-actions">
+                      <span class="fav-card-summary-status" :style="{color:favCardStatusColor(c)}">{{favCardStatusText(c)}}</span>
+                      <button type="button" class="btn btn-p btn-xs fav-card-detail-btn" @click.stop="openFavDetail(c)">详情</button>
+                    </div>
+                  </div>
                 </div>
-                <div v-if="c.author_name||c.author_id" class="fav-note-author">
-                  <span class="fav-author-avatar">{{upAvatarText({author_name:c.author_name})}}</span>
-                  <span class="fav-note-author-name">{{c.author_name||c.author_id}}</span>
-                  <span v-if="favCardFollowersText(c)" class="fav-note-author-followers">{{favCardFollowersText(c)}}</span>
-                </div>
-                <div v-if="favCardMetaLine(c)" class="fav-note-meta-line">{{favCardMetaLine(c)}}</div>
-                <div v-if="favCardKeywords(c).length" class="fav-note-tags" :title="favCardKeywordsLine(c)">
-                  <span v-for="tag in favCardKeywords(c)" :key="tag" class="fav-note-tag">#{{tag}}</span>
-                </div>
-                <div v-if="favCardCollectedText(c)||favCardSourceText(c)" class="fav-note-origin">
-                  <span v-if="favCardCollectedText(c)">{{favCardCollectedText(c)}}</span>
-                  <span v-if="favCardSourceText(c)" class="fav-note-source-badge" :class="favCardSourceClass(c)" :title="c.fetch_source||''">{{favCardSourceText(c)}}</span>
-                </div>
-                <div v-if="c.task_note" class="q-subtitle">备注：{{c.task_note}}</div>
-                <div class="qs"><span :style="{color:favCardStatusColor(c)}">{{favCardStatusText(c)}}</span></div>
-                <a v-if="c.canonical_url" :href="c.canonical_url" target="_blank" rel="noopener noreferrer" class="q-link" @click.stop>{{shortLink(c.canonical_url,56)}}</a>
-                <div class="q-artifacts" @click.stop>
-                  <button type="button" class="btn btn-xs btn-artifact" :class="linkCardHasMd(c)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!linkCardHasMd(c)" title="新标签页打开 MD 编辑/预览" @click.stop="openLinkCardMd(c)">MD</button>
-                  <button type="button" class="btn btn-xs btn-artifact" :class="linkCardHasHtml(c)?'btn-artifact-ready':'btn-artifact-off'" :title="taskHtmlClickTitle(linkCardAsTask(c))" @click.stop="onLinkCardHtmlClick(c)">HTML</button>
-                  <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(c.feishu_status)" :disabled="c.feishu_status!=='ready'" @click.stop="openLinkCardFeishu(c)">{{subLinkArtifactLabel('飞书',c.feishu_status)}}</button>
-                </div>
-                <p v-if="c.error_message" class="fav-card-err">{{c.error_message}}</p>
-              </div>
+              </article>
+              <div v-if="!favCards.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">暂无收藏卡片。点「同步」按发布时间连续性拉取并分析。</div>
             </div>
           </div>
-          <div v-if="!favCards.length" style="grid-column:1/-1;font-size:12px;color:var(--t3)">暂无收藏卡片。点「同步」按发布时间连续性拉取并分析。</div>
+
+          <div v-if="favDetail.open&&favDetail.fullscreen" class="fav-detail-backdrop" @click="toggleFavDetailFullscreen"></div>
+          <aside v-if="favDetail.open" class="fav-detail-panel" :class="{'fav-detail-panel--fullscreen':favDetail.fullscreen}" aria-label="收藏详情">
+            <header class="fav-detail-head">
+              <div class="fav-detail-head-main">
+                <span class="fav-detail-eyebrow">{{favCardSeqText(favDetailCard)||'收藏详情'}}</span>
+                <h3>{{favDetailCard.title||favDetailCard.note_id||'未命名收藏'}}</h3>
+                <div class="fav-detail-head-meta">
+                  <span>{{favDetailCard.content_type==='video'?'视频':'图文'}}</span>
+                  <span :style="{color:favCardStatusColor(favDetailCard)}">{{favCardStatusText(favDetailCard)}}</span>
+                  <span v-if="favCardSourceText(favDetailCard)" class="fav-note-source-badge" :class="favCardSourceClass(favDetailCard)">{{favCardSourceText(favDetailCard)}}</span>
+                </div>
+              </div>
+              <div class="fav-detail-head-actions">
+                <button type="button" class="btn btn-o btn-xs" @click="toggleFavDetailFullscreen">{{favDetail.fullscreen?'收起':'全屏'}}</button>
+                <button type="button" class="btn btn-d btn-xs" @click="closeFavDetail">关闭</button>
+              </div>
+            </header>
+
+            <div class="fav-detail-body">
+              <figure v-if="favDetailCard.cover_url" class="fav-detail-cover">
+                <img :src="favDetailCard.cover_url" :alt="(favDetailCard.title||'收藏笔记')+'封面'" referrerpolicy="no-referrer" @error="onFavCoverError"/>
+              </figure>
+
+              <section class="fav-detail-section">
+                <h4>作者</h4>
+                <div class="fav-detail-author">
+                  <span class="fav-author-avatar fav-detail-avatar">{{upAvatarText({author_name:favDetailCard.author_name})}}</span>
+                  <div>
+                    <strong>{{favDetailCard.author_name||favDetailCard.author_id||'暂无作者信息'}}</strong>
+                    <p v-if="favDetailCard.author_id">作者 ID：{{favDetailCard.author_id}}</p>
+                    <p>{{favCardFollowersText(favDetailCard)||'粉丝数暂无'}}</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="fav-detail-section">
+                <h4>互动与时间</h4>
+                <div class="fav-detail-metrics">
+                  <div><span>点赞</span><strong>{{favDetailCard.like_count!=null?favFormatCount(favDetailCard.like_count):'暂无'}}</strong></div>
+                  <div><span>评论</span><strong>{{favDetailCard.comment_count!=null?favFormatCount(favDetailCard.comment_count):'暂无'}}</strong></div>
+                  <div><span>发布时间</span><strong>{{favDetailCard.published_date||(favDetailCard.published_at?subFmtTime(favDetailCard.published_at):'暂无')}}</strong></div>
+                  <div><span>收藏时间</span><strong>{{favDetailCard.collected_at?subFmtTime(favDetailCard.collected_at):'暂无'}}</strong></div>
+                </div>
+                <p class="fav-detail-note">当前数据源保存评论数量；评论正文尚未入库时不会虚构展示。</p>
+              </section>
+
+              <section v-if="favCardKeywords(favDetailCard).length" class="fav-detail-section">
+                <h4>标签</h4>
+                <div class="fav-note-tags fav-detail-tags">
+                  <span v-for="tag in favCardKeywords(favDetailCard)" :key="tag" class="fav-note-tag">#{{tag}}</span>
+                </div>
+              </section>
+
+              <section class="fav-detail-section">
+                <h4>采集与任务字段</h4>
+                <dl class="fav-detail-fields">
+                  <div><dt>笔记 ID</dt><dd>{{favDetailDisplay(favDetailCard.note_id)}}</dd></div>
+                  <div><dt>采集来源</dt><dd>{{favCardSourceText(favDetailCard)||'暂无'}}<small v-if="favDetailCard.fetch_source">{{favDetailCard.fetch_source}}</small></dd></div>
+                  <div><dt>分析状态</dt><dd>{{favDetailDisplay(favDetailCard.analysis_status||favDetailCard.task_status)}}</dd></div>
+                  <div><dt>任务 ID</dt><dd>{{favDetailDisplay(favDetailCard.task_id||favDetailCard.analysis_task_id)}}</dd></div>
+                  <div><dt>MD 产物</dt><dd>{{subLinkArtifactLabel('MD',favDetailCard.md_status)}}</dd></div>
+                  <div><dt>HTML 产物</dt><dd>{{subLinkArtifactLabel('HTML',favDetailCard.html_status)}}</dd></div>
+                  <div><dt>飞书产物</dt><dd>{{subLinkArtifactLabel('飞书',favDetailCard.feishu_status)}}</dd></div>
+                </dl>
+                <p v-if="favDetailCard.task_note" class="fav-detail-task-note">备注：{{favDetailCard.task_note}}</p>
+                <p v-if="favDetailCard.error_message" class="fav-card-err">{{favDetailCard.error_message}}</p>
+              </section>
+
+              <section v-if="favDetailCard.canonical_url" class="fav-detail-section">
+                <h4>原文链接</h4>
+                <a :href="favDetailCard.canonical_url" target="_blank" rel="noopener noreferrer" class="fav-detail-url">{{favDetailCard.canonical_url}}</a>
+              </section>
+            </div>
+
+            <footer class="fav-detail-actions">
+              <a v-if="favDetailCard.canonical_url" :href="favDetailCard.canonical_url" target="_blank" rel="noopener noreferrer" class="btn btn-o btn-xs">打开原文</a>
+              <button type="button" class="btn btn-p btn-xs" @click="openFavTaskFromDetail">任务详情</button>
+              <button type="button" class="btn btn-xs btn-artifact" :class="linkCardHasMd(favDetailCard)?'btn-artifact-ready':'btn-artifact-off'" :disabled="!linkCardHasMd(favDetailCard)" @click="openLinkCardMd(favDetailCard)">MD</button>
+              <button type="button" class="btn btn-xs btn-artifact" :class="linkCardHasHtml(favDetailCard)?'btn-artifact-ready':'btn-artifact-off'" @click="onLinkCardHtmlClick(favDetailCard)">HTML</button>
+              <button type="button" class="btn btn-xs btn-artifact" :class="subLinkArtifactClass(favDetailCard.feishu_status)" :disabled="favDetailCard.feishu_status!=='ready'" @click="openLinkCardFeishu(favDetailCard)">飞书</button>
+            </footer>
+          </aside>
         </div>
       </div>
       <div v-if="favSyncReport.hasRun" class="glass" style="margin-top:10px">
