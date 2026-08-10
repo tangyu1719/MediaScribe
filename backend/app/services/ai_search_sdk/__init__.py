@@ -59,6 +59,16 @@ from .types import (
     SearchQuery,
     SearchResponse,
 )
+from .structured_query import (
+    FieldFilter,
+    FormField,
+    FormSchema,
+    FormSchemaCache,
+    SafeSqlCompiler,
+    StructuredQueryPlan,
+    StructuredQueryPlanner,
+    fields_from_sqlite,
+)
 
 # 向后兼容引擎别名
 AiSearchEngine = __import__(
@@ -74,6 +84,14 @@ __all__ = [
     "SearchQuery",
     "SearchResponse",
     "SearchHit",
+    "FieldFilter",
+    "FormField",
+    "FormSchema",
+    "FormSchemaCache",
+    "SafeSqlCompiler",
+    "StructuredQueryPlan",
+    "StructuredQueryPlanner",
+    "fields_from_sqlite",
     # 索引注册
     "IndexRegistry",
     "mount_default_indices",
